@@ -23,9 +23,7 @@ from botocore.exceptions import ClientError
 from pypdf import PdfReader, PdfWriter
 from pdf2image import convert_from_path
 
-PCLOUD_CODE = os.environ.get(
-    "PCLOUD_CODE", "kZ33ft5ZhzouJsz9MekhHYtTSAQNo7gNLsgk"
-)
+PCLOUD_CODE = os.environ["PCLOUD_CODE"]  # the pCloud public-link share code
 PCLOUD_HOSTS = ["api.pcloud.com", "eapi.pcloud.com"]
 
 B2_ENDPOINT = os.environ["B2_ENDPOINT"]  # e.g. https://s3.us-west-004.backblazeb2.com

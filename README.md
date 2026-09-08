@@ -102,6 +102,11 @@ approval before any secret is exposed:
    | `B2_ENDPOINT` | The bucket's B2 S3-compatible endpoint, e.g. `https://s3.us-west-004.backblazeb2.com` (find it on the bucket's details page) |
    | `B2_KEY_ID` / `B2_APPLICATION_KEY` | A B2 application key scoped to the destination bucket (Account → App Keys) |
    | `B2_BUCKET_NAME` | Destination B2 bucket |
+4. Set the pCloud share link's code as a **repository variable** named `PCLOUD_CODE`
+   (Settings → Secrets and variables → Actions → *Variables* tab — not *Secrets*, since it's
+   just the public share-link identifier, not a credential). The script reads it from the
+   `PCLOUD_CODE` environment variable and fails fast if it isn't set, so the source link is
+   explicit and changeable without editing code.
 
 ## Source
 

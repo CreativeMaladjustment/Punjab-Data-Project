@@ -25,7 +25,7 @@ viewer that opens every record's source page image.
 | `pipeline/data/<quarter>/extractions/` | The verbatim record layer: one JSON per catalog page, the catalog's own words preserved (misprints, editorializing and all) |
 | `pipeline/data/<quarter>/out/` | Derived open data: `entries.csv`, `adjudication_queue.csv`, `validation_report.md` |
 | `pipeline/data/<quarter>/marginalia_*.md` | Documentation of the handwritten verso indexes found in the bound volumes |
-| `scripts/process_pcloud.py`, `.github/workflows/process-pdfs.yml` | On-demand pipeline: pCloud source PDFs → single-page PDFs + LLM-vision-ready images → Cloudflare R2 (see below) |
+| `scripts/process_pcloud.py`, `.github/workflows/process-pdfs.yml` | On-demand pipeline: pCloud source PDFs → single-page PDFs + LLM-vision-ready images → Backblaze B2 (see below) |
 | `analysis/slice_1910/` | Analysis over the corpus: `build_network.py`, `script_market.py`, `build_site.py` (regenerates `docs/index.html`) |
 | `analysis/ocr_lab/` | The native-script workstream: legibility measurements (`E0B_RESULTS.md`), localization results, and `REIMAGING_PILOT.md` — the 21-page experiment that decides whether re-imaging the volumes is worth buying |
 | `analysis/integrity/` | Sweeps testing whether the stored record matches its own specification (`INTEGRITY_SWEEP.md`) |
@@ -74,24 +74,25 @@ cp out/explore_1910_1912.html ../../docs/index.html
 python build_site.py                         # local build (with PDF deep-links)
 ```
 
-## pCloud → R2 scan pipeline
+## pCloud → B2 scan pipeline
 
 `scripts/process_pcloud.py`, run on demand via the `.github/workflows/process-pdfs.yml`
 GitHub Actions workflow, pulls the source volume PDFs from a public pCloud folder, splits
 each into single-page PDFs, renders each page as a 200 DPI WebP image for LLM vision input,
-and uploads both to a Cloudflare R2 bucket. R2 itself is the resumability ledger: every page
-PDF, page image, and per-PDF `processed/.../<stem>.done` marker is checked against the bucket
-before being redone, so a run that hits the 5-hour GitHub Actions runner ceiling exits `42`
-and the workflow re-dispatches itself to continue from where it stopped.
+and uploads both to a Backblaze B2 bucket (via B2's S3-compatible API). B2 itself is the
+resumability ledger: every page PDF, page image, and per-PDF `processed/.../<stem>.done`
+marker is checked against the bucket before being redone, so a run that hits the 5-hour
+GitHub Actions runner ceiling exits `42` and the workflow re-dispatches itself to continue
+from where it stopped.
 
 To run the workflow, configure these repository secrets (Settings → Secrets and variables →
 Actions):
 
 | Secret | Purpose |
 |---|---|
-| `CF_ACCOUNT_ID` | Cloudflare account ID (used to build the R2 S3-compatible endpoint) |
-| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | R2 API token credentials |
-| `R2_BUCKET_NAME` | Destination R2 bucket |
+| `B2_ENDPOINT` | The bucket's B2 S3-compatible endpoint, e.g. `https://s3.us-west-004.backblazeb2.com` (find it on the bucket's details page) |
+| `B2_KEY_ID` / `B2_APPLICATION_KEY` | A B2 application key scoped to the destination bucket (Account → App Keys) |
+| `B2_BUCKET_NAME` | Destination B2 bucket |
 | `GH_WORKFLOW_PAT` | A GitHub personal access token used to re-trigger this same workflow when the runtime guard trips. Needs the fine-grained **Actions: read and write** permission on this repository (or `repo` + `workflow` scope on a classic PAT); the default `GITHUB_TOKEN` cannot dispatch workflow runs. |
 
 ## Source

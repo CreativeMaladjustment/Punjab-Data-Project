@@ -51,18 +51,14 @@ jobs:
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
 
-      - name: Re-dispatch this workflow to resume (runtime guard tripped)
+      - name: Flag runtime guard trip for manual resume
         if: steps.run.outputs.exit_code == '42'
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GH_WORKFLOW_PAT }}
-          script: |
-            await github.rest.actions.createWorkflowDispatch({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              workflow_id: 'process-pdfs.yml',
-              ref: context.ref,
-            });
+        run: |
+          echo "### ⏱️ Runtime guard tripped — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The pipeline stopped after ~5 hours to stay under the runner limit. Already-uploaded pages and .done markers in B2 mean the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** re-run this workflow (Actions → Process pCloud PDFs to B2 → Run workflow) to continue processing." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail job on unexpected script error
         if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42'

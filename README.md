@@ -82,8 +82,9 @@ each into single-page PDFs, renders each page as a 200 DPI WebP image for LLM vi
 and uploads both to a Backblaze B2 bucket (via B2's S3-compatible API). B2 itself is the
 resumability ledger: every page PDF, page image, and per-PDF `processed/.../<stem>.done`
 marker is checked against the bucket before being redone, so a run that hits the 5-hour
-GitHub Actions runner ceiling exits `42` and the workflow re-dispatches itself to continue
-from where it stopped.
+GitHub Actions runner ceiling exits `42`, flags this in the run's job summary, and stops —
+a human re-runs the workflow (Actions → *Process pCloud PDFs to B2* → **Run workflow**) to
+pick up where it left off; nothing needs re-checking or re-configuring first.
 
 The job runs against a GitHub **environment** named `b2-upload` (Settings → Environments →
 New environment) rather than plain repository secrets, so a run can be gated behind manual
@@ -101,13 +102,6 @@ approval before any secret is exposed:
    | `B2_ENDPOINT` | The bucket's B2 S3-compatible endpoint, e.g. `https://s3.us-west-004.backblazeb2.com` (find it on the bucket's details page) |
    | `B2_KEY_ID` / `B2_APPLICATION_KEY` | A B2 application key scoped to the destination bucket (Account → App Keys) |
    | `B2_BUCKET_NAME` | Destination B2 bucket |
-   | `GH_WORKFLOW_PAT` | A GitHub personal access token used to re-trigger this same workflow when the runtime guard trips. Needs the fine-grained **Actions: read and write** permission on this repository (or `repo` + `workflow` scope on a classic PAT); the default `GITHUB_TOKEN` cannot dispatch workflow runs. |
-
-**Trade-off to know about:** because the re-dispatched run (triggered when the 5-hour runtime
-guard trips) is a fresh run of the same job, it goes through the same `b2-upload` environment
-gate — so with required reviewers configured, *every* resumption also needs a manual approval,
-not just the first run. If you want the resume hop to run unattended, don't add required
-reviewers (the environment then just scopes the secrets, without gating).
 
 ## Source
 

@@ -108,6 +108,30 @@ approval before any secret is exposed:
    `PCLOUD_CODE` environment variable and fails fast if it isn't set, so the source link is
    explicit and changeable without editing code.
 
+## Security scanning
+
+`.github/workflows/security-scans.yml` runs on every pull request against `main`, weekly
+(Mondays), and on demand — all with free/open-source tools, no paid service or license:
+
+| Job | Tool | Checks |
+|---|---|---|
+| CodeQL | [`github/codeql-action`](https://github.com/github/codeql-action) | Python SAST (free for public repos) |
+| Bandit + Semgrep | `bandit`, `semgrep` | Python-specific and general-purpose SAST (`p/security-audit`, `p/secrets`, `p/owasp-top-ten` rulesets) |
+| Gitleaks | [`gitleaks`](https://github.com/gitleaks/gitleaks) | Secret scanning across the working tree |
+| pip-audit | [`pip-audit`](https://github.com/pypa/pip-audit) | Known CVEs in `scripts/requirements.txt` |
+| ZAP baseline | [OWASP ZAP](https://www.zaproxy.org/) | Passive DAST against the live explorer |
+
+Findings from the SARIF-emitting scanners (CodeQL, Bandit, Semgrep, Gitleaks) land in the
+repo's **Security → Code scanning alerts** tab; pip-audit's output goes to the run's job
+summary. None of these jobs currently block merges — they're wired up to build visibility
+first — so tighten branch protection around them once the initial signal has been triaged.
+
+**DAST caveat:** this repo's only deployed surface is the static GitHub Pages explorer
+(`docs/`) — there's no backend/API and no per-PR preview deployment. The ZAP baseline job
+always scans the live production URL, so a PR run is a drift/regression check against
+production, not a test of that PR's own changes. If preview deployments are added later,
+point the `target` input at the preview URL for PR runs instead.
+
 ## Source
 
 *Catalogue of Books registered in the Punjab under Act XXV of 1867 and Act X of 1890*,

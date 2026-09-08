@@ -1,0 +1,5 @@
+boto3
+requests
+pypdf
+pdf2image
+pillow

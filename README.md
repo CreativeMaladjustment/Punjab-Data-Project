@@ -85,15 +85,29 @@ marker is checked against the bucket before being redone, so a run that hits the
 GitHub Actions runner ceiling exits `42` and the workflow re-dispatches itself to continue
 from where it stopped.
 
-To run the workflow, configure these repository secrets (Settings → Secrets and variables →
-Actions):
+The job runs against a GitHub **environment** named `b2-upload` (Settings → Environments →
+New environment) rather than plain repository secrets, so a run can be gated behind manual
+approval before any secret is exposed:
 
-| Secret | Purpose |
-|---|---|
-| `B2_ENDPOINT` | The bucket's B2 S3-compatible endpoint, e.g. `https://s3.us-west-004.backblazeb2.com` (find it on the bucket's details page) |
-| `B2_KEY_ID` / `B2_APPLICATION_KEY` | A B2 application key scoped to the destination bucket (Account → App Keys) |
-| `B2_BUCKET_NAME` | Destination B2 bucket |
-| `GH_WORKFLOW_PAT` | A GitHub personal access token used to re-trigger this same workflow when the runtime guard trips. Needs the fine-grained **Actions: read and write** permission on this repository (or `repo` + `workflow` scope on a classic PAT); the default `GITHUB_TOKEN` cannot dispatch workflow runs. |
+1. Create the `b2-upload` environment (rename it in `.github/workflows/process-pdfs.yml`'s
+   `environment:` key if you'd rather call it something else).
+2. Add **Required reviewers** under that environment's protection rules — every run of this
+   workflow will then pause at "Waiting for review" until one of the listed reviewers
+   approves it, before the job (and its secrets) starts.
+3. Add these secrets to the *environment* (not the repository's plain Actions secrets):
+
+   | Secret | Purpose |
+   |---|---|
+   | `B2_ENDPOINT` | The bucket's B2 S3-compatible endpoint, e.g. `https://s3.us-west-004.backblazeb2.com` (find it on the bucket's details page) |
+   | `B2_KEY_ID` / `B2_APPLICATION_KEY` | A B2 application key scoped to the destination bucket (Account → App Keys) |
+   | `B2_BUCKET_NAME` | Destination B2 bucket |
+   | `GH_WORKFLOW_PAT` | A GitHub personal access token used to re-trigger this same workflow when the runtime guard trips. Needs the fine-grained **Actions: read and write** permission on this repository (or `repo` + `workflow` scope on a classic PAT); the default `GITHUB_TOKEN` cannot dispatch workflow runs. |
+
+**Trade-off to know about:** because the re-dispatched run (triggered when the 5-hour runtime
+guard trips) is a fresh run of the same job, it goes through the same `b2-upload` environment
+gate — so with required reviewers configured, *every* resumption also needs a manual approval,
+not just the first run. If you want the resume hop to run unattended, don't add required
+reviewers (the environment then just scopes the secrets, without gating).
 
 ## Source
 

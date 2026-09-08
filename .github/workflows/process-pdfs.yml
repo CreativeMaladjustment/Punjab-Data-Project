@@ -21,7 +21,7 @@ jobs:
           df -h
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -29,9 +29,9 @@ jobs:
           sudo apt-get install -y --no-install-recommends poppler-utils
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: "3.x"
           cache: pip
           cache-dependency-path: scripts/requirements.txt
 

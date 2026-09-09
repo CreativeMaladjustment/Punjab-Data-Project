@@ -70,24 +70,43 @@ def pcloud_get(path, params):
     raise RuntimeError(f"pCloud API request failed on all hosts: {last_error}")
 
 
+MAX_FOLDER_DEPTH = 50
+
+
 def list_pdfs_recursive(code):
     """Walk the public link's folder tree and return every PDF found.
 
     Each entry is {"fileid": int, "name": str, "folder": str} where "folder"
     is the "/"-joined path of subfolder names the file lives under (relative
     to the shared link's root).
+
+    Requests the tree with recursive=1 so pCloud embeds each subfolder's
+    contents inline in one response. Falls back to a per-folder showpublink
+    call (folderid=...) only for a folder that comes back without embedded
+    contents — tracking visited folder ids and capping depth so a folderid
+    the public-link API doesn't actually scope (it may just re-return the
+    root every time) can't recurse forever instead of erroring clearly.
     """
     pdfs = []
+    visited_folderids = set()
 
-    def walk(folderid, folder_path):
-        params = {"code": code}
-        if folderid is not None:
-            params["folderid"] = folderid
-        data = pcloud_get("showpublink", params)
-        for entry in data["metadata"].get("contents", []):
+    def walk(entries, folder_path, depth):
+        if depth > MAX_FOLDER_DEPTH:
+            raise RuntimeError(
+                f"pCloud folder tree exceeded max depth at {'/'.join(folder_path)!r}"
+            )
+        for entry in entries:
             if entry.get("isfolder"):
                 sub_path = folder_path + [entry["name"]]
-                walk(entry["folderid"], sub_path)
+                if "contents" in entry:
+                    walk(entry["contents"], sub_path, depth + 1)
+                    continue
+                folderid = entry["folderid"]
+                if folderid in visited_folderids:
+                    continue
+                visited_folderids.add(folderid)
+                data = pcloud_get("showpublink", {"code": code, "folderid": folderid})
+                walk(data["metadata"].get("contents", []), sub_path, depth + 1)
             elif entry["name"].lower().endswith(".pdf"):
                 pdfs.append(
                     {
@@ -97,7 +116,8 @@ def list_pdfs_recursive(code):
                     }
                 )
 
-    walk(None, [])
+    root = pcloud_get("showpublink", {"code": code, "recursive": 1})
+    walk(root["metadata"].get("contents", []), [], 0)
     return pdfs
 
 

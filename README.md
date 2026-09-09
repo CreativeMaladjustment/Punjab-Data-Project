@@ -29,6 +29,7 @@ viewer that opens every record's source page image.
 | `scripts/extract_with_llm.py`, `.github/workflows/extract-pages.yml` | On-demand pipeline: B2 page images → catalogue entries via a local vision LLM (Ollama, on-runner) → Postgres (see below) |
 | `scripts/migrate_b2_state_to_db.py`, `.github/workflows/migrate-b2-state.yml` | One-time backfill: existing B2 `.done` markers/extraction JSON → Postgres rows, old markers deleted (see below) |
 | `scripts/audit_b2_pages.py`, `.github/workflows/audit-b2-pages.yml` | Read-only audit: B2 page images vs. `pages` rows, cross-account duplicates (see below) |
+| `scripts/resolve_duplicate_pages.py`, `.github/workflows/resolve-duplicate-pages.yml` | Fixes what the audit finds as duplicates: repoints `pages` to account 1 and deletes the account-2 copy (see below) |
 | `supabase/migrations/` | Postgres schema for the above: `pcloud_files`, `pages`, `llm_extractions`, `catalogue_entries` (see below) |
 | `analysis/slice_1910/` | Analysis over the corpus: `build_network.py`, `script_market.py`, `build_site.py` (regenerates `docs/index.html`) |
 | `analysis/ocr_lab/` | The native-script workstream: legibility measurements (`E0B_RESULTS.md`), localization results, and `REIMAGING_PILOT.md` — the 21-page experiment that decides whether re-imaging the volumes is worth buying |
@@ -250,6 +251,16 @@ at a different account/bucket/key than where the image actually is (a stale reco
 page whose image was uploaded to more than one B2 account (most likely from switching
 `B2_ACTIVE_ACCOUNT` without `process_pcloud.py` knowing the other account already had that
 page). Exits non-zero if it finds anything, so the workflow run visibly flags a problem.
+
+**Resolving duplicates**: `.github/workflows/resolve-duplicate-pages.yml` runs
+`scripts/resolve_duplicate_pages.py` to fix the duplicate case the audit above only reports.
+Account 1 is treated as authoritative and is never touched: for every page whose image exists
+in both accounts, it repoints the `pages` row to account 1 (if it isn't already) and then
+deletes the redundant copy from account 2 -- freeing account 2's space for PDFs that haven't
+been processed yet. The `pages` row is always updated before the account-2 object is deleted,
+so an interrupted run never leaves a row pointing at a just-deleted object, and a page it can't
+map to a `pcloud_files`/`pages` row is skipped rather than acted on blindly. Defaults to a dry
+run; tick **Actually commit changes** on the workflow's dispatch form to actually commit.
 
 ## Security scanning
 

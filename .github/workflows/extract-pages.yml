@@ -8,9 +8,16 @@
 # listing (ollama.com/search?c=vision) — "cloud"-badged entries there are
 # Ollama-hosted-only and can't run locally, so they're excluded. glm-ocr is
 # included because it's purpose-built for document OCR, which is exactly
-# this task. Pick "all" to fan them out as a matrix run so you can compare
-# quality/speed across models; each model's output is namespaced separately
-# in B2 so runs never clobber each other.
+# this task. Default is minicpm-v4.5 (8B): the largest model in this
+# CPU-feasible set, and MiniCPM-V's line has a well-established track record
+# on OCR/document-understanding benchmarks combined with being a full
+# general-purpose model (so it should follow the 25-field schema more
+# reliably than a narrower or smaller model) — reasoned from published
+# model positioning, not benchmarked here, so treat the "all" bake-off below
+# as the real source of truth once you can eyeball actual output quality.
+# Pick "all" to fan them out as a matrix run so you can compare quality/speed
+# across models; each model's output is namespaced separately in B2 so runs
+# never clobber each other.
 #
 # Ollama's model library changes over time — if `ollama pull` fails for one
 # of these, check https://ollama.com/library for the current tag and update
@@ -23,7 +30,7 @@ on:
       model:
         description: "Ollama vision model to run (or 'all' to matrix every shortlisted model)"
         type: choice
-        default: minicpm-v4.6
+        default: minicpm-v4.5
         options:
           - minicpm-v4.6
           - qwen3-vl:2b

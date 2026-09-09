@@ -127,7 +127,13 @@ summary notice tells you to re-run it) rather than trying to finish in one run.
 vision models pulled from Ollama's current vision listing (`minicpm-v4.6`, `qwen3-vl:2b`,
 `qwen3-vl:4b`, `gemma4:e2b`, `glm-ocr`, `minicpm-v4.5`), or `all` to fan them out as a parallel
 matrix so you can bake off quality/speed across models on the same page images. `glm-ocr` is
-included because it's purpose-built for document OCR — exactly this task.
+included because it's purpose-built for document OCR — exactly this task. Default is
+**`minicpm-v4.5`** (8B): the largest model in this CPU-feasible set, and MiniCPM-V's line has a
+well-established OCR/document-understanding benchmark track record combined with being a full
+general-purpose model, so it should follow the 25-field schema more reliably than a narrower or
+smaller model — reasoned from published model positioning, not benchmarked against this
+project's actual pages, so treat an `all` bake-off as the real source of truth once you can
+eyeball output quality yourself.
 Each model's output is namespaced under `extractions/<model>/...` in B2, so different models'
 runs never clobber each other and can be compared side by side. Ollama's library can rename or
 drop model tags over time — if `ollama pull` fails for one of these, check

@@ -188,19 +188,23 @@ def flag_if_printed_page_missing(entry):
     return entry
 
 
-# pipeline/schema.md's entry field names. `flags` is the schema's only
-# array-valued field -- every other field is a scalar -- so a single entry
-# emitted flat (not wrapped in a list) that fills in `flags` (the system
-# prompt says to use it "aggressively") is otherwise indistinguishable by
-# value shape alone from a dict with one list-valued envelope key. Checking
-# against these known field names resolves that ambiguity instead of
-# guessing from types.
+# pipeline/schema.md's entry field names exactly -- not source_folder/
+# source_pdf, which process_pdf() sets on each entry itself *after*
+# extract_page() returns, so the model never sees or emits them; including
+# them here would recognize a shape the model can't actually produce,
+# weakening the disambiguation this set exists for. `flags` is the
+# schema's only array-valued field -- every other field is a scalar -- so
+# a single entry emitted flat (not wrapped in a list) that fills in
+# `flags` (the system prompt says to use it "aggressively") is otherwise
+# indistinguishable by value shape alone from a dict with one list-valued
+# envelope key. Checking against these known field names resolves that
+# ambiguity instead of guessing from types.
 ENTRY_FIELD_NAMES = {
     "quarter", "pdf_page", "printed_page", "section", "lang", "char", "topic",
     "serial", "reg", "copies", "printer_verbatim", "printer", "pcity", "author",
     "title", "title_native", "gloss", "pp_verbatim", "publisher", "pubcity",
     "date", "price", "edition", "format", "method", "educ", "copyright",
-    "notes", "marks", "flags", "source_folder", "source_pdf",
+    "notes", "marks", "flags",
 }
 
 
@@ -417,6 +421,8 @@ def process_pdf(conn, clients, folder, stem, pages):
                 entry.setdefault("source_pdf", stem)
                 entry["pdf_page"] = page_no - 1  # known exactly; don't trust the model's guess
                 flag_if_printed_page_missing(entry)
+            entries_json = json.dumps(entries)
+            print(f"    saving {len(entries)} entries for {context}: {entries_json[:500]!r}")
             db_save_extraction_success(conn, page_id, OLLAMA_MODEL, MODEL_TAG, entries)
         except Exception as exc:
             print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")

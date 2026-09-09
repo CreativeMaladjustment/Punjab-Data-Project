@@ -25,8 +25,10 @@ viewer that opens every record's source page image.
 | `pipeline/data/<quarter>/extractions/` | The verbatim record layer: one JSON per catalog page, the catalog's own words preserved (misprints, editorializing and all) |
 | `pipeline/data/<quarter>/out/` | Derived open data: `entries.csv`, `adjudication_queue.csv`, `validation_report.md` |
 | `pipeline/data/<quarter>/marginalia_*.md` | Documentation of the handwritten verso indexes found in the bound volumes |
-| `scripts/process_pcloud.py`, `.github/workflows/process-pdfs.yml` | On-demand pipeline: pCloud source PDFs → single-page PDFs + LLM-vision-ready images → Backblaze B2 (see below) |
-| `scripts/extract_with_llm.py`, `.github/workflows/extract-pages.yml` | On-demand pipeline: B2 page images → catalogue-entry JSON via a local vision LLM (Ollama, on-runner) → Backblaze B2 (see below) |
+| `scripts/process_pcloud.py`, `.github/workflows/process-pdfs.yml` | On-demand pipeline: pCloud source PDFs → LLM-vision-ready images (optionally single-page PDFs too) → Backblaze B2, status tracked in Postgres (see below) |
+| `scripts/extract_with_llm.py`, `.github/workflows/extract-pages.yml` | On-demand pipeline: B2 page images → catalogue entries via a local vision LLM (Ollama, on-runner) → Postgres (see below) |
+| `scripts/migrate_b2_state_to_db.py`, `.github/workflows/migrate-b2-state.yml` | One-time backfill: existing B2 `.done` markers/extraction JSON → Postgres rows, old markers deleted (see below) |
+| `supabase/migrations/` | Postgres schema for the above: `pcloud_files`, `pages`, `llm_extractions`, `catalogue_entries` (see below) |
 | `analysis/slice_1910/` | Analysis over the corpus: `build_network.py`, `script_market.py`, `build_site.py` (regenerates `docs/index.html`) |
 | `analysis/ocr_lab/` | The native-script workstream: legibility measurements (`E0B_RESULTS.md`), localization results, and `REIMAGING_PILOT.md` — the 21-page experiment that decides whether re-imaging the volumes is worth buying |
 | `analysis/integrity/` | Sweeps testing whether the stored record matches its own specification (`INTEGRITY_SWEEP.md`) |
@@ -81,12 +83,12 @@ python build_site.py                         # local build (with PDF deep-links)
 GitHub Actions workflow, pulls the source volume PDFs from a public pCloud folder, renders
 each page as a 200 DPI WebP image for LLM vision input, and uploads it to a Backblaze B2
 bucket (via B2's S3-compatible API) — the image is rendered directly from the source PDF, no
-intermediate per-page PDF needed. B2 itself is the resumability ledger: every page image and
-per-PDF `processed/.../<stem>.done` marker is checked against the bucket before being redone,
-so a run that hits the 5-hour GitHub Actions runner ceiling exits `42`, flags this in the
-run's job summary, and stops — a human re-runs the workflow (Actions → *Process pCloud PDFs
-to B2* → **Run workflow**) to pick up where it left off; nothing needs re-checking or
-re-configuring first.
+intermediate per-page PDF needed. **Postgres (Supabase) is the resumability ledger**, not B2:
+every page's upload is recorded as a row in the `pages` table (see "Processing database"
+below), checked before anything is redone, so a run that hits the 5-hour GitHub Actions runner
+ceiling exits `42`, flags this in the run's job summary, and stops — a human re-runs the
+workflow (Actions → *Process pCloud PDFs to B2* → **Run workflow**) to pick up where it left
+off; nothing needs re-checking or re-configuring first.
 
 A single-page PDF per page isn't currently used by anything downstream (only the WebP images
 feed the LLM extraction stage), so it's **not** split out or uploaded by default. Tick
@@ -110,6 +112,7 @@ approval before any secret is exposed:
    | `B2_ENDPOINT` | The bucket's B2 S3-compatible endpoint, e.g. `https://s3.us-west-004.backblazeb2.com` (find it on the bucket's details page) |
    | `B2_KEY_ID` / `B2_APPLICATION_KEY` | A B2 application key scoped to the destination bucket (Account → App Keys) |
    | `B2_BUCKET_NAME` | Destination B2 bucket |
+   | `SUPABASE_DB_URL` | Postgres connection string for the processing database — see "Processing database" below for the exact connection string to use (not the default one Supabase shows first) |
 4. Set the pCloud share link's code as a **repository variable** named `PCLOUD_CODE`
    (Settings → Secrets and variables → Actions → *Variables* tab — not *Secrets*, since it's
    just the public share-link identifier, not a credential). The script reads it from the
@@ -119,10 +122,12 @@ approval before any secret is exposed:
 ## Local-LLM catalogue extraction
 
 `.github/workflows/extract-pages.yml`, run on demand, is the next stage after the pCloud → B2
-pipeline above: it reads the page images already uploaded to B2 (`images/.../page_XXXX.webp`)
-and runs each one through a vision LLM to transcribe catalogue entries, following the same
-per-entry schema as the existing extraction pipeline (`pipeline/schema.md`) so the output is
-compatible with `pipeline/postprocess.py` once a `quarter` is assigned to it.
+pipeline above: it reads the page images already uploaded to B2 — looked up via Postgres, not
+by listing B2 — and runs each one through a vision LLM to transcribe catalogue entries,
+writing one row per entry into the `catalogue_entries` table (see "Processing database"
+below), following the same per-entry schema as the existing extraction pipeline
+(`pipeline/schema.md`) so it's compatible with `pipeline/postprocess.py` once assigned a
+`quarter`. This workflow never writes to B2 at all — B2 is read-only from its point of view.
 
 The model runs **locally on the GitHub Actions runner** via [Ollama](https://ollama.com) — no
 external API, no API key, nothing sent off-runner except to B2. GitHub-hosted runners have no
@@ -141,23 +146,20 @@ general-purpose model, so it should follow the 25-field schema more reliably tha
 smaller model — reasoned from published model positioning, not benchmarked against this
 project's actual pages, so treat an `all` bake-off as the real source of truth once you can
 eyeball output quality yourself.
-Each model's output is namespaced under `extractions/<model-tag>/...` in B2, where `<model-tag>`
-is the `model` value slugified (`:` and other non-alphanumeric characters replaced with `-` —
-e.g. `qwen3-vl:2b` becomes the path segment `qwen3-vl-2b`), so different models' runs never
-clobber each other and can be compared side by side. Ollama's library can rename or
-drop model tags over time — if `ollama pull` fails for one of these, check
+Each model's output is namespaced by `model_tag` (the `model` value slugified — `:` and other
+non-alphanumeric characters replaced with `-`, e.g. `qwen3-vl:2b` becomes `qwen3-vl-2b`) via a
+unique `(page_id, model_tag)` constraint on `llm_extractions`, so different models' runs never
+clobber each other and can be compared side by side with a plain SQL query. Ollama's library
+can rename or drop model tags over time — if `ollama pull` fails for one of these, check
 [ollama.com/library](https://ollama.com/library) for the current tag and update the `options`
 list in the workflow.
 
-Uses the same `b2-upload` environment and secrets as `process-pdfs.yml` (plus the second-account
-secrets below, if you're using account `2`) — no secrets specific to this workflow.
-
-**B2 free-tier transaction cap:** existing outputs are checked via a handful of cheap "Class C"
-list calls rather than one "Class B" HeadObject per page (Class B is capped at 2,500/day on
-B2's free tier — a naive per-page-HEAD idiom burns through that almost immediately at this
-scale). Extracting a page still costs one genuine Class B download (fetching the image bytes
-to send to Ollama isn't avoidable), so a corpus with more than ~2,500 not-yet-extracted pages
-will still need multiple days/resumed runs on a free-tier account — that's expected, not a bug.
+Uses the same `b2-upload` environment as `process-pdfs.yml` (for reading page images) plus
+`SUPABASE_DB_URL` (for writing results) — no other secrets specific to this workflow. Fetching
+each page's image bytes to send to Ollama still costs one real download from B2 per
+not-yet-extracted page (unavoidable — the model needs the actual pixels), so a corpus with more
+than ~2,500 not-yet-extracted pages may need multiple days/resumed runs against a free-tier B2
+account's daily transaction cap; that's expected, not a bug.
 
 ## Second B2 account
 
@@ -187,16 +189,57 @@ a blind switch either:**
   active account changed. A PDF not yet done in *either* account is (re)processed entirely into
   whichever account is currently active; it's never resumed part-way from a different account,
   which would leave its pages split across two buckets.
-- **`extract_with_llm.py`** looks for source page images, and for already-extracted output,
-  across *every* configured account — so it finds images no matter which account
-  `process_pcloud.py` happened to write them to, and never re-runs an LLM extraction that
-  already exists in the other account. Unlike the images pipeline, this dedup happens at the
-  *page* level, not just per-PDF: since re-running an LLM extraction is far more expensive than
-  process_pcloud.py's redo cost (a local image render), one PDF's extracted pages can end up
-  spread across both accounts if a prior run was interrupted mid-PDF after switching accounts —
-  a deliberate tradeoff, not a bug.
-- Either way, all *new* writes for a run go to the account you picked — nothing is copied or
-  merged between buckets, and the workflows never write to a non-active account.
+- **`extract_with_llm.py`** doesn't take a `b2_account` choice at all — it doesn't write to B2,
+  and Postgres already records exactly which account/bucket holds each page's image (`pages.
+  b2_account`/`b2_bucket`), so it always fetches from the right place regardless of which
+  account was active when that image was uploaded. Extraction dedup (has this page already
+  been processed by this model?) is tracked per page in `llm_extractions`, independent of B2
+  accounts entirely.
+- For `process_pcloud.py`, all *new* uploads for a run go to the account you picked — nothing
+  is copied or merged between buckets, and the workflow never writes to a non-active account.
+
+## Processing database (Supabase)
+
+A Supabase Postgres project (linked to this repo via Supabase's GitHub integration, which
+deploys `supabase/migrations/*.sql` automatically) is the source of truth for pipeline status
+and LLM output — replacing the B2 `.done` markers and per-page JSON files the pipeline used to
+write. B2 still holds every actual byte (page images, optionally page PDFs); Postgres tracks
+what's been uploaded where, and holds every extracted catalogue entry for analysis.
+
+Schema (`supabase/migrations/20260909140000_init_processing_schema.sql`):
+
+| Table | One row per... |
+|---|---|
+| `pcloud_files` | pCloud PDF (keyed by pCloud's own file id — stable, no surrogate key needed) |
+| `pages` | page of a PDF — which B2 account/bucket/key holds its image, and — tracked separately, since a later run can upload it under a different active account — the account/bucket/key of its optional single-page PDF, and when each was uploaded |
+| `llm_extractions` | (page, model) extraction attempt — status, the model's raw JSON response, error message if it failed |
+| `catalogue_entries` | extracted catalogue entry — the same ~30 typed fields as `pipeline/schema.md`, one row per entry (a page can hold several) |
+
+A `catalogue_entries_full` view joins all four tables, so a catalogue entry can always be
+traced back to its exact image (`b2_account`/`b2_bucket`/`image_key`) and its original pCloud
+file (`pcloud_fileid`/`pcloud_name`/`pcloud_folder`) in one query — that's "linked to the image
+and the original PDF file in pCloud." Both `process_pcloud.py` and `extract_with_llm.py` query
+these tables directly to decide what's already done; neither lists B2 objects for status
+anymore (only for the byte data itself).
+
+**Required secret:** `SUPABASE_DB_URL` in the `b2-upload` environment — a Postgres connection
+string. **Use the connection *pooler* string, not Supabase's default "direct connection" one:**
+Supabase's direct connection (port 5432, `db.<ref>.supabase.co`) is IPv6-only unless you've
+bought the IPv4 add-on, and GitHub Actions runners are IPv4-only — a direct-connection string
+will just hang and time out from CI. In the Supabase dashboard's "Connect" panel, copy the
+**Session pooler** or **Transaction pooler** string instead (hostname like
+`aws-0-<region>.pooler.supabase.com`) — both support IPv4.
+
+**One-time backfill**, for data already processed before this schema existed:
+`.github/workflows/migrate-b2-state.yml` runs `scripts/migrate_b2_state_to_db.py`, which
+discovers the existing `processed/*.done`/`*.with-pdfs.done` markers (and, for LLM output, the
+`extractions/<model>/**/page_*.json` files) across every configured B2 account, writes the
+equivalent rows into Postgres, and — only once a stem's migration is confirmed, and only when
+you tick **Actually commit changes** on the workflow's dispatch form — deletes the now-redundant
+`.done` marker objects from B2. Page images, page PDFs, and extraction JSON content are left in
+B2 untouched; only the markers are ever deleted. Defaults to a dry run (prints what it would
+do, changes nothing) every time you *don't* tick that box, and is safe to re-run either way —
+every write is an upsert, so a stem already migrated is just skipped.
 
 ## Security scanning
 

@@ -1,39 +1,26 @@
 """Extract catalogue entries from rendered page images using a local vision
 LLM served by Ollama, running entirely on the GitHub Actions runner — no
 external API calls, no API key. Reads the page images process_pcloud.py
-already uploaded to B2 and writes one JSON file per page (following
-pipeline/schema.md's entry schema) back to B2.
+already uploaded to B2 (looked up via Postgres, not by listing B2) and
+writes the result — one row per extracted catalogue entry, following
+pipeline/schema.md's field shape — into Postgres (Supabase). See
+supabase/migrations/20260909140000_init_processing_schema.sql.
 
-B2 is the source of truth for resumability, same pattern as
-process_pcloud.py: existing output keys are listed *once* per run (cheap
-"Class C" ListObjectsV2 calls) rather than checked individually with
-HeadObject per page — B2's free tier caps "Class B" transactions (which
-HeadObject bills as) at 2,500/day, and a per-page-HEAD idiom burns through
-that almost immediately at this scale. A
-extractions/<MODEL_TAG>/processed/<folder>/<stem>.done marker is only written
-once every page for that source PDF is confirmed present. Results are
-namespaced by model (OLLAMA_MODEL,
-slugified into MODEL_TAG) so multiple models can be tried against the same
-page images without clobbering each other's output — run the workflow once
-per model to bake them off against each other.
+No B2 writes happen here at all: B2 is read-only from this script's point
+of view (fetching page image bytes to send to Ollama). Postgres is the sole
+source of truth for both "which pages have images ready" (the `pages` table,
+populated by process_pcloud.py) and "which pages have already been
+extracted by which model" (`llm_extractions`, unique on (page_id,
+model_tag), so re-running the same model against the same page is a no-op).
+Results are namespaced by model (OLLAMA_MODEL, slugified into MODEL_TAG) so
+multiple models can be tried against the same page images without
+clobbering each other's rows — run the workflow once per model to bake
+them off against each other.
 
-Note that extracting each page still costs one real B2 download (GetObject,
-genuinely "Class B" — fetching the image bytes to send to Ollama isn't
-avoidable) per not-yet-processed page, so a corpus with more than ~2,500
-not-yet-extracted pages will still need multiple days/resumed runs against a
-free-tier B2 account regardless of this optimization.
-
-Supports up to two B2 accounts/buckets, same as process_pcloud.py (see
-load_b2_accounts) — needed because process_pcloud.py may have written source
-images to either account depending on which was active when. Source images
-and already-done extraction outputs are looked up across ALL configured
-accounts; all *new* writes go to a single "active" account
-(B2_ACTIVE_ACCOUNT) only. Unlike process_pcloud.py, dedup here is granted at
-the page level across accounts (not just per-PDF): skipping an
-already-extracted page wherever it landed is worth the small inconsistency
-of one PDF's pages potentially ending up split across two accounts, because
-redoing an LLM extraction is far more expensive than process_pcloud.py's
-redo cost (re-rendering an image locally).
+Supports up to two B2 accounts (see load_b2_accounts), same as
+process_pcloud.py, since a page's image may live in either one depending on
+which was active when it was uploaded — `pages.b2_account`/`b2_bucket`
+records exactly which, so this script always fetches from the right place.
 
 Requires an Ollama server already running and reachable at OLLAMA_HOST (see
 .github/workflows/extract-pages.yml) with OLLAMA_MODEL already pulled.
@@ -47,11 +34,15 @@ import sys
 import time
 
 import boto3
+import psycopg2
 import requests
+from psycopg2.extras import Json
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.environ["OLLAMA_MODEL"]
 MODEL_TAG = re.sub(r"[^A-Za-z0-9._-]", "-", OLLAMA_MODEL)
+
+SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
 
 def load_b2_accounts():
@@ -88,12 +79,6 @@ def load_b2_accounts():
 
 
 B2_ACCOUNTS = load_b2_accounts()
-B2_ACTIVE_ACCOUNT = os.environ.get("B2_ACTIVE_ACCOUNT", "1").strip() or "1"
-if B2_ACTIVE_ACCOUNT not in B2_ACCOUNTS:
-    raise RuntimeError(
-        f"B2_ACTIVE_ACCOUNT={B2_ACTIVE_ACCOUNT!r} is not a configured B2 account "
-        f"(configured: {sorted(B2_ACCOUNTS)})"
-    )
 
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; runner guard, exit 42 to hand off to a fresh run
 RUNTIME_GUARD_EXIT_CODE = 42
@@ -116,8 +101,6 @@ source. Output the JSON array only, no commentary.
 SCHEMA:
 """ + SCHEMA_PATH.read_text(encoding="utf-8")
 
-IMAGE_KEY_RE = re.compile(r"^images/(?P<folder>.+)/(?P<stem>[^/]+)/page_(?P<page>\d+)\.webp$")
-
 
 def elapsed():
     return time.time() - START_TIME
@@ -132,48 +115,41 @@ def b2_client(account):
     )
 
 
-def list_existing_keys(client, bucket, prefix):
-    """Return every existing object key under prefix in a handful of B2
-    "Class C" list transactions, rather than one "Class B" HeadObject call
-    per key. B2's free tier caps Class B at 2,500/day; checking existence
-    per-page via HeadObject burns through that almost immediately at this
-    scale (thousands of pages), while ListObjectsV2 handles up to 1000 keys
-    per call and is billed in the much cheaper class.
-    """
-    paginator = client.get_paginator("list_objects_v2")
-    keys = set()
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            keys.add(obj["Key"])
-    return keys
-
-
 def b2_get_bytes(client, bucket, key):
     return client.get_object(Bucket=bucket, Key=key)["Body"].read()
 
 
-def b2_put_bytes(client, bucket, key, data, content_type):
-    client.put_object(Bucket=bucket, Key=key, Body=data, ContentType=content_type)
+def db_connect():
+    return psycopg2.connect(SUPABASE_DB_URL)
 
 
-def list_page_images(clients_and_buckets):
-    """Return {(folder, stem): [(page_no, client, bucket, image_key), ...]}
-    for every page image found in ANY configured B2 account, grouped by
-    source PDF — process_pcloud.py may have written images to either
-    account depending on which was active at the time, so this has to look
-    across all of them to find everything there is to extract."""
+def db_fetch_pages_needing_extraction(conn, model_tag):
+    """Return {(folder, stem): [(page_id, pcloud_fileid, page_no, b2_account,
+    b2_bucket, image_key), ...]} for every page with an uploaded image that
+    doesn't already have a successful extraction for model_tag."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT p.id, p.pcloud_fileid, p.page_no, p.b2_account, p.b2_bucket, "
+            "p.image_key, pf.folder, pf.name "
+            "FROM pages p "
+            "JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid "
+            "WHERE p.image_uploaded_at IS NOT NULL "
+            "AND NOT EXISTS ("
+            "  SELECT 1 FROM llm_extractions le "
+            "  WHERE le.page_id = p.id AND le.model_tag = %s AND le.status = 'success'"
+            ") "
+            "ORDER BY pf.folder, pf.name, p.page_no",
+            (model_tag,),
+        )
+        rows = cur.fetchall()
+    conn.rollback()  # read-only; drop the implicit transaction
+
     by_pdf = {}
-    for client, bucket in clients_and_buckets:
-        paginator = client.get_paginator("list_objects_v2")
-        for result in paginator.paginate(Bucket=bucket, Prefix="images/"):
-            for obj in result.get("Contents", []):
-                m = IMAGE_KEY_RE.match(obj["Key"])
-                if not m:
-                    continue
-                key = (m["folder"], m["stem"])
-                by_pdf.setdefault(key, []).append((int(m["page"]), client, bucket, obj["Key"]))
-    for pages in by_pdf.values():
-        pages.sort(key=lambda p: p[0])
+    for page_id, fileid, page_no, account, bucket, image_key, folder, name in rows:
+        stem = pathlib.Path(name).stem
+        by_pdf.setdefault((folder, stem), []).append(
+            (page_id, fileid, page_no, account, bucket, image_key)
+        )
     return by_pdf
 
 
@@ -191,24 +167,24 @@ def wait_for_ollama(timeout=120):
     raise RuntimeError(f"Ollama server did not become ready in time: {last_error}")
 
 
-def normalize_entry(entry, folder, stem):
-    """Enforce the schema's int type for printed_page regardless of what the
-    model actually emitted (it may ignore the prompt's instructions), so
-    downstream code doing int(printed_page) (e.g. postprocess.py) never
-    breaks on a stray "" or None."""
-    entry.setdefault("source_folder", folder)
-    entry.setdefault("source_pdf", stem)
-    printed_page = entry.get("printed_page")
-    if isinstance(printed_page, str):
-        printed_page = printed_page.strip()
-    if isinstance(printed_page, int) and not isinstance(printed_page, bool):
-        return entry
-    if isinstance(printed_page, str) and printed_page.isdigit():
-        entry["printed_page"] = int(printed_page)
-        return entry
-    entry["printed_page"] = 0
-    entry.setdefault("flags", [])
-    entry["flags"].append({"field": "printed_page", "issue": "not visible or unparsable on page"})
+def flag_if_printed_page_missing(entry):
+    """Note when printed_page couldn't be read, rather than silently storing
+    NULL with no explanation. Unlike the old JSON-file version of this
+    script, we don't force a 0 sentinel here — NULL in a proper relational
+    column already means "unknown" without overloading a real page number.
+    """
+    pp = entry.get("printed_page")
+    if isinstance(pp, str):
+        pp = pp.strip()
+    looks_valid = (isinstance(pp, int) and not isinstance(pp, bool)) or (
+        isinstance(pp, str) and pp.isdigit()
+    )
+    if not looks_valid:
+        flags = entry.get("flags")
+        if not isinstance(flags, list):
+            flags = []
+        flags.append({"field": "printed_page", "issue": "not visible or unparsable on page"})
+        entry["flags"] = flags
     return entry
 
 
@@ -235,78 +211,186 @@ def extract_page(image_bytes):
     return entries
 
 
-def process_pdf(write_client, write_bucket, folder, stem, page_keys, existing):
-    """page_keys: [(page_no, source_client, source_bucket, image_key), ...] —
-    each page's source image may live in a different configured B2 account
-    than the one this run is writing to. `existing` is the union of
-    extraction output keys across ALL configured accounts (mutated in place
-    as outputs are confirmed), so a page or PDF already done in ANY account
-    is skipped; every new write goes to write_client/write_bucket (the
-    active account) only. Returns True once every page for this PDF is
-    confirmed present somewhere; False if any page still needs a retry.
-    """
-    done_key = f"extractions/{MODEL_TAG}/processed/{folder}/{stem}.done"
-    if done_key in existing:
-        print(f"skip (already done): {MODEL_TAG}/{folder}/{stem}")
-        return True
+def _text(entry, key):
+    v = entry.get(key)
+    return None if v is None else str(v)
 
-    print(f"processing: {MODEL_TAG}/{folder}/{stem} ({len(page_keys)} pages)")
+
+def _int_or_none(entry, key):
+    v = entry.get(key)
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str) and v.strip().lstrip("-").isdigit():
+        return int(v.strip())
+    return None
+
+
+def _bool_or_none(entry, key):
+    v = entry.get(key)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        low = v.strip().lower()
+        if low in ("true", "yes", "1"):
+            return True
+        if low in ("false", "no", "0", ""):
+            return False
+    return None
+
+
+def build_entry_row(extraction_id, entry_index, entry):
+    return (
+        extraction_id,
+        entry_index,
+        _text(entry, "quarter"),
+        _int_or_none(entry, "pdf_page"),
+        _int_or_none(entry, "printed_page"),
+        _text(entry, "section"),
+        _text(entry, "lang"),
+        _text(entry, "char"),
+        _text(entry, "topic"),
+        _int_or_none(entry, "serial"),
+        _text(entry, "reg"),
+        _text(entry, "copies"),
+        _text(entry, "printer_verbatim"),
+        _text(entry, "printer"),
+        _text(entry, "pcity"),
+        _text(entry, "author"),
+        _text(entry, "title"),
+        _bool_or_none(entry, "title_native"),
+        _text(entry, "gloss"),
+        _text(entry, "pp_verbatim"),
+        _text(entry, "publisher"),
+        _text(entry, "pubcity"),
+        _text(entry, "date"),
+        _text(entry, "price"),
+        _text(entry, "edition"),
+        _text(entry, "format"),
+        _text(entry, "method"),
+        _text(entry, "educ"),
+        _text(entry, "copyright"),
+        _text(entry, "notes"),
+        _text(entry, "marks"),
+        Json(entry.get("flags") or []),
+        _text(entry, "source_folder"),
+        _text(entry, "source_pdf"),
+    )
+
+
+# One fully static literal (no string building/concatenation) so this can't
+# be mistaken for a SQL-injection-shaped pattern — every value still goes
+# through a parameterized %s via build_entry_row(); this is just the column
+# list. psycopg2 raises clearly on any column/placeholder count mismatch.
+INSERT_ENTRY_SQL = """
+    INSERT INTO catalogue_entries (
+        extraction_id, entry_index, quarter, pdf_page, printed_page, section, lang,
+        char_qualifier, topic, serial, reg, copies, printer_verbatim, printer, pcity,
+        author, title, title_native, gloss, pp_verbatim, publisher, pubcity, date,
+        price, edition, format, method, educ, copyright, notes, marks, flags,
+        source_folder, source_pdf
+    ) VALUES (
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+    )
+"""
+
+
+def db_save_extraction_success(conn, page_id, model, model_tag, entries):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO llm_extractions (page_id, model, model_tag, status, raw_response) "
+            "VALUES (%s, %s, %s, 'success', %s) "
+            "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
+            "status = 'success', raw_response = EXCLUDED.raw_response, "
+            "error_message = NULL "
+            "RETURNING id",
+            (page_id, model, model_tag, Json(entries)),
+        )
+        extraction_id = cur.fetchone()[0]
+        cur.execute("DELETE FROM catalogue_entries WHERE extraction_id = %s", (extraction_id,))
+        for idx, entry in enumerate(entries):
+            cur.execute(INSERT_ENTRY_SQL, build_entry_row(extraction_id, idx, entry))
+    conn.commit()
+
+
+def db_save_extraction_failure(conn, page_id, model, model_tag, error_message):
+    # If db_save_extraction_success() raised partway through (e.g. a bad
+    # catalogue_entries insert), the connection is left in an aborted
+    # transaction; rolling back first (a no-op if there's nothing to undo)
+    # keeps this write from failing too and taking down the whole run.
+    conn.rollback()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO llm_extractions (page_id, model, model_tag, status, error_message) "
+            "VALUES (%s, %s, %s, 'failed', %s) "
+            "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
+            "status = 'failed', error_message = EXCLUDED.error_message",
+            (page_id, model, model_tag, error_message),
+        )
+    conn.commit()
+
+
+def process_pdf(conn, clients, folder, stem, pages):
+    """pages: [(page_id, pcloud_fileid, page_no, b2_account, b2_bucket,
+    image_key), ...]. Returns True if every page extracted successfully
+    this run; False if any page needs a retry."""
+    print(f"processing: {MODEL_TAG}/{folder}/{stem} ({len(pages)} pages)")
     all_ok = True
-    for page_no, source_client, source_bucket, image_key in page_keys:
-        out_key = f"extractions/{MODEL_TAG}/{folder}/{stem}/page_{page_no:04d}.json"
-        if out_key in existing:
-            continue
+    for page_id, _fileid, page_no, account, bucket, image_key in pages:
         try:
-            entries = extract_page(b2_get_bytes(source_client, source_bucket, image_key))
-            entries = [normalize_entry(e, folder, stem) for e in entries]
-            body = json.dumps(entries, ensure_ascii=False, indent=2).encode()
-            b2_put_bytes(write_client, write_bucket, out_key, body, "application/json")
-            existing.add(out_key)
+            client = clients[account]
+        except KeyError:
+            raise RuntimeError(
+                f"page {folder}/{stem} page_no={page_no} is recorded in account "
+                f"{account!r}, but that account isn't configured in this run's secrets"
+            )
+        try:
+            image_bytes = b2_get_bytes(client, bucket, image_key)
+            entries = extract_page(image_bytes)
+            for entry in entries:
+                entry.setdefault("source_folder", folder)
+                entry.setdefault("source_pdf", stem)
+                entry["pdf_page"] = page_no - 1  # known exactly; don't trust the model's guess
+                flag_if_printed_page_missing(entry)
+            db_save_extraction_success(conn, page_id, OLLAMA_MODEL, MODEL_TAG, entries)
         except Exception as exc:
             print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")
+            db_save_extraction_failure(conn, page_id, OLLAMA_MODEL, MODEL_TAG, str(exc))
             all_ok = False
 
     if all_ok:
-        b2_put_bytes(write_client, write_bucket, done_key, f"completed at {time.time()}".encode(), "text/plain")
-        existing.add(done_key)
         print(f"done: {MODEL_TAG}/{folder}/{stem}")
     else:
-        print(f"WARNING: not all pages verified for {folder}/{stem}; will retry next run")
+        print(f"WARNING: not all pages extracted for {folder}/{stem}; will retry next run")
     return all_ok
 
 
 def main():
     wait_for_ollama()
+    conn = db_connect()
     clients = {aid: b2_client(acct) for aid, acct in B2_ACCOUNTS.items()}
-    write_client = clients[B2_ACTIVE_ACCOUNT]
-    write_bucket = B2_ACCOUNTS[B2_ACTIVE_ACCOUNT]["bucket"]
-    clients_and_buckets = [(clients[aid], acct["bucket"]) for aid, acct in B2_ACCOUNTS.items()]
 
     print(f"model: {OLLAMA_MODEL} (tag: {MODEL_TAG})")
-    print(f"listing page images across {len(B2_ACCOUNTS)} configured B2 account(s)...")
-    by_pdf = list_page_images(clients_and_buckets)
+    print("querying pages needing extraction...")
+    by_pdf = db_fetch_pages_needing_extraction(conn, MODEL_TAG)
     total_pages = sum(len(v) for v in by_pdf.values())
-    print(f"found {len(by_pdf)} source PDF(s), {total_pages} page(s)")
-
-    print(f"listing existing extractions for {MODEL_TAG} across all configured B2 account(s)...")
-    existing = set()
-    for client, bucket in clients_and_buckets:
-        existing |= list_existing_keys(client, bucket, f"extractions/{MODEL_TAG}/")
-    print(f"found {len(existing)} existing extraction object(s)")
+    print(f"found {len(by_pdf)} source PDF(s), {total_pages} page(s) needing extraction")
 
     any_incomplete = False
-    for (folder, stem), page_keys in sorted(by_pdf.items()):
+    for (folder, stem), pages in sorted(by_pdf.items()):
         if elapsed() > MAX_RUNTIME_SECONDS:
             print(
                 f"runtime guard tripped after {elapsed():.0f}s; "
                 "stopping before starting a new file"
             )
             sys.exit(RUNTIME_GUARD_EXIT_CODE)
-        if not process_pdf(write_client, write_bucket, folder, stem, page_keys, existing):
+        if not process_pdf(conn, clients, folder, stem, pages):
             any_incomplete = True
 
     if any_incomplete:
-        print("one or more PDFs had pages that could not be verified; exiting non-zero so this is visible")
+        print("one or more pages failed extraction; exiting non-zero so this is visible")
         sys.exit(1)
 
     print("all pages processed")

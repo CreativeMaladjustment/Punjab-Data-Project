@@ -16,6 +16,7 @@ import os
 import sys
 import time
 import pathlib
+import tempfile
 
 import boto3
 import requests
@@ -31,7 +32,7 @@ B2_KEY_ID = os.environ["B2_KEY_ID"]
 B2_APPLICATION_KEY = os.environ["B2_APPLICATION_KEY"]
 B2_BUCKET_NAME = os.environ["B2_BUCKET_NAME"]
 
-TMP_DIR = pathlib.Path(os.environ.get("PCLOUD_TMPDIR", "/tmp/pcloud_work"))
+TMP_DIR = pathlib.Path(os.environ.get("PCLOUD_TMPDIR") or tempfile.mkdtemp(prefix="pcloud_work_"))
 IMAGE_DPI = 200
 IMAGE_QUALITY = 85
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; runner guard, exit 42 to hand off to a fresh run

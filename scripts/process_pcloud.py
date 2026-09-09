@@ -2,6 +2,15 @@
 vision-optimized WebP image, and upload it to Backblaze B2. Optionally (see
 UPLOAD_PAGE_PDFS) also splits out and uploads a single-page PDF per page.
 
+Supports up to two B2 accounts/buckets (see load_b2_accounts) so that once
+one bucket fills up, a second can take over new uploads without redoing
+PDFs already completed in the first — every configured account's
+`processed/` markers are checked (a PDF done in ANY of them is skipped
+outright), while all new work is written to a single "active" account
+(B2_ACTIVE_ACCOUNT) only. A PDF is never split page-wise across two
+accounts: if it isn't fully done anywhere, it's (re)processed entirely into
+the active account.
+
 B2 is the source of truth for resumability: existing objects are listed
 *once* per run (a handful of cheap "Class C" ListObjectsV2 calls) rather than
 checked individually with HeadObject per page — B2's free tier caps "Class B"
@@ -12,7 +21,7 @@ inside GitHub Actions (see .github/workflows/process-pdfs.yml) but only needs
 boto3/requests/pypdf/pdf2image/pillow and network access to run anywhere.
 
 B2 exposes an S3-compatible API, so the storage side of this script talks to
-it with the ordinary boto3 "s3" client pointed at the bucket's B2 endpoint.
+it with the ordinary boto3 "s3" client pointed at each account's B2 endpoint.
 """
 import io
 import os
@@ -29,15 +38,47 @@ from pdf2image import convert_from_path
 PCLOUD_CODE = os.environ["PCLOUD_CODE"]  # the pCloud public-link share code
 PCLOUD_HOSTS = ["api.pcloud.com", "eapi.pcloud.com"]
 
-B2_ENDPOINT = os.environ["B2_ENDPOINT"]  # e.g. https://s3.us-west-004.backblazeb2.com
-if not B2_ENDPOINT.startswith(("http://", "https://")):
-    # The B2 console's bucket details page shows the endpoint without a
-    # scheme (e.g. "s3.us-west-004.backblazeb2.com"), which is easy to paste
-    # as-is; boto3 requires a full URL.
-    B2_ENDPOINT = f"https://{B2_ENDPOINT}"
-B2_KEY_ID = os.environ["B2_KEY_ID"]
-B2_APPLICATION_KEY = os.environ["B2_APPLICATION_KEY"]
-B2_BUCKET_NAME = os.environ["B2_BUCKET_NAME"]
+
+def load_b2_accounts():
+    """Return {"1": {"endpoint", "key_id", "app_key", "bucket"}, "2": {...}}.
+    Account "1" (B2_ENDPOINT/B2_KEY_ID/B2_APPLICATION_KEY/B2_BUCKET_NAME) is
+    required. Account "2" (the same names suffixed _2) is included only if
+    all four of its variables are set — a second account is optional.
+    """
+    def _account(suffix):
+        endpoint = os.environ.get(f"B2_ENDPOINT{suffix}", "")
+        key_id = os.environ.get(f"B2_KEY_ID{suffix}", "")
+        app_key = os.environ.get(f"B2_APPLICATION_KEY{suffix}", "")
+        bucket = os.environ.get(f"B2_BUCKET_NAME{suffix}", "")
+        if not (endpoint and key_id and app_key and bucket):
+            return None
+        if not endpoint.startswith(("http://", "https://")):
+            # The B2 console's bucket details page shows the endpoint
+            # without a scheme; boto3 requires a full URL.
+            endpoint = f"https://{endpoint}"
+        return {"endpoint": endpoint, "key_id": key_id, "app_key": app_key, "bucket": bucket}
+
+    accounts = {}
+    primary = _account("")
+    if primary is None:
+        raise RuntimeError(
+            "B2 account 1 is not fully configured (need B2_ENDPOINT, B2_KEY_ID, "
+            "B2_APPLICATION_KEY, B2_BUCKET_NAME)"
+        )
+    accounts["1"] = primary
+    secondary = _account("_2")
+    if secondary is not None:
+        accounts["2"] = secondary
+    return accounts
+
+
+B2_ACCOUNTS = load_b2_accounts()
+B2_ACTIVE_ACCOUNT = os.environ.get("B2_ACTIVE_ACCOUNT", "1").strip() or "1"
+if B2_ACTIVE_ACCOUNT not in B2_ACCOUNTS:
+    raise RuntimeError(
+        f"B2_ACTIVE_ACCOUNT={B2_ACTIVE_ACCOUNT!r} is not a configured B2 account "
+        f"(configured: {sorted(B2_ACCOUNTS)})"
+    )
 
 TMP_DIR = pathlib.Path(os.environ.get("PCLOUD_TMPDIR") or tempfile.mkdtemp(prefix="pcloud_work_"))
 IMAGE_DPI = 200
@@ -142,16 +183,16 @@ def download_to(url, dest_path):
                     f.write(chunk)
 
 
-def b2_client():
+def b2_client(account):
     return boto3.client(
         "s3",
-        endpoint_url=B2_ENDPOINT,
-        aws_access_key_id=B2_KEY_ID,
-        aws_secret_access_key=B2_APPLICATION_KEY,
+        endpoint_url=account["endpoint"],
+        aws_access_key_id=account["key_id"],
+        aws_secret_access_key=account["app_key"],
     )
 
 
-def list_existing_keys(client, prefix):
+def list_existing_keys(client, bucket, prefix):
     """Return every existing object key under prefix in a handful of B2
     "Class C" list transactions, rather than one "Class B" HeadObject call
     per key. B2's free tier caps Class B at 2,500/day; checking existence
@@ -161,22 +202,22 @@ def list_existing_keys(client, prefix):
     """
     paginator = client.get_paginator("list_objects_v2")
     keys = set()
-    for page in paginator.paginate(Bucket=B2_BUCKET_NAME, Prefix=prefix):
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             keys.add(obj["Key"])
     return keys
 
 
-def b2_put_file(client, key, path, content_type):
+def b2_put_file(client, bucket, key, path, content_type):
     with open(path, "rb") as f:
-        client.put_object(Bucket=B2_BUCKET_NAME, Key=key, Body=f, ContentType=content_type)
+        client.put_object(Bucket=bucket, Key=key, Body=f, ContentType=content_type)
 
 
-def b2_put_bytes(client, key, data, content_type="text/plain"):
-    client.put_object(Bucket=B2_BUCKET_NAME, Key=key, Body=data, ContentType=content_type)
+def b2_put_bytes(client, bucket, key, data, content_type="text/plain"):
+    client.put_object(Bucket=bucket, Key=key, Body=data, ContentType=content_type)
 
 
-def split_and_upload_pages(client, pdf_path, folder, stem, work_dir, existing):
+def split_and_upload_pages(client, bucket, pdf_path, folder, stem, work_dir, existing):
     """Render each page of pdf_path as a WebP image (and, if UPLOAD_PAGE_PDFS
     is set, also split out a single-page PDF), uploading each to B2 (skipping
     any key already in `existing`, mutated in place as uploads succeed).
@@ -204,7 +245,7 @@ def split_and_upload_pages(client, pdf_path, folder, stem, work_dir, existing):
                 images[0].save(buf, format="WEBP", quality=IMAGE_QUALITY)
                 buf.seek(0)
                 image_path.write_bytes(buf.getvalue())
-                b2_put_file(client, image_key, image_path, "image/webp")
+                b2_put_file(client, bucket, image_key, image_path, "image/webp")
                 existing.add(image_key)
             except Exception as exc:
                 print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed: {exc}; will retry next run")
@@ -221,7 +262,7 @@ def split_and_upload_pages(client, pdf_path, folder, stem, work_dir, existing):
                     writer.add_page(reader.pages[idx])
                     with open(page_pdf_path, "wb") as f:
                         writer.write(f)
-                    b2_put_file(client, page_key, page_pdf_path, "application/pdf")
+                    b2_put_file(client, bucket, page_key, page_pdf_path, "application/pdf")
                     existing.add(page_key)
                 except Exception as exc:
                     print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed: {exc}; will retry next run")
@@ -232,13 +273,20 @@ def split_and_upload_pages(client, pdf_path, folder, stem, work_dir, existing):
     return all_ok
 
 
-def process_pdf(client, item, existing):
+def process_pdf(client, bucket, item, existing, done_anywhere):
     """The .done marker is namespaced by output mode (images-only vs
     images+pdfs), not just by stem: UPLOAD_PAGE_PDFS is a per-run toggle, so
     a plain "done" flag would let a run with it off permanently block a
     later backfill run with it on for the same PDF (the .done from the
     earlier run would short-circuit process_pdf before split_and_upload_pages
     ever got a chance to add the missing PDFs).
+
+    `done_anywhere` (marker keys present in ANY configured B2 account) gates
+    whether this PDF is touched at all; `existing` (this run's active-account
+    listing only) gates individual page uploads. A PDF not done in any
+    account is always (re)processed entirely into the active account — never
+    resumed part-way from a *different* account, which would split its pages
+    across two buckets.
     """
     folder = item["folder"]
     stem = pathlib.Path(item["name"]).stem
@@ -246,8 +294,8 @@ def process_pdf(client, item, existing):
     pdfs_done_key = f"processed/{folder}/{stem}.with-pdfs.done"
     required_done_key = pdfs_done_key if UPLOAD_PAGE_PDFS else images_done_key
 
-    if required_done_key in existing:
-        print(f"skip (already done): {folder}/{stem}")
+    if required_done_key in done_anywhere:
+        print(f"skip (already done in a configured B2 account): {folder}/{stem}")
         return
 
     print(f"processing: {folder}/{stem}")
@@ -259,14 +307,16 @@ def process_pdf(client, item, existing):
         url = pcloud_download_url(PCLOUD_CODE, item["fileid"])
         download_to(url, pdf_path)
 
-        all_uploaded = split_and_upload_pages(client, pdf_path, folder, stem, work_dir, existing)
+        all_uploaded = split_and_upload_pages(client, bucket, pdf_path, folder, stem, work_dir, existing)
         if all_uploaded:
             if images_done_key not in existing:
-                b2_put_bytes(client, images_done_key, f"completed at {time.time()}".encode())
+                b2_put_bytes(client, bucket, images_done_key, f"completed at {time.time()}".encode())
                 existing.add(images_done_key)
+                done_anywhere.add(images_done_key)
             if UPLOAD_PAGE_PDFS and pdfs_done_key not in existing:
-                b2_put_bytes(client, pdfs_done_key, f"completed at {time.time()}".encode())
+                b2_put_bytes(client, bucket, pdfs_done_key, f"completed at {time.time()}".encode())
                 existing.add(pdfs_done_key)
+                done_anywhere.add(pdfs_done_key)
             print(f"done: {folder}/{stem}")
         else:
             print(f"WARNING: not all pages verified for {folder}/{stem}; will retry next run")
@@ -282,17 +332,32 @@ def process_pdf(client, item, existing):
 
 def main():
     TMP_DIR.mkdir(parents=True, exist_ok=True)
-    client = b2_client()
+    clients = {aid: b2_client(acct) for aid, acct in B2_ACCOUNTS.items()}
+    write_client = clients[B2_ACTIVE_ACCOUNT]
+    write_bucket = B2_ACCOUNTS[B2_ACTIVE_ACCOUNT]["bucket"]
 
     print("listing PDFs on pCloud...")
     pdfs = list_pdfs_recursive(PCLOUD_CODE)
     print(f"found {len(pdfs)} PDF(s)")
 
-    print("listing existing B2 objects...")
-    existing = list_existing_keys(client, "images/") | list_existing_keys(client, "processed/")
+    print(f"listing existing objects in the active B2 account ({B2_ACTIVE_ACCOUNT})...")
+    existing = list_existing_keys(write_client, write_bucket, "images/") | list_existing_keys(
+        write_client, write_bucket, "processed/"
+    )
     if UPLOAD_PAGE_PDFS:
-        existing |= list_existing_keys(client, "pages/")
-    print(f"found {len(existing)} existing object(s) in B2")
+        existing |= list_existing_keys(write_client, write_bucket, "pages/")
+    print(f"found {len(existing)} existing object(s) in account {B2_ACTIVE_ACCOUNT}")
+
+    done_anywhere = {k for k in existing if k.startswith("processed/")}
+    if len(B2_ACCOUNTS) > 1:
+        for aid, acct in B2_ACCOUNTS.items():
+            if aid == B2_ACTIVE_ACCOUNT:
+                continue
+            done_anywhere |= list_existing_keys(clients[aid], acct["bucket"], "processed/")
+        print(
+            f"found {len(done_anywhere)} 'processed' marker(s) across "
+            f"{len(B2_ACCOUNTS)} configured B2 account(s)"
+        )
 
     for item in pdfs:
         if elapsed() > MAX_RUNTIME_SECONDS:
@@ -301,7 +366,7 @@ def main():
                 "stopping before starting a new file"
             )
             sys.exit(RUNTIME_GUARD_EXIT_CODE)
-        process_pdf(client, item, existing)
+        process_pdf(write_client, write_bucket, item, existing, done_anywhere)
 
     print("all PDFs processed")
 

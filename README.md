@@ -175,17 +175,28 @@ Add a second full set of secrets to the same `b2-upload` environment, suffixed `
 | `B2_BUCKET_NAME_2` | The second bucket's name |
 
 The original `B2_ENDPOINT`/`B2_KEY_ID`/`B2_APPLICATION_KEY`/`B2_BUCKET_NAME` secrets remain
-account `1` — nothing to rename. Picking `2` in the workflow's dropdown swaps in the `_2`
-secrets via the workflow YAML's `env:` block; no script changes are needed since both scripts
-only ever read the plain `B2_ENDPOINT`/etc. environment variable names.
+account `1` — nothing to rename. Account `2` is entirely optional: leave its four secrets unset
+and both workflows behave exactly as if there were only ever one account.
 
-**This is a manual switch, not automatic failover or a merged view across accounts.** Nothing
-here copies data between buckets or spans a corpus across two buckets automatically — content
-already in account `1` stays there, and `extract-pages.yml` can only see the images already
-uploaded to whichever account you pick for that run. If you point `process-pdfs.yml` at account
-`2` to keep uploading new PDFs' pages once account `1` fills up, point `extract-pages.yml` at
-account `2` as well when you're ready to extract that batch — the two workflows have to agree
-on which account holds the images being worked on.
+**The dropdown only controls where *new* work is written — it isn't a plain swap, and it isn't
+a blind switch either:**
+
+- **`process_pcloud.py`** checks the `processed/...` completion markers in *every* configured
+  account before touching a PDF. A PDF already fully done in account `1` is skipped even when
+  you're running with account `2` selected — it is never redone or re-split just because the
+  active account changed. A PDF not yet done in *either* account is (re)processed entirely into
+  whichever account is currently active; it's never resumed part-way from a different account,
+  which would leave its pages split across two buckets.
+- **`extract_with_llm.py`** looks for source page images, and for already-extracted output,
+  across *every* configured account — so it finds images no matter which account
+  `process_pcloud.py` happened to write them to, and never re-runs an LLM extraction that
+  already exists in the other account. Unlike the images pipeline, this dedup happens at the
+  *page* level, not just per-PDF: since re-running an LLM extraction is far more expensive than
+  process_pcloud.py's redo cost (a local image render), one PDF's extracted pages can end up
+  spread across both accounts if a prior run was interrupted mid-PDF after switching accounts —
+  a deliberate tradeoff, not a bug.
+- Either way, all *new* writes for a run go to the account you picked — nothing is copied or
+  merged between buckets, and the workflows never write to a non-active account.
 
 ## Security scanning
 

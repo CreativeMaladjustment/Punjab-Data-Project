@@ -7,15 +7,25 @@ see supabase/migrations/20260909140000_init_processing_schema.sql. Every
 page's upload is recorded as a row in `pages` (which B2 account/bucket holds
 it, and when); a PDF is considered done once every one of its pages has a
 row with image_uploaded_at set (and page_pdf_uploaded_at too, if
-UPLOAD_PAGE_PDFS). Because the DB records exactly which account holds each
-page, pages of one PDF can legitimately live in different B2 accounts (e.g.
-after switching B2_ACTIVE_ACCOUNT partway through) with no ambiguity — unlike
-the older B2-object-listing approach, there's no need to ever "redo a whole
-PDF fresh" just to avoid split-page confusion.
+UPLOAD_PAGE_PDFS).
 
-New uploads always go to a single "active" B2 account (B2_ACTIVE_ACCOUNT;
-see load_b2_accounts) — this script never reads from B2, only writes there
-and records what it wrote in Postgres.
+New PDFs are spread across every configured B2 account round-robin (PDF 1 to
+account 1, PDF 2 to account 2, PDF 3 back to account 1, and so on for however
+many accounts are configured) rather than all going to one "active" account.
+If a page's upload to its assigned account fails, it's retried immediately
+against every other configured account before being given up on for this
+run -- so a single account being full or erroring doesn't stall pages that
+the other account can still take. If uploads fail on every configured
+account several times in a row, that's treated as every account being stuck
+(not a one-off blip) and the whole run stops early (see
+BOTH_ACCOUNTS_FAILURE_THRESHOLD) rather than grinding through the rest of
+the runtime budget failing the same way. Because the DB records exactly
+which account holds each page, pages of one PDF can legitimately live in
+different B2 accounts with no ambiguity — there's no need to ever "redo a
+whole PDF fresh" just to avoid split-page confusion.
+
+This script never reads existing content from B2, only writes there and
+records what it wrote in Postgres.
 
 Designed to run as-is inside GitHub Actions (see
 .github/workflows/process-pdfs.yml) but only needs boto3/psycopg2/requests/
@@ -74,12 +84,7 @@ def load_b2_accounts():
 
 
 B2_ACCOUNTS = load_b2_accounts()
-B2_ACTIVE_ACCOUNT = os.environ.get("B2_ACTIVE_ACCOUNT", "1").strip() or "1"
-if B2_ACTIVE_ACCOUNT not in B2_ACCOUNTS:
-    raise RuntimeError(
-        f"B2_ACTIVE_ACCOUNT={B2_ACTIVE_ACCOUNT!r} is not a configured B2 account "
-        f"(configured: {sorted(B2_ACCOUNTS)})"
-    )
+ACCOUNT_ORDER = sorted(B2_ACCOUNTS)  # e.g. ["1"] or ["1", "2"]; round-robin order
 
 TMP_DIR = pathlib.Path(os.environ.get("PCLOUD_TMPDIR") or tempfile.mkdtemp(prefix="pcloud_work_"))
 IMAGE_DPI = 200
@@ -91,8 +96,40 @@ IMAGE_QUALITY = 85
 UPLOAD_PAGE_PDFS = os.environ.get("UPLOAD_PAGE_PDFS", "").strip().lower() in ("1", "true", "yes")
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; runner guard, exit 42 to hand off to a fresh run
 RUNTIME_GUARD_EXIT_CODE = 42
+# If a page's upload fails on every configured account this many times in a
+# row, that's treated as every account being stuck (full, erroring, etc.)
+# rather than a run of one-off blips, and the whole run stops early instead
+# of spending the rest of the runtime budget failing the same way.
+BOTH_ACCOUNTS_FAILURE_THRESHOLD = 5
+BOTH_ACCOUNTS_FAILURE_EXIT_CODE = 43
 
 START_TIME = time.time()
+
+
+class AllAccountsFailedError(Exception):
+    """Raised once uploads have failed on every configured B2 account too
+    many times in a row (see BOTH_ACCOUNTS_FAILURE_THRESHOLD)."""
+
+
+class UploadHealthTracker:
+    """Tracks consecutive page uploads that failed on every configured B2
+    account. Any single success (on any account) resets the streak -- only
+    a sustained run of total failures looks like every account being stuck."""
+
+    def __init__(self, threshold):
+        self.threshold = threshold
+        self.consecutive_total_failures = 0
+
+    def record_success(self):
+        self.consecutive_total_failures = 0
+
+    def record_total_failure(self):
+        self.consecutive_total_failures += 1
+        if self.consecutive_total_failures >= self.threshold:
+            raise AllAccountsFailedError(
+                f"uploads failed on every configured B2 account "
+                f"{self.consecutive_total_failures} times in a row"
+            )
 
 
 def elapsed():
@@ -198,6 +235,22 @@ def b2_put_file(client, bucket, key, path, content_type):
         client.put_object(Bucket=bucket, Key=key, Body=f, ContentType=content_type)
 
 
+def upload_with_fallback(clients, key, local_path, content_type, primary_account):
+    """Try uploading local_path to `key` under `primary_account` first, then
+    every other configured account in ACCOUNT_ORDER. Returns the account id
+    that succeeded, or raises the last exception if every account failed."""
+    order = [primary_account] + [a for a in ACCOUNT_ORDER if a != primary_account]
+    last_exc = None
+    for account_id in order:
+        try:
+            b2_put_file(clients[account_id], B2_ACCOUNTS[account_id]["bucket"], key, local_path, content_type)
+            return account_id
+        except Exception as exc:
+            last_exc = exc
+            print(f"WARNING: upload to account {account_id} failed: {exc}")
+    raise last_exc
+
+
 def db_connect():
     conn = psycopg2.connect(SUPABASE_DB_URL)
     conn.autocommit = True  # each statement durable immediately, matching the
@@ -268,40 +321,35 @@ def db_mark_pdf_uploaded(conn, fileid, page_no, account, bucket, page_pdf_key):
         )
 
 
-def render_and_upload_image(client, bucket, pdf_path, folder, stem, page_no, work_dir):
+def render_image(pdf_path, folder, stem, page_no, work_dir):
+    """Render one page to a local WebP file. Returns (image_key, local_path)."""
     image_key = f"images/{folder}/{stem}/page_{page_no:04d}.webp"
     image_path = work_dir / f"page_{page_no:04d}.webp"
-    try:
-        images = convert_from_path(str(pdf_path), dpi=IMAGE_DPI, first_page=page_no, last_page=page_no)
-        buf = io.BytesIO()
-        images[0].save(buf, format="WEBP", quality=IMAGE_QUALITY)
-        buf.seek(0)
-        image_path.write_bytes(buf.getvalue())
-        b2_put_file(client, bucket, image_key, image_path, "image/webp")
-        return image_key
-    finally:
-        image_path.unlink(missing_ok=True)
+    images = convert_from_path(str(pdf_path), dpi=IMAGE_DPI, first_page=page_no, last_page=page_no)
+    buf = io.BytesIO()
+    images[0].save(buf, format="WEBP", quality=IMAGE_QUALITY)
+    buf.seek(0)
+    image_path.write_bytes(buf.getvalue())
+    return image_key, image_path
 
 
-def split_and_upload_page_pdf(client, bucket, reader, idx, folder, stem, page_no, work_dir):
+def render_page_pdf(reader, idx, folder, stem, page_no, work_dir):
+    """Split out one page to a local single-page PDF. Returns (page_key, local_path)."""
     page_key = f"pages/{folder}/{stem}/page_{page_no:04d}.pdf"
     page_pdf_path = work_dir / f"page_{page_no:04d}.pdf"
-    try:
-        writer = PdfWriter()
-        writer.add_page(reader.pages[idx])
-        with open(page_pdf_path, "wb") as f:
-            writer.write(f)
-        b2_put_file(client, bucket, page_key, page_pdf_path, "application/pdf")
-        return page_key
-    finally:
-        page_pdf_path.unlink(missing_ok=True)
+    writer = PdfWriter()
+    writer.add_page(reader.pages[idx])
+    with open(page_pdf_path, "wb") as f:
+        writer.write(f)
+    return page_key, page_pdf_path
 
 
-def process_pdf(conn, client, bucket, item):
+def process_pdf(conn, clients, item, assigned_account, health):
     """Returns True once every page needed (images, and pdfs if
     UPLOAD_PAGE_PDFS) is confirmed uploaded — anywhere, per the DB, not
-    necessarily in the active account, since a page done in a prior run
-    under a different B2_ACTIVE_ACCOUNT still counts."""
+    necessarily under `assigned_account`, since a page done in a prior run
+    still counts, and a page uploaded this run may have fallen back to a
+    different account if `assigned_account` failed."""
     folder = item["folder"]
     stem = pathlib.Path(item["name"]).stem
     fileid = item["fileid"]
@@ -315,7 +363,7 @@ def process_pdf(conn, client, bucket, item):
             print(f"skip (already done per DB): {folder}/{stem}")
             return True
 
-    print(f"processing: {folder}/{stem}")
+    print(f"processing: {folder}/{stem} (primary account: {assigned_account})")
     work_dir = TMP_DIR / folder / stem
     work_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = work_dir / item["name"]
@@ -333,24 +381,34 @@ def process_pdf(conn, client, bucket, item):
             page_no = idx + 1
 
             if page_no not in images_done:
+                image_key, image_path = render_image(pdf_path, folder, stem, page_no, work_dir)
                 try:
-                    image_key = render_and_upload_image(client, bucket, pdf_path, folder, stem, page_no, work_dir)
-                    db_mark_image_uploaded(conn, fileid, page_no, B2_ACTIVE_ACCOUNT, bucket, image_key)
+                    account_id = upload_with_fallback(clients, image_key, image_path, "image/webp", assigned_account)
+                    bucket = B2_ACCOUNTS[account_id]["bucket"]
+                    db_mark_image_uploaded(conn, fileid, page_no, account_id, bucket, image_key)
                     images_done.add(page_no)
+                    health.record_success()
                 except Exception as exc:
-                    print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed: {exc}; will retry next run")
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed on every account: {exc}; will retry next run")
                     all_ok = False
+                    health.record_total_failure()
                     continue  # don't attempt the page PDF for a page whose image just failed
+                finally:
+                    image_path.unlink(missing_ok=True)
 
             if UPLOAD_PAGE_PDFS and page_no not in pdfs_done:
+                page_pdf_key, page_pdf_path = render_page_pdf(reader, idx, folder, stem, page_no, work_dir)
                 try:
-                    page_pdf_key = split_and_upload_page_pdf(
-                        client, bucket, reader, idx, folder, stem, page_no, work_dir
-                    )
-                    db_mark_pdf_uploaded(conn, fileid, page_no, B2_ACTIVE_ACCOUNT, bucket, page_pdf_key)
+                    account_id = upload_with_fallback(clients, page_pdf_key, page_pdf_path, "application/pdf", assigned_account)
+                    bucket = B2_ACCOUNTS[account_id]["bucket"]
+                    db_mark_pdf_uploaded(conn, fileid, page_no, account_id, bucket, page_pdf_key)
+                    health.record_success()
                 except Exception as exc:
-                    print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed: {exc}; will retry next run")
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed on every account: {exc}; will retry next run")
                     all_ok = False
+                    health.record_total_failure()
+                finally:
+                    page_pdf_path.unlink(missing_ok=True)
 
         if all_ok:
             print(f"done: {folder}/{stem}")
@@ -370,22 +428,27 @@ def process_pdf(conn, client, bucket, item):
 def main():
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     conn = db_connect()
-    client = b2_client(B2_ACCOUNTS[B2_ACTIVE_ACCOUNT])
-    bucket = B2_ACCOUNTS[B2_ACTIVE_ACCOUNT]["bucket"]
+    clients = {account_id: b2_client(account) for account_id, account in B2_ACCOUNTS.items()}
+    health = UploadHealthTracker(BOTH_ACCOUNTS_FAILURE_THRESHOLD)
 
     print("listing PDFs on pCloud...")
     pdfs = list_pdfs_recursive(PCLOUD_CODE)
     print(f"found {len(pdfs)} PDF(s)")
-    print(f"writing new uploads to B2 account {B2_ACTIVE_ACCOUNT}")
+    print(f"round-robining new uploads across account(s): {', '.join(ACCOUNT_ORDER)}")
 
-    for item in pdfs:
-        if elapsed() > MAX_RUNTIME_SECONDS:
-            print(
-                f"runtime guard tripped after {elapsed():.0f}s; "
-                "stopping before starting a new file"
-            )
-            sys.exit(RUNTIME_GUARD_EXIT_CODE)
-        process_pdf(conn, client, bucket, item)
+    try:
+        for i, item in enumerate(pdfs):
+            if elapsed() > MAX_RUNTIME_SECONDS:
+                print(
+                    f"runtime guard tripped after {elapsed():.0f}s; "
+                    "stopping before starting a new file"
+                )
+                sys.exit(RUNTIME_GUARD_EXIT_CODE)
+            assigned_account = ACCOUNT_ORDER[i % len(ACCOUNT_ORDER)]
+            process_pdf(conn, clients, item, assigned_account, health)
+    except AllAccountsFailedError as exc:
+        print(f"stopping: {exc}")
+        sys.exit(BOTH_ACCOUNTS_FAILURE_EXIT_CODE)
 
     print("all PDFs processed")
 

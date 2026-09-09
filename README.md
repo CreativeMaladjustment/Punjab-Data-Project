@@ -267,9 +267,10 @@ step and three cleanup scripts in sequence, then a final audit if anything actua
    record, so a row step 2 would instead repoint (its image exists, just under the other
    account) is never mistaken for stale. Deleting a `pages` row cascades to its
    `llm_extractions` and `catalogue_entries` rows via the schema's own `ON DELETE CASCADE`.
-5. **Final audit** — only runs if step 2, 3, or 4 actually changed something; its exit code (0
-   clean, 1 issues remain) becomes this job's exit code, so a still-dirty state after cleanup
-   shows up as a failed run instead of a silently-skipped one.
+5. **Final audit** — runs whenever this is an execute run, regardless of whether steps 2-4
+   reported changing anything (a cleanup step can leave real issues in place by skipping what
+   it can't safely act on); its exit code (0 clean, 1 issues remain) becomes this job's exit
+   code, so a still-dirty state after cleanup shows up as a failed run.
 
 Steps 2-4 default to a dry run (each reports what it would do, changes nothing) every time you
 *don't* tick **Actually commit changes** on the workflow's dispatch form; the audits are always

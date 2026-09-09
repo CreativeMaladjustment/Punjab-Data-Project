@@ -1,7 +1,9 @@
 # Audits B2 page images against Postgres, then runs three cleanup steps
-# against whatever the audit found, then -- only if any of those three
-# steps actually changed something -- re-runs the audit to confirm the
-# cleanup worked.
+# against whatever the audit found, then -- on every execute run,
+# unconditionally -- re-runs the audit to confirm the cleanup actually
+# worked (a cleanup step can leave real issues in place by skipping what
+# it can't safely act on, so "nothing reported changed" doesn't mean
+# "nothing is wrong").
 #
 #   1. Audit (scripts/audit_b2_pages.py) -- read-only; reports duplicates,
 #      images with no matching `pages` row, and mismatched `pages` rows.
@@ -13,10 +15,10 @@
 #      B2 images with no matching `pcloud_files` row at all.
 #   4. Remove stale pages (scripts/remove_stale_pages.py) -- deletes `pages`
 #      rows with no backing image in either account.
-#   5. Final audit -- only runs if step 2, 3, or 4 actually changed
-#      something; its exit code (0 = clean, 1 = issues remain) is this
-#      job's exit code, so a still-dirty state after cleanup shows up as a
-#      failed run.
+#   5. Final audit -- runs whenever this is an execute run (see below), all
+#      other input regardless; its exit code (0 = clean, 1 = issues remain)
+#      is this job's exit code, so a still-dirty state after cleanup shows
+#      up as a failed run.
 #
 # Defaults to a dry run for steps 2-4 every time (each reports what it
 # would do, changes nothing) -- tick "Actually commit changes" to have them

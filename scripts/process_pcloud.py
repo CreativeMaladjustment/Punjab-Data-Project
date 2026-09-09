@@ -1,10 +1,11 @@
-"""Download PDFs from a public pCloud folder, split into single-page PDFs,
-render each page as a vision-optimized image, and upload both to Backblaze B2.
+"""Download PDFs from a public pCloud folder, render each page as a
+vision-optimized WebP image, and upload it to Backblaze B2. Optionally (see
+UPLOAD_PAGE_PDFS) also splits out and uploads a single-page PDF per page.
 
-B2 is the source of truth for resumability: every unit of work (a page PDF, a
-page image, a "this whole PDF is done" marker) is checked against B2 before
-it is redone, so a killed or re-dispatched run just continues where it left
-off. Designed to run as-is inside GitHub Actions (see
+B2 is the source of truth for resumability: every unit of work (a page image,
+optionally a page PDF, a "this whole PDF is done" marker) is checked against
+B2 before it is redone, so a killed or re-dispatched run just continues where
+it left off. Designed to run as-is inside GitHub Actions (see
 .github/workflows/process-pdfs.yml) but only needs boto3/requests/pypdf/
 pdf2image/pillow and network access to run anywhere.
 
@@ -40,6 +41,11 @@ B2_BUCKET_NAME = os.environ["B2_BUCKET_NAME"]
 TMP_DIR = pathlib.Path(os.environ.get("PCLOUD_TMPDIR") or tempfile.mkdtemp(prefix="pcloud_work_"))
 IMAGE_DPI = 200
 IMAGE_QUALITY = 85
+# The single-page PDFs aren't currently used by anything downstream (only the
+# WebP images are fed to the LLM extraction stage) and roughly double both
+# runtime and B2 storage for no present benefit. Off by default; flip
+# UPLOAD_PAGE_PDFS=true to bring them back if something needs them later.
+UPLOAD_PAGE_PDFS = os.environ.get("UPLOAD_PAGE_PDFS", "").strip().lower() in ("1", "true", "yes")
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; runner guard, exit 42 to hand off to a fresh run
 RUNTIME_GUARD_EXIT_CODE = 42
 
@@ -164,52 +170,57 @@ def b2_put_bytes(client, key, data, content_type="text/plain"):
 
 
 def split_and_upload_pages(client, pdf_path, folder, stem, work_dir):
-    """Split pdf_path into single-page PDFs + page images, uploading each to
-    B2 (skipping any that already exist there). Returns True once every page
-    is confirmed present on B2.
+    """Render each page of pdf_path as a WebP image (and, if UPLOAD_PAGE_PDFS
+    is set, also split out a single-page PDF), uploading each to B2 (skipping
+    any that already exist there). Images are rendered directly from the
+    source PDF via pdf2image's first_page/last_page, with no per-page PDF
+    needed as an intermediate. Returns True once every expected output is
+    confirmed present on B2.
     """
     reader = PdfReader(str(pdf_path))
     page_count = len(reader.pages)
 
     for idx in range(page_count):
         page_no = idx + 1
-        page_key = f"pages/{folder}/{stem}/page_{page_no:04d}.pdf"
         image_key = f"images/{folder}/{stem}/page_{page_no:04d}.webp"
-
-        page_pdf_path = work_dir / f"page_{page_no:04d}.pdf"
         image_path = work_dir / f"page_{page_no:04d}.webp"
 
         try:
-            if not b2_exists(client, page_key):
-                writer = PdfWriter()
-                writer.add_page(reader.pages[idx])
-                with open(page_pdf_path, "wb") as f:
-                    writer.write(f)
-                b2_put_file(client, page_key, page_pdf_path, "application/pdf")
-
             if not b2_exists(client, image_key):
-                if not page_pdf_path.exists():
-                    writer = PdfWriter()
-                    writer.add_page(reader.pages[idx])
-                    with open(page_pdf_path, "wb") as f:
-                        writer.write(f)
-                images = convert_from_path(str(page_pdf_path), dpi=IMAGE_DPI)
+                images = convert_from_path(
+                    str(pdf_path), dpi=IMAGE_DPI, first_page=page_no, last_page=page_no
+                )
                 buf = io.BytesIO()
                 images[0].save(buf, format="WEBP", quality=IMAGE_QUALITY)
                 buf.seek(0)
                 image_path.write_bytes(buf.getvalue())
                 b2_put_file(client, image_key, image_path, "image/webp")
         finally:
-            page_pdf_path.unlink(missing_ok=True)
             image_path.unlink(missing_ok=True)
+
+        if UPLOAD_PAGE_PDFS:
+            page_key = f"pages/{folder}/{stem}/page_{page_no:04d}.pdf"
+            page_pdf_path = work_dir / f"page_{page_no:04d}.pdf"
+            try:
+                if not b2_exists(client, page_key):
+                    writer = PdfWriter()
+                    writer.add_page(reader.pages[idx])
+                    with open(page_pdf_path, "wb") as f:
+                        writer.write(f)
+                    b2_put_file(client, page_key, page_pdf_path, "application/pdf")
+            finally:
+                page_pdf_path.unlink(missing_ok=True)
 
     # Final verification pass before the .done marker is written.
     for idx in range(page_count):
         page_no = idx + 1
-        page_key = f"pages/{folder}/{stem}/page_{page_no:04d}.pdf"
         image_key = f"images/{folder}/{stem}/page_{page_no:04d}.webp"
-        if not b2_exists(client, page_key) or not b2_exists(client, image_key):
+        if not b2_exists(client, image_key):
             return False
+        if UPLOAD_PAGE_PDFS:
+            page_key = f"pages/{folder}/{stem}/page_{page_no:04d}.pdf"
+            if not b2_exists(client, page_key):
+                return False
     return True
 
 

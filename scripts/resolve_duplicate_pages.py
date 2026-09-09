@@ -41,7 +41,11 @@ SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
 EXECUTE = "--execute" in sys.argv[1:]
 
-IMAGE_KEY_RE = re.compile(r"^images/(?P<folder>.+)/(?P<stem>[^/]+)/page_(?P<page>\d+)\.webp$")
+# folder uses .* (not .+): a pCloud PDF sitting in the share's root has
+# folder == "", which process_pcloud.py renders as "images//stem/..." --
+# .+ would refuse to match that at all, silently hiding root-folder PDFs
+# from this script entirely.
+IMAGE_KEY_RE = re.compile(r"^images/(?P<folder>.*)/(?P<stem>[^/]+)/page_(?P<page>\d+)\.webp$")
 
 
 def load_b2_accounts():
@@ -105,18 +109,35 @@ def db_connect():
 
 
 def fetch_fileid_by_folder_stem(conn):
+    """Return {(folder, stem): pcloud_fileid}, excluding any (folder, stem) shared
+    by more than one pcloud_files row -- ambiguous, so left out entirely rather than
+    silently picking one and risking repointing/deleting for the wrong PDF."""
     with conn.cursor() as cur:
         cur.execute("SELECT pcloud_fileid, name, folder FROM pcloud_files")
         rows = cur.fetchall()
     conn.rollback()  # read-only; drop the implicit transaction
-    return {(folder, pathlib.Path(name).stem): fileid for fileid, name, folder in rows}
+
+    by_key = {}
+    ambiguous = set()
+    for fileid, name, folder in rows:
+        key = (folder, pathlib.Path(name).stem)
+        if key in by_key and by_key[key] != fileid:
+            ambiguous.add(key)
+        else:
+            by_key[key] = fileid
+    for key in ambiguous:
+        del by_key[key]
+        print(f"WARNING: multiple pcloud_files rows share folder/stem {key!r}; can't safely map, skipping")
+    return by_key
 
 
 def fetch_page_row(conn, fileid, page_no):
-    """Return (b2_account, b2_bucket, image_key) for this page, or None."""
+    """Return (b2_account, b2_bucket, image_key, image_uploaded_at_is_set) for this
+    page, or None if no row exists."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT b2_account, b2_bucket, image_key FROM pages WHERE pcloud_fileid = %s AND page_no = %s",
+            "SELECT b2_account, b2_bucket, image_key, image_uploaded_at IS NOT NULL "
+            "FROM pages WHERE pcloud_fileid = %s AND page_no = %s",
             (fileid, page_no),
         )
         row = cur.fetchone()
@@ -131,10 +152,16 @@ def upsert_page_location(conn, fileid, page_no, account, bucket, image_key):
             "VALUES (%s, %s, %s, %s, %s, now()) "
             "ON CONFLICT (pcloud_fileid, page_no) DO UPDATE SET "
             "b2_account = EXCLUDED.b2_account, b2_bucket = EXCLUDED.b2_bucket, "
-            "image_key = EXCLUDED.image_key",
-            # image_uploaded_at is deliberately left untouched on conflict --
-            # this corrects *where* the image is recorded, not *when* it was
-            # uploaded, so an existing row's original timestamp survives.
+            "image_key = EXCLUDED.image_key, "
+            "image_uploaded_at = COALESCE(pages.image_uploaded_at, now())",
+            # image_uploaded_at is only set when it was NULL -- this corrects
+            # *where* the image is recorded, not *when* it was uploaded, so an
+            # existing row's real timestamp survives. But a NULL there (e.g. a
+            # placeholder row migrate_b2_state_to_db.py left behind for a page
+            # whose PDF was migrated before its image was) must still be
+            # backfilled once we've confirmed the image really is in B2 --
+            # otherwise process_pcloud.py's "is this page's image done"
+            # check keeps seeing it as not uploaded.
             (fileid, page_no, account, bucket, image_key),
         )
 
@@ -182,7 +209,17 @@ def main():
             continue
 
         current = fetch_page_row(conn, fileid, page_no)
-        needs_fix = current != (correct_account, correct_bucket, correct_key)
+        if current is None:
+            location_ok = False
+        else:
+            current_account, current_bucket, current_key, uploaded_at_set = current
+            location_ok = (current_account, current_bucket, current_key) == (
+                correct_account, correct_bucket, correct_key,
+            )
+        # A row whose location is already right but whose image_uploaded_at is
+        # still NULL (e.g. a placeholder row from a page-PDF-only migration)
+        # still needs fixing -- we've just confirmed the image really is here.
+        needs_fix = current is None or not location_ok or not current[3]
 
         if not needs_fix and not needs_delete:
             already_ok += 1
@@ -190,7 +227,12 @@ def main():
 
         action = []
         if needs_fix:
-            action.append("CREATE pages row" if current is None else "REPOINT pages row")
+            if current is None:
+                action.append("CREATE pages row")
+            elif not location_ok:
+                action.append("REPOINT pages row")
+            else:
+                action.append("backfill image_uploaded_at")
         if needs_delete:
             action.append("delete account-2 copy")
         print(f"  {folder}/{stem} page {page_no}: {', '.join(action)} -> account {correct_account}")

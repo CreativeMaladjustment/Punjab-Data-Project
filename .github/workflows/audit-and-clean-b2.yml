@@ -35,7 +35,10 @@ on:
 jobs:
   audit-and-clean:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # Sequential audit + three cleanup passes + a possible final audit, where
+    # the individual workflows this replaced budgeted 30-60 min each on their
+    # own -- 60 min total was never enough headroom for the combined job.
+    timeout-minutes: 180
     environment: b2-upload
     steps:
       - name: Checkout
@@ -128,10 +131,12 @@ jobs:
           fi
 
       - name: Audit (after)
-        if: >-
-          steps.resolve.outputs.changed == 'true' ||
-          steps.remove_unlinked.outputs.changed == 'true' ||
-          steps.remove_stale.outputs.changed == 'true'
+        # Runs on every real execute run, not just when a cleanup step
+        # reports changed=true: a script can leave real issues in place by
+        # skipping what it can't safely act on (e.g. an ambiguous
+        # folder/stem), and changed would still read false then. Re-auditing
+        # unconditionally after execute is what actually catches that.
+        if: inputs.execute == true
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}

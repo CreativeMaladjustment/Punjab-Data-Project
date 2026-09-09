@@ -3,14 +3,18 @@
 # uploaded to B2, writing schema.md-shaped entry JSON back to B2.
 #
 # GitHub-hosted runners have no GPU, so this is CPU inference: expect it to
-# be slow per page. The model list below is a shortlist of small vision
-# models chosen for that reason. Pick "all" to fan them out as a matrix run
-# so you can compare quality/speed across models; each model's output is
-# namespaced separately in B2 so runs never clobber each other.
+# be slow per page. The model list below is a shortlist of small (1B-8B),
+# non-cloud-gated vision models pulled from Ollama's current vision-model
+# listing (ollama.com/search?c=vision) — "cloud"-badged entries there are
+# Ollama-hosted-only and can't run locally, so they're excluded. glm-ocr is
+# included because it's purpose-built for document OCR, which is exactly
+# this task. Pick "all" to fan them out as a matrix run so you can compare
+# quality/speed across models; each model's output is namespaced separately
+# in B2 so runs never clobber each other.
 #
-# Ollama's model library can change tag names over time — if `ollama pull`
-# fails for one of these, check https://ollama.com/library for the current
-# tag and update the `options` list below.
+# Ollama's model library changes over time — if `ollama pull` fails for one
+# of these, check https://ollama.com/library for the current tag and update
+# the `options` list below.
 name: Extract catalogue entries with a local LLM
 
 on:
@@ -19,12 +23,14 @@ on:
       model:
         description: "Ollama vision model to run (or 'all' to matrix every shortlisted model)"
         type: choice
-        default: moondream
+        default: minicpm-v4.6
         options:
-          - moondream
-          - llava-phi3
-          - minicpm-v
-          - llava
+          - minicpm-v4.6
+          - qwen3-vl:2b
+          - qwen3-vl:4b
+          - gemma4:e2b
+          - glm-ocr
+          - minicpm-v4.5
           - all
 
 permissions:
@@ -39,7 +45,7 @@ jobs:
       - id: set
         run: |
           if [ "${{ inputs.model }}" = "all" ]; then
-            echo 'models=["moondream","llava-phi3","minicpm-v","llava"]' >> "$GITHUB_OUTPUT"
+            echo 'models=["minicpm-v4.6","qwen3-vl:2b","qwen3-vl:4b","gemma4:e2b","glm-ocr","minicpm-v4.5"]' >> "$GITHUB_OUTPUT"
           else
             echo "models=[\"${{ inputs.model }}\"]" >> "$GITHUB_OUTPUT"
           fi

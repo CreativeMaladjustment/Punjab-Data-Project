@@ -123,9 +123,11 @@ GPU, so this is CPU inference and will be slow per page; the workflow uses the s
 runtime-guard-and-manual-resume pattern as `process-pdfs.yml` (exits `42` after ~5 hours, a job
 summary notice tells you to re-run it) rather than trying to finish in one run.
 
-`workflow_dispatch` takes a `model` choice — a shortlist of small vision models chosen for
-being CPU-feasible (`moondream`, `llava-phi3`, `minicpm-v`, `llava`), or `all` to fan them out
-as a parallel matrix so you can bake off quality/speed across models on the same page images.
+`workflow_dispatch` takes a `model` choice — a shortlist of small (1B-8B), non-cloud-gated
+vision models pulled from Ollama's current vision listing (`minicpm-v4.6`, `qwen3-vl:2b`,
+`qwen3-vl:4b`, `gemma4:e2b`, `glm-ocr`, `minicpm-v4.5`), or `all` to fan them out as a parallel
+matrix so you can bake off quality/speed across models on the same page images. `glm-ocr` is
+included because it's purpose-built for document OCR — exactly this task.
 Each model's output is namespaced under `extractions/<model>/...` in B2, so different models'
 runs never clobber each other and can be compared side by side. Ollama's library can rename or
 drop model tags over time — if `ollama pull` fails for one of these, check

@@ -316,6 +316,11 @@ def db_save_extraction_success(conn, page_id, model, model_tag, entries):
 
 
 def db_save_extraction_failure(conn, page_id, model, model_tag, error_message):
+    # If db_save_extraction_success() raised partway through (e.g. a bad
+    # catalogue_entries insert), the connection is left in an aborted
+    # transaction; rolling back first (a no-op if there's nothing to undo)
+    # keeps this write from failing too and taking down the whole run.
+    conn.rollback()
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO llm_extractions (page_id, model, model_tag, status, error_message) "

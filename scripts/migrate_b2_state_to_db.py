@@ -234,6 +234,7 @@ INSERT_ENTRY_SQL = """
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
     )
+    ON CONFLICT (extraction_id, entry_index) DO NOTHING
 """
 
 
@@ -249,9 +250,19 @@ def db_save_extraction(conn, page_id, model_tag, entries):
             (page_id, model_tag, model_tag, Json(entries)),
         )
         row = cur.fetchone()
-        if row is None:
-            return  # already migrated
-        extraction_id = row[0]
+        if row is not None:
+            extraction_id = row[0]
+        else:
+            # llm_extractions row already exists from a prior run of this script.
+            # That run may have crashed after this insert but before every
+            # catalogue_entries row below was written -- look the extraction up
+            # and re-run the entry inserts (ON CONFLICT DO NOTHING) rather than
+            # assuming "exists" means "fully migrated".
+            cur.execute(
+                "SELECT id FROM llm_extractions WHERE page_id = %s AND model_tag = %s",
+                (page_id, model_tag),
+            )
+            extraction_id = cur.fetchone()[0]
         for idx, entry in enumerate(entries):
             cur.execute(
                 INSERT_ENTRY_SQL,

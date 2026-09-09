@@ -23,7 +23,9 @@ import psycopg2
 
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
-IMAGE_KEY_RE = re.compile(r"^images/(?P<folder>.+)/(?P<stem>[^/]+)/page_(?P<page>\d+)\.webp$")
+# folder uses .* (not .+): a pCloud PDF sitting in the share's root has
+# folder == "", which process_pcloud.py renders as "images//stem/...".
+IMAGE_KEY_RE = re.compile(r"^images/(?P<folder>.*)/(?P<stem>[^/]+)/page_(?P<page>\d+)\.webp$")
 
 
 def load_b2_accounts():

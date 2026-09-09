@@ -133,6 +133,12 @@ def main():
             f.write(f"- **Mode:** {'EXECUTE' if EXECUTE else 'dry run'}\n")
             f.write(f"- **{'Deleted' if EXECUTE else 'Would delete'}:** {len(to_delete)}\n")
 
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if output_path:
+        changed = EXECUTE and len(to_delete) > 0
+        with open(output_path, "a", encoding="utf-8") as f:
+            f.write(f"changed={'true' if changed else 'false'}\n")
+
     if not EXECUTE:
         print("\nDry run complete -- no changes were made. Re-run with --execute to commit.")
     else:

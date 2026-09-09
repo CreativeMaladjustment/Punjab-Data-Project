@@ -28,6 +28,7 @@ viewer that opens every record's source page image.
 | `scripts/process_pcloud.py`, `.github/workflows/process-pdfs.yml` | On-demand pipeline: pCloud source PDFs → LLM-vision-ready images (optionally single-page PDFs too) → Backblaze B2, status tracked in Postgres (see below) |
 | `scripts/extract_with_llm.py`, `.github/workflows/extract-pages.yml` | On-demand pipeline: B2 page images → catalogue entries via a local vision LLM (Ollama, on-runner) → Postgres (see below) |
 | `scripts/migrate_b2_state_to_db.py`, `.github/workflows/migrate-b2-state.yml` | One-time backfill: existing B2 `.done` markers/extraction JSON → Postgres rows, old markers deleted (see below) |
+| `scripts/audit_b2_pages.py`, `.github/workflows/audit-b2-pages.yml` | Read-only audit: B2 page images vs. `pages` rows, cross-account duplicates (see below) |
 | `supabase/migrations/` | Postgres schema for the above: `pcloud_files`, `pages`, `llm_extractions`, `catalogue_entries` (see below) |
 | `analysis/slice_1910/` | Analysis over the corpus: `build_network.py`, `script_market.py`, `build_site.py` (regenerates `docs/index.html`) |
 | `analysis/ocr_lab/` | The native-script workstream: legibility measurements (`E0B_RESULTS.md`), localization results, and `REIMAGING_PILOT.md` — the 21-page experiment that decides whether re-imaging the volumes is worth buying |
@@ -240,6 +241,15 @@ you tick **Actually commit changes** on the workflow's dispatch form — deletes
 B2 untouched; only the markers are ever deleted. Defaults to a dry run (prints what it would
 do, changes nothing) every time you *don't* tick that box, and is safe to re-run either way —
 every write is an upsert, so a stem already migrated is just skipped.
+
+**Audit**: `.github/workflows/audit-b2-pages.yml` runs `scripts/audit_b2_pages.py`, a read-only
+check (never writes to B2 or Postgres) that lists every `images/**/*.webp` object in each
+configured B2 account/bucket and cross-references it against `pages`. It reports three things
+in the job summary: images with no matching `pages` row at all, images whose `pages` row points
+at a different account/bucket/key than where the image actually is (a stale record), and any
+page whose image was uploaded to more than one B2 account (most likely from switching
+`B2_ACTIVE_ACCOUNT` without `process_pcloud.py` knowing the other account already had that
+page). Exits non-zero if it finds anything, so the workflow run visibly flags a problem.
 
 ## Security scanning
 

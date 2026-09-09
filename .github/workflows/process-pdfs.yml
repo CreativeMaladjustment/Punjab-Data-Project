@@ -7,6 +7,13 @@ on:
         description: "Also split and upload a single-page PDF per page (in addition to the WebP image, which is always uploaded)"
         type: boolean
         default: false
+      b2_account:
+        description: "Which Backblaze account/bucket to use (see README's 'Second B2 account' section for the matching secrets)"
+        type: choice
+        default: "1"
+        options:
+          - "1"
+          - "2"
 
 jobs:
   process:
@@ -48,10 +55,10 @@ jobs:
         env:
           PCLOUD_CODE: ${{ vars.PCLOUD_CODE }}
           UPLOAD_PAGE_PDFS: ${{ inputs.upload_page_pdfs }}
-          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
-          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
-          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
-          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT: ${{ inputs.b2_account == '2' && secrets.B2_ENDPOINT_2 || secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ inputs.b2_account == '2' && secrets.B2_KEY_ID_2 || secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ inputs.b2_account == '2' && secrets.B2_APPLICATION_KEY_2 || secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ inputs.b2_account == '2' && secrets.B2_BUCKET_NAME_2 || secrets.B2_BUCKET_NAME }}
         run: |
           set +e
           python scripts/process_pcloud.py

@@ -149,8 +149,8 @@ drop model tags over time — if `ollama pull` fails for one of these, check
 [ollama.com/library](https://ollama.com/library) for the current tag and update the `options`
 list in the workflow.
 
-Uses the same `b2-upload` environment and secrets as `process-pdfs.yml` — no additional secrets
-needed.
+Uses the same `b2-upload` environment and secrets as `process-pdfs.yml` (plus the second-account
+secrets below, if you're using account `2`) — no secrets specific to this workflow.
 
 **B2 free-tier transaction cap:** existing outputs are checked via a handful of cheap "Class C"
 list calls rather than one "Class B" HeadObject per page (Class B is capped at 2,500/day on
@@ -158,6 +158,34 @@ B2's free tier — a naive per-page-HEAD idiom burns through that almost immedia
 scale). Extracting a page still costs one genuine Class B download (fetching the image bytes
 to send to Ollama isn't avoidable), so a corpus with more than ~2,500 not-yet-extracted pages
 will still need multiple days/resumed runs on a free-tier account — that's expected, not a bug.
+
+## Second B2 account
+
+Both B2-backed workflows (`process-pdfs.yml`, `extract-pages.yml`) take a **B2 account** choice
+(`1` or `2`, default `1`) on `workflow_dispatch` — useful once a bucket fills up (storage or a
+daily transaction cap) and you've created a second bucket, possibly under a whole separate
+Backblaze account, to keep going.
+
+Add a second full set of secrets to the same `b2-upload` environment, suffixed `_2`:
+
+| Secret | Purpose |
+|---|---|
+| `B2_ENDPOINT_2` | The second bucket's B2 S3-compatible endpoint |
+| `B2_KEY_ID_2` / `B2_APPLICATION_KEY_2` | An application key scoped to the second bucket |
+| `B2_BUCKET_NAME_2` | The second bucket's name |
+
+The original `B2_ENDPOINT`/`B2_KEY_ID`/`B2_APPLICATION_KEY`/`B2_BUCKET_NAME` secrets remain
+account `1` — nothing to rename. Picking `2` in the workflow's dropdown swaps in the `_2`
+secrets via the workflow YAML's `env:` block; no script changes are needed since both scripts
+only ever read the plain `B2_ENDPOINT`/etc. environment variable names.
+
+**This is a manual switch, not automatic failover or a merged view across accounts.** Nothing
+here copies data between buckets or spans a corpus across two buckets automatically — content
+already in account `1` stays there, and `extract-pages.yml` can only see the images already
+uploaded to whichever account you pick for that run. If you point `process-pdfs.yml` at account
+`2` to keep uploading new PDFs' pages once account `1` fills up, point `extract-pages.yml` at
+account `2` as well when you're ready to extract that batch — the two workflows have to agree
+on which account holds the images being worked on.
 
 ## Security scanning
 

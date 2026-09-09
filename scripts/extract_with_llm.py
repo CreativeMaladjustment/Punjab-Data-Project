@@ -188,8 +188,88 @@ def flag_if_printed_page_missing(entry):
     return entry
 
 
-def extract_page(image_bytes):
+# pipeline/schema.md's entry field names exactly -- not source_folder/
+# source_pdf, which process_pdf() sets on each entry itself *after*
+# extract_page() returns, so the model never sees or emits them; including
+# them here would recognize a shape the model can't actually produce,
+# weakening the disambiguation this set exists for. `flags` is the
+# schema's only array-valued field -- every other field is a scalar -- so
+# a single entry emitted flat (not wrapped in a list) that fills in
+# `flags` (the system prompt says to use it "aggressively") is otherwise
+# indistinguishable by value shape alone from a dict with one list-valued
+# envelope key. Checking against these known field names resolves that
+# ambiguity instead of guessing from types.
+ENTRY_FIELD_NAMES = {
+    "quarter", "pdf_page", "printed_page", "section", "lang", "char", "topic",
+    "serial", "reg", "copies", "printer_verbatim", "printer", "pcity", "author",
+    "title", "title_native", "gloss", "pp_verbatim", "publisher", "pubcity",
+    "date", "price", "edition", "format", "method", "educ", "copyright",
+    "notes", "marks", "flags",
+}
+
+
+def _coerce_to_entry_list(parsed):
+    """Some local models wrap the requested JSON array in a dict, or emit a
+    single entry object instead of a one-entry array, even when told to
+    output the array only -- observed from minicpm-v4.5 in practice. Recover
+    the actual list in these common shapes rather than failing the whole
+    page over the model not nesting things exactly as asked:
+
+      - a single entry emitted flat -> [parsed], recognized by at least one
+        key being a known schema entry field (see ENTRY_FIELD_NAMES;
+        without this an unrelated dict, e.g. an error payload, would pass
+        as a bogus "entry" just because it has no dict values) and no
+        dict-valued keys at all -- the schema has no dict-valued fields,
+        so one present means something is genuinely off, not a real entry.
+        Deliberately *not* conditioned on how many list-valued keys it has
+        or what they're named: `flags` is the schema's one array field,
+        but a real entry hallucinating some other list field alongside
+        known fields (e.g. {"title": "x", "tags": [...]}) is still a
+        single entry, not an envelope to unwrap into just that list.
+      - otherwise (no known schema keys at all), a dict with exactly one
+        list-valued key and no dict-valued keys -- e.g. {"entries": [...]},
+        or {"entries": [...], "count": 3} -- is an envelope -> unwrap to
+        that list. A dict-valued key alongside it (e.g. {"entries": [...],
+        "meta": {...}}) is exactly the "genuinely unrecognized shape" this
+        function is meant to still raise on, not metadata to discard.
+
+    Anything else still raises, with the dict's keys included so a real
+    unrecognized shape is diagnosable from the error message alone.
+
+    Every element of the returned list is checked to be an entry dict
+    (not e.g. a bare string from {"entries": ["oops"]}) before returning,
+    on every path -- including the plain-list pass-through -- so a
+    genuinely malformed element shape raises a clear error here instead
+    of an opaque AttributeError from process_pdf()'s entry.setdefault(...)
+    calls three frames away.
+    """
+    if isinstance(parsed, list):
+        result = parsed
+    elif not isinstance(parsed, dict):
+        raise ValueError(f"expected a JSON array, got {type(parsed).__name__}")
+    else:
+        known_keys = parsed.keys() & ENTRY_FIELD_NAMES
+        has_dict_value = any(isinstance(v, dict) for v in parsed.values())
+
+        if known_keys and not has_dict_value:
+            result = [parsed]
+        elif not known_keys and not has_dict_value:
+            list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
+            if len(list_items) != 1:
+                raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
+            result = list_items[0][1]
+        else:
+            raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
+
+    bad_types = sorted({type(e).__name__ for e in result if not isinstance(e, dict)})
+    if bad_types:
+        raise ValueError(f"expected a list of entry objects, got element type(s) {bad_types}")
+    return result
+
+
+def extract_page(image_bytes, context=""):
     b64 = base64.b64encode(image_bytes).decode()
+    started = time.time()
     resp = requests.post(
         f"{OLLAMA_HOST}/api/generate",
         json={
@@ -205,10 +285,12 @@ def extract_page(image_bytes):
     resp.raise_for_status()
     text = resp.json()["response"].strip()
     text = re.sub(r"^```(json)?|```$", "", text, flags=re.M).strip()
-    entries = json.loads(text)  # fail loudly; the page can be retried next run
-    if not isinstance(entries, list):
-        raise ValueError(f"expected a JSON array, got {type(entries).__name__}")
-    return entries
+    print(
+        f"    ollama response for {context} in {time.time() - started:.1f}s "
+        f"({len(text)} chars): {text[:300]!r}"
+    )
+    parsed = json.loads(text)  # fail loudly; the page can be retried next run
+    return _coerce_to_entry_list(parsed)
 
 
 def _text(entry, key):
@@ -339,6 +421,8 @@ def process_pdf(conn, clients, folder, stem, pages):
     print(f"processing: {MODEL_TAG}/{folder}/{stem} ({len(pages)} pages)")
     all_ok = True
     for page_id, _fileid, page_no, account, bucket, image_key in pages:
+        context = f"{folder}/{stem} page {page_no}"
+        print(f"  page {page_no}: b2 account={account} bucket={bucket} key={image_key}")
         try:
             client = clients[account]
         except KeyError:
@@ -348,12 +432,14 @@ def process_pdf(conn, clients, folder, stem, pages):
             )
         try:
             image_bytes = b2_get_bytes(client, bucket, image_key)
-            entries = extract_page(image_bytes)
+            entries = extract_page(image_bytes, context=context)
             for entry in entries:
                 entry.setdefault("source_folder", folder)
                 entry.setdefault("source_pdf", stem)
                 entry["pdf_page"] = page_no - 1  # known exactly; don't trust the model's guess
                 flag_if_printed_page_missing(entry)
+            entries_json = json.dumps(entries)
+            print(f"    saving {len(entries)} entries for {context}: {entries_json[:500]!r}")
             db_save_extraction_success(conn, page_id, OLLAMA_MODEL, MODEL_TAG, entries)
         except Exception as exc:
             print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")

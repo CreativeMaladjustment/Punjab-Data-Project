@@ -115,7 +115,8 @@ def fetch_fileid_by_folder_stem(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT pcloud_fileid, name, folder FROM pcloud_files")
         rows = cur.fetchall()
-    conn.rollback()  # read-only; drop the implicit transaction
+    # No rollback here: db_connect() sets autocommit, so there's no open
+    # transaction left behind by a plain SELECT to drop.
 
     by_key = {}
     ambiguous = set()
@@ -141,7 +142,7 @@ def fetch_page_row(conn, fileid, page_no):
             (fileid, page_no),
         )
         row = cur.fetchone()
-    conn.rollback()
+    # No rollback here either -- same reason as fetch_fileid_by_folder_stem().
     return row
 
 
@@ -211,6 +212,7 @@ def main():
         current = fetch_page_row(conn, fileid, page_no)
         if current is None:
             location_ok = False
+            uploaded_at_set = False
         else:
             current_account, current_bucket, current_key, uploaded_at_set = current
             location_ok = (current_account, current_bucket, current_key) == (
@@ -219,7 +221,7 @@ def main():
         # A row whose location is already right but whose image_uploaded_at is
         # still NULL (e.g. a placeholder row from a page-PDF-only migration)
         # still needs fixing -- we've just confirmed the image really is here.
-        needs_fix = current is None or not location_ok or not current[3]
+        needs_fix = not location_ok or not uploaded_at_set
 
         if not needs_fix and not needs_delete:
             already_ok += 1

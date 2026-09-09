@@ -5,13 +5,23 @@ already uploaded to B2 and writes one JSON file per page (following
 pipeline/schema.md's entry schema) back to B2.
 
 B2 is the source of truth for resumability, same pattern as
-process_pcloud.py: every page's output is checked before being redone, and a
+process_pcloud.py: existing output keys are listed *once* per run (cheap
+"Class C" ListObjectsV2 calls) rather than checked individually with
+HeadObject per page — B2's free tier caps "Class B" transactions (which
+HeadObject bills as) at 2,500/day, and a per-page-HEAD idiom burns through
+that almost immediately at this scale. A
 extractions/<MODEL_TAG>/processed/<folder>/<stem>.done marker is only written
-once every page for that source PDF is verified present. Results are
+once every page for that source PDF is confirmed present. Results are
 namespaced by model (OLLAMA_MODEL,
 slugified into MODEL_TAG) so multiple models can be tried against the same
 page images without clobbering each other's output — run the workflow once
 per model to bake them off against each other.
+
+Note that extracting each page still costs one real B2 download (GetObject,
+genuinely "Class B" — fetching the image bytes to send to Ollama isn't
+avoidable) per not-yet-processed page, so a corpus with more than ~2,500
+not-yet-extracted pages will still need multiple days/resumed runs against a
+free-tier B2 account regardless of this optimization.
 
 Requires an Ollama server already running and reachable at OLLAMA_HOST (see
 .github/workflows/extract-pages.yml) with OLLAMA_MODEL already pulled.
@@ -26,7 +36,6 @@ import time
 
 import boto3
 import requests
-from botocore.exceptions import ClientError
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.environ["OLLAMA_MODEL"]
@@ -78,14 +87,20 @@ def b2_client():
     )
 
 
-def b2_exists(client, key):
-    try:
-        client.head_object(Bucket=B2_BUCKET_NAME, Key=key)
-        return True
-    except ClientError as exc:
-        if exc.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
-            return False
-        raise
+def list_existing_keys(client, prefix):
+    """Return every existing object key under prefix in a handful of B2
+    "Class C" list transactions, rather than one "Class B" HeadObject call
+    per key. B2's free tier caps Class B at 2,500/day; checking existence
+    per-page via HeadObject burns through that almost immediately at this
+    scale (thousands of pages), while ListObjectsV2 handles up to 1000 keys
+    per call and is billed in the much cheaper class.
+    """
+    paginator = client.get_paginator("list_objects_v2")
+    keys = set()
+    for page in paginator.paginate(Bucket=B2_BUCKET_NAME, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            keys.add(obj["Key"])
+    return keys
 
 
 def b2_get_bytes(client, key):
@@ -171,38 +186,39 @@ def extract_page(image_bytes):
     return entries
 
 
-def process_pdf(client, folder, stem, page_keys):
-    """Returns True once every page for this PDF is verified present in B2
-    (including pages that were already done on a prior run); False if any
-    page still needs a retry."""
+def process_pdf(client, folder, stem, page_keys, existing):
+    """Returns True once every page for this PDF is confirmed present in B2
+    this run (including pages already done on a prior run, per `existing`);
+    False if any page still needs a retry. `existing` is mutated in place as
+    outputs are confirmed, so later PDFs in the same run see them too."""
     done_key = f"extractions/{MODEL_TAG}/processed/{folder}/{stem}.done"
-    if b2_exists(client, done_key):
+    if done_key in existing:
         print(f"skip (already done): {MODEL_TAG}/{folder}/{stem}")
         return True
 
     print(f"processing: {MODEL_TAG}/{folder}/{stem} ({len(page_keys)} pages)")
+    all_ok = True
     for page_no, image_key in page_keys:
         out_key = f"extractions/{MODEL_TAG}/{folder}/{stem}/page_{page_no:04d}.json"
-        if b2_exists(client, out_key):
+        if out_key in existing:
             continue
         try:
             entries = extract_page(b2_get_bytes(client, image_key))
             entries = [normalize_entry(e, folder, stem) for e in entries]
             body = json.dumps(entries, ensure_ascii=False, indent=2).encode()
             b2_put_bytes(client, out_key, body, "application/json")
+            existing.add(out_key)
         except Exception as exc:
             print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")
+            all_ok = False
 
-    all_present = all(
-        b2_exists(client, f"extractions/{MODEL_TAG}/{folder}/{stem}/page_{page_no:04d}.json")
-        for page_no, _ in page_keys
-    )
-    if all_present:
+    if all_ok:
         b2_put_bytes(client, done_key, f"completed at {time.time()}".encode(), "text/plain")
+        existing.add(done_key)
         print(f"done: {MODEL_TAG}/{folder}/{stem}")
     else:
         print(f"WARNING: not all pages verified for {folder}/{stem}; will retry next run")
-    return all_present
+    return all_ok
 
 
 def main():
@@ -215,6 +231,10 @@ def main():
     total_pages = sum(len(v) for v in by_pdf.values())
     print(f"found {len(by_pdf)} source PDF(s), {total_pages} page(s)")
 
+    print(f"listing existing extractions for {MODEL_TAG} in B2...")
+    existing = list_existing_keys(client, f"extractions/{MODEL_TAG}/")
+    print(f"found {len(existing)} existing extraction object(s)")
+
     any_incomplete = False
     for (folder, stem), page_keys in sorted(by_pdf.items()):
         if elapsed() > MAX_RUNTIME_SECONDS:
@@ -223,7 +243,7 @@ def main():
                 "stopping before starting a new file"
             )
             sys.exit(RUNTIME_GUARD_EXIT_CODE)
-        if not process_pdf(client, folder, stem, page_keys):
+        if not process_pdf(client, folder, stem, page_keys, existing):
             any_incomplete = True
 
     if any_incomplete:

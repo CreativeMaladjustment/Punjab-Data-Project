@@ -152,6 +152,13 @@ list in the workflow.
 Uses the same `b2-upload` environment and secrets as `process-pdfs.yml` — no additional secrets
 needed.
 
+**B2 free-tier transaction cap:** existing outputs are checked via a handful of cheap "Class C"
+list calls rather than one "Class B" HeadObject per page (Class B is capped at 2,500/day on
+B2's free tier — a naive per-page-HEAD idiom burns through that almost immediately at this
+scale). Extracting a page still costs one genuine Class B download (fetching the image bytes
+to send to Ollama isn't avoidable), so a corpus with more than ~2,500 not-yet-extracted pages
+will still need multiple days/resumed runs on a free-tier account — that's expected, not a bug.
+
 ## Security scanning
 
 `.github/workflows/security-scans.yml` runs on every pull request against `main`, weekly

@@ -50,11 +50,13 @@ jobs:
       models: ${{ steps.set.outputs.models }}
     steps:
       - id: set
+        env:
+          MODEL_INPUT: ${{ inputs.model }}
         run: |
-          if [ "${{ inputs.model }}" = "all" ]; then
+          if [ "$MODEL_INPUT" = "all" ]; then
             echo 'models=["minicpm-v4.6","qwen3-vl:2b","qwen3-vl:4b","gemma4:e2b","glm-ocr","minicpm-v4.5"]' >> "$GITHUB_OUTPUT"
           else
-            echo "models=[\"${{ inputs.model }}\"]" >> "$GITHUB_OUTPUT"
+            echo "models=[\"$MODEL_INPUT\"]" >> "$GITHUB_OUTPUT"
           fi
 
   extract:
@@ -79,10 +81,17 @@ jobs:
           df -h
 
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Ollama
-        run: curl -fsSL https://ollama.com/install.sh | sh
+        # Downloaded then executed as separate steps (not curl | sh) to avoid
+        # streaming an unreviewed script straight into a shell. This doesn't
+        # remove the underlying trust-Ollama's-installer tradeoff — Ollama
+        # doesn't publish a simple checksum/signature for this script — just
+        # the literal piping pattern.
+        run: |
+          curl -fsSL https://ollama.com/install.sh -o install-ollama.sh
+          sh install-ollama.sh
 
       - name: Start Ollama server
         run: |
@@ -97,7 +106,7 @@ jobs:
         run: ollama pull "${{ matrix.model }}"
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.x"
           cache: pip

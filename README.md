@@ -149,8 +149,8 @@ drop model tags over time — if `ollama pull` fails for one of these, check
 [ollama.com/library](https://ollama.com/library) for the current tag and update the `options`
 list in the workflow.
 
-Uses the same `b2-upload` environment and secrets as `process-pdfs.yml` — no additional secrets
-needed.
+Uses the same `b2-upload` environment and secrets as `process-pdfs.yml` (plus the second-account
+secrets below, if you're using account `2`) — no secrets specific to this workflow.
 
 **B2 free-tier transaction cap:** existing outputs are checked via a handful of cheap "Class C"
 list calls rather than one "Class B" HeadObject per page (Class B is capped at 2,500/day on
@@ -158,6 +158,45 @@ B2's free tier — a naive per-page-HEAD idiom burns through that almost immedia
 scale). Extracting a page still costs one genuine Class B download (fetching the image bytes
 to send to Ollama isn't avoidable), so a corpus with more than ~2,500 not-yet-extracted pages
 will still need multiple days/resumed runs on a free-tier account — that's expected, not a bug.
+
+## Second B2 account
+
+Both B2-backed workflows (`process-pdfs.yml`, `extract-pages.yml`) take a **B2 account** choice
+(`1` or `2`, default `1`) on `workflow_dispatch` — useful once a bucket fills up (storage or a
+daily transaction cap) and you've created a second bucket, possibly under a whole separate
+Backblaze account, to keep going.
+
+Add a second full set of secrets to the same `b2-upload` environment, suffixed `_2`:
+
+| Secret | Purpose |
+|---|---|
+| `B2_ENDPOINT_2` | The second bucket's B2 S3-compatible endpoint |
+| `B2_KEY_ID_2` / `B2_APPLICATION_KEY_2` | An application key scoped to the second bucket |
+| `B2_BUCKET_NAME_2` | The second bucket's name |
+
+The original `B2_ENDPOINT`/`B2_KEY_ID`/`B2_APPLICATION_KEY`/`B2_BUCKET_NAME` secrets remain
+account `1` — nothing to rename. Account `2` is entirely optional: leave its four secrets unset
+and both workflows behave exactly as if there were only ever one account.
+
+**The dropdown only controls where *new* work is written — it isn't a plain swap, and it isn't
+a blind switch either:**
+
+- **`process_pcloud.py`** checks the `processed/...` completion markers in *every* configured
+  account before touching a PDF. A PDF already fully done in account `1` is skipped even when
+  you're running with account `2` selected — it is never redone or re-split just because the
+  active account changed. A PDF not yet done in *either* account is (re)processed entirely into
+  whichever account is currently active; it's never resumed part-way from a different account,
+  which would leave its pages split across two buckets.
+- **`extract_with_llm.py`** looks for source page images, and for already-extracted output,
+  across *every* configured account — so it finds images no matter which account
+  `process_pcloud.py` happened to write them to, and never re-runs an LLM extraction that
+  already exists in the other account. Unlike the images pipeline, this dedup happens at the
+  *page* level, not just per-PDF: since re-running an LLM extraction is far more expensive than
+  process_pcloud.py's redo cost (a local image render), one PDF's extracted pages can end up
+  spread across both accounts if a prior run was interrupted mid-PDF after switching accounts —
+  a deliberate tradeoff, not a bug.
+- Either way, all *new* writes for a run go to the account you picked — nothing is copied or
+  merged between buckets, and the workflows never write to a non-active account.
 
 ## Security scanning
 

@@ -23,6 +23,18 @@ avoidable) per not-yet-processed page, so a corpus with more than ~2,500
 not-yet-extracted pages will still need multiple days/resumed runs against a
 free-tier B2 account regardless of this optimization.
 
+Supports up to two B2 accounts/buckets, same as process_pcloud.py (see
+load_b2_accounts) — needed because process_pcloud.py may have written source
+images to either account depending on which was active when. Source images
+and already-done extraction outputs are looked up across ALL configured
+accounts; all *new* writes go to a single "active" account
+(B2_ACTIVE_ACCOUNT) only. Unlike process_pcloud.py, dedup here is granted at
+the page level across accounts (not just per-PDF): skipping an
+already-extracted page wherever it landed is worth the small inconsistency
+of one PDF's pages potentially ending up split across two accounts, because
+redoing an LLM extraction is far more expensive than process_pcloud.py's
+redo cost (re-rendering an image locally).
+
 Requires an Ollama server already running and reachable at OLLAMA_HOST (see
 .github/workflows/extract-pages.yml) with OLLAMA_MODEL already pulled.
 """
@@ -41,14 +53,47 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.environ["OLLAMA_MODEL"]
 MODEL_TAG = re.sub(r"[^A-Za-z0-9._-]", "-", OLLAMA_MODEL)
 
-B2_ENDPOINT = os.environ["B2_ENDPOINT"]
-if not B2_ENDPOINT.startswith(("http://", "https://")):
-    # The B2 console's bucket details page shows the endpoint without a
-    # scheme; boto3 requires a full URL.
-    B2_ENDPOINT = f"https://{B2_ENDPOINT}"
-B2_KEY_ID = os.environ["B2_KEY_ID"]
-B2_APPLICATION_KEY = os.environ["B2_APPLICATION_KEY"]
-B2_BUCKET_NAME = os.environ["B2_BUCKET_NAME"]
+
+def load_b2_accounts():
+    """Return {"1": {"endpoint", "key_id", "app_key", "bucket"}, "2": {...}}.
+    Account "1" (B2_ENDPOINT/B2_KEY_ID/B2_APPLICATION_KEY/B2_BUCKET_NAME) is
+    required. Account "2" (the same names suffixed _2) is included only if
+    all four of its variables are set — a second account is optional.
+    """
+    def _account(suffix):
+        endpoint = os.environ.get(f"B2_ENDPOINT{suffix}", "")
+        key_id = os.environ.get(f"B2_KEY_ID{suffix}", "")
+        app_key = os.environ.get(f"B2_APPLICATION_KEY{suffix}", "")
+        bucket = os.environ.get(f"B2_BUCKET_NAME{suffix}", "")
+        if not (endpoint and key_id and app_key and bucket):
+            return None
+        if not endpoint.startswith(("http://", "https://")):
+            # The B2 console's bucket details page shows the endpoint
+            # without a scheme; boto3 requires a full URL.
+            endpoint = f"https://{endpoint}"
+        return {"endpoint": endpoint, "key_id": key_id, "app_key": app_key, "bucket": bucket}
+
+    accounts = {}
+    primary = _account("")
+    if primary is None:
+        raise RuntimeError(
+            "B2 account 1 is not fully configured (need B2_ENDPOINT, B2_KEY_ID, "
+            "B2_APPLICATION_KEY, B2_BUCKET_NAME)"
+        )
+    accounts["1"] = primary
+    secondary = _account("_2")
+    if secondary is not None:
+        accounts["2"] = secondary
+    return accounts
+
+
+B2_ACCOUNTS = load_b2_accounts()
+B2_ACTIVE_ACCOUNT = os.environ.get("B2_ACTIVE_ACCOUNT", "1").strip() or "1"
+if B2_ACTIVE_ACCOUNT not in B2_ACCOUNTS:
+    raise RuntimeError(
+        f"B2_ACTIVE_ACCOUNT={B2_ACTIVE_ACCOUNT!r} is not a configured B2 account "
+        f"(configured: {sorted(B2_ACCOUNTS)})"
+    )
 
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; runner guard, exit 42 to hand off to a fresh run
 RUNTIME_GUARD_EXIT_CODE = 42
@@ -78,16 +123,16 @@ def elapsed():
     return time.time() - START_TIME
 
 
-def b2_client():
+def b2_client(account):
     return boto3.client(
         "s3",
-        endpoint_url=B2_ENDPOINT,
-        aws_access_key_id=B2_KEY_ID,
-        aws_secret_access_key=B2_APPLICATION_KEY,
+        endpoint_url=account["endpoint"],
+        aws_access_key_id=account["key_id"],
+        aws_secret_access_key=account["app_key"],
     )
 
 
-def list_existing_keys(client, prefix):
+def list_existing_keys(client, bucket, prefix):
     """Return every existing object key under prefix in a handful of B2
     "Class C" list transactions, rather than one "Class B" HeadObject call
     per key. B2's free tier caps Class B at 2,500/day; checking existence
@@ -97,34 +142,38 @@ def list_existing_keys(client, prefix):
     """
     paginator = client.get_paginator("list_objects_v2")
     keys = set()
-    for page in paginator.paginate(Bucket=B2_BUCKET_NAME, Prefix=prefix):
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
             keys.add(obj["Key"])
     return keys
 
 
-def b2_get_bytes(client, key):
-    return client.get_object(Bucket=B2_BUCKET_NAME, Key=key)["Body"].read()
+def b2_get_bytes(client, bucket, key):
+    return client.get_object(Bucket=bucket, Key=key)["Body"].read()
 
 
-def b2_put_bytes(client, key, data, content_type):
-    client.put_object(Bucket=B2_BUCKET_NAME, Key=key, Body=data, ContentType=content_type)
+def b2_put_bytes(client, bucket, key, data, content_type):
+    client.put_object(Bucket=bucket, Key=key, Body=data, ContentType=content_type)
 
 
-def list_page_images(client):
-    """Return {(folder, stem): [(page_no, image_key), ...]} for every page
-    image process_pcloud.py has uploaded, grouped by source PDF."""
-    paginator = client.get_paginator("list_objects_v2")
+def list_page_images(clients_and_buckets):
+    """Return {(folder, stem): [(page_no, client, bucket, image_key), ...]}
+    for every page image found in ANY configured B2 account, grouped by
+    source PDF — process_pcloud.py may have written images to either
+    account depending on which was active at the time, so this has to look
+    across all of them to find everything there is to extract."""
     by_pdf = {}
-    for result in paginator.paginate(Bucket=B2_BUCKET_NAME, Prefix="images/"):
-        for obj in result.get("Contents", []):
-            m = IMAGE_KEY_RE.match(obj["Key"])
-            if not m:
-                continue
-            key = (m["folder"], m["stem"])
-            by_pdf.setdefault(key, []).append((int(m["page"]), obj["Key"]))
+    for client, bucket in clients_and_buckets:
+        paginator = client.get_paginator("list_objects_v2")
+        for result in paginator.paginate(Bucket=bucket, Prefix="images/"):
+            for obj in result.get("Contents", []):
+                m = IMAGE_KEY_RE.match(obj["Key"])
+                if not m:
+                    continue
+                key = (m["folder"], m["stem"])
+                by_pdf.setdefault(key, []).append((int(m["page"]), client, bucket, obj["Key"]))
     for pages in by_pdf.values():
-        pages.sort()
+        pages.sort(key=lambda p: p[0])
     return by_pdf
 
 
@@ -186,11 +235,16 @@ def extract_page(image_bytes):
     return entries
 
 
-def process_pdf(client, folder, stem, page_keys, existing):
-    """Returns True once every page for this PDF is confirmed present in B2
-    this run (including pages already done on a prior run, per `existing`);
-    False if any page still needs a retry. `existing` is mutated in place as
-    outputs are confirmed, so later PDFs in the same run see them too."""
+def process_pdf(write_client, write_bucket, folder, stem, page_keys, existing):
+    """page_keys: [(page_no, source_client, source_bucket, image_key), ...] —
+    each page's source image may live in a different configured B2 account
+    than the one this run is writing to. `existing` is the union of
+    extraction output keys across ALL configured accounts (mutated in place
+    as outputs are confirmed), so a page or PDF already done in ANY account
+    is skipped; every new write goes to write_client/write_bucket (the
+    active account) only. Returns True once every page for this PDF is
+    confirmed present somewhere; False if any page still needs a retry.
+    """
     done_key = f"extractions/{MODEL_TAG}/processed/{folder}/{stem}.done"
     if done_key in existing:
         print(f"skip (already done): {MODEL_TAG}/{folder}/{stem}")
@@ -198,22 +252,22 @@ def process_pdf(client, folder, stem, page_keys, existing):
 
     print(f"processing: {MODEL_TAG}/{folder}/{stem} ({len(page_keys)} pages)")
     all_ok = True
-    for page_no, image_key in page_keys:
+    for page_no, source_client, source_bucket, image_key in page_keys:
         out_key = f"extractions/{MODEL_TAG}/{folder}/{stem}/page_{page_no:04d}.json"
         if out_key in existing:
             continue
         try:
-            entries = extract_page(b2_get_bytes(client, image_key))
+            entries = extract_page(b2_get_bytes(source_client, source_bucket, image_key))
             entries = [normalize_entry(e, folder, stem) for e in entries]
             body = json.dumps(entries, ensure_ascii=False, indent=2).encode()
-            b2_put_bytes(client, out_key, body, "application/json")
+            b2_put_bytes(write_client, write_bucket, out_key, body, "application/json")
             existing.add(out_key)
         except Exception as exc:
             print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")
             all_ok = False
 
     if all_ok:
-        b2_put_bytes(client, done_key, f"completed at {time.time()}".encode(), "text/plain")
+        b2_put_bytes(write_client, write_bucket, done_key, f"completed at {time.time()}".encode(), "text/plain")
         existing.add(done_key)
         print(f"done: {MODEL_TAG}/{folder}/{stem}")
     else:
@@ -223,16 +277,21 @@ def process_pdf(client, folder, stem, page_keys, existing):
 
 def main():
     wait_for_ollama()
-    client = b2_client()
+    clients = {aid: b2_client(acct) for aid, acct in B2_ACCOUNTS.items()}
+    write_client = clients[B2_ACTIVE_ACCOUNT]
+    write_bucket = B2_ACCOUNTS[B2_ACTIVE_ACCOUNT]["bucket"]
+    clients_and_buckets = [(clients[aid], acct["bucket"]) for aid, acct in B2_ACCOUNTS.items()]
 
     print(f"model: {OLLAMA_MODEL} (tag: {MODEL_TAG})")
-    print("listing page images in B2...")
-    by_pdf = list_page_images(client)
+    print(f"listing page images across {len(B2_ACCOUNTS)} configured B2 account(s)...")
+    by_pdf = list_page_images(clients_and_buckets)
     total_pages = sum(len(v) for v in by_pdf.values())
     print(f"found {len(by_pdf)} source PDF(s), {total_pages} page(s)")
 
-    print(f"listing existing extractions for {MODEL_TAG} in B2...")
-    existing = list_existing_keys(client, f"extractions/{MODEL_TAG}/")
+    print(f"listing existing extractions for {MODEL_TAG} across all configured B2 account(s)...")
+    existing = set()
+    for client, bucket in clients_and_buckets:
+        existing |= list_existing_keys(client, bucket, f"extractions/{MODEL_TAG}/")
     print(f"found {len(existing)} existing extraction object(s)")
 
     any_incomplete = False
@@ -243,7 +302,7 @@ def main():
                 "stopping before starting a new file"
             )
             sys.exit(RUNTIME_GUARD_EXIT_CODE)
-        if not process_pdf(client, folder, stem, page_keys, existing):
+        if not process_pdf(write_client, write_bucket, folder, stem, page_keys, existing):
             any_incomplete = True
 
     if any_incomplete:

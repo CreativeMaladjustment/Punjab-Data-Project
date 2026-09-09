@@ -39,6 +39,13 @@ on:
           - glm-ocr
           - minicpm-v4.5
           - all
+      b2_account:
+        description: "Which Backblaze account/bucket to WRITE new extraction output to. Source images and already-done extractions are found across BOTH configured accounts automatically (see README's 'Second B2 account' section)."
+        type: choice
+        default: "1"
+        options:
+          - "1"
+          - "2"
 
 permissions:
   contents: read
@@ -119,10 +126,17 @@ jobs:
         id: run
         env:
           OLLAMA_MODEL: ${{ matrix.model }}
+          B2_ACTIVE_ACCOUNT: ${{ inputs.b2_account }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
           B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
           B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
           B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          # Second account's secrets are optional (only account 1 above is
+          # required) — the scripts detect whether they're fully set.
+          B2_ENDPOINT_2: ${{ secrets.B2_ENDPOINT_2 }}
+          B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+          B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+          B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
         run: |
           set +e
           python scripts/extract_with_llm.py

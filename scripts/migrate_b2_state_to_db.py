@@ -143,7 +143,7 @@ def db_upsert_pcloud_file(conn, fileid, name, folder):
     with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO pcloud_files (pcloud_fileid, name, folder) VALUES (%s, %s, %s) "
-            "ON CONFLICT (pcloud_fileid) DO NOTHING",
+            "ON CONFLICT (pcloud_fileid) DO UPDATE SET name = EXCLUDED.name, folder = EXCLUDED.folder",
             (fileid, name, folder),
         )
 

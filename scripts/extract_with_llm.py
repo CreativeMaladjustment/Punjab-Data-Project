@@ -304,7 +304,7 @@ def db_save_extraction_success(conn, page_id, model, model_tag, entries):
             "VALUES (%s, %s, %s, 'success', %s) "
             "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
             "status = 'success', raw_response = EXCLUDED.raw_response, "
-            "error_message = NULL, created_at = now() "
+            "error_message = NULL "
             "RETURNING id",
             (page_id, model, model_tag, Json(entries)),
         )

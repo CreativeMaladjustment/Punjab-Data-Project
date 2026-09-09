@@ -113,29 +113,66 @@ def find_duplicates(images_by_account):
     return duplicates
 
 
+def _group_by_stem(rows):
+    """rows: [(group_key, page_no), ...]. Returns [(group_key, count, min_page, max_page), ...]
+    sorted by group_key -- collapsing a real-world run's thousands of one-line-per-page entries
+    down to one line per affected PDF, which is what keeps the summary under GitHub's
+    $GITHUB_STEP_SUMMARY size cap (1 MiB) no matter how many pages are affected."""
+    groups = {}
+    for group_key, page_no in rows:
+        groups.setdefault(group_key, []).append(page_no)
+    return sorted((k, len(v), min(v), max(v)) for k, v in groups.items())
+
+
 def write_summary(duplicates, missing, mismatched):
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_path:
         return
+
+    duplicate_rows = [
+        ((folder, stem, a, b), page_no)
+        for (folder, stem, page_no), a, _key_a, b, _key_b in duplicates
+    ]
+
+    missing_rows = []
+    for account_id, bucket, key, reason in missing:
+        m = IMAGE_KEY_RE.match(key)
+        missing_rows.append(((account_id, bucket, m["folder"], m["stem"], reason), int(m["page"])))
+
+    mismatched_rows = []
+    for account_id, bucket, key, row in mismatched:
+        m = IMAGE_KEY_RE.match(key)
+        db_account, db_bucket, _db_key = row
+        mismatched_rows.append(
+            ((account_id, bucket, m["folder"], m["stem"], db_account, db_bucket), int(m["page"]))
+        )
+
+    duplicate_groups = _group_by_stem(duplicate_rows)
+    missing_groups = _group_by_stem(missing_rows)
+    mismatched_groups = _group_by_stem(mismatched_rows)
+
     with open(summary_path, "a", encoding="utf-8") as f:
         f.write("### B2 / Postgres pages audit\n\n")
         f.write(f"- **Duplicate images (uploaded to more than one B2 account):** {len(duplicates)}\n")
         f.write(f"- **Images with no matching `pages` row:** {len(missing)}\n")
         f.write(f"- **Images whose `pages` row points elsewhere:** {len(mismatched)}\n\n")
-        if duplicates:
-            f.write("#### Duplicates\n\n")
-            for (folder, stem, page_no), a, key_a, b, key_b in duplicates:
-                f.write(f"- `{folder}/{stem}` page {page_no}: account {a} → `{key_a}`, account {b} → `{key_b}`\n")
+        if duplicate_groups:
+            f.write("#### Duplicates (grouped by PDF)\n\n")
+            for (folder, stem, a, b), count, lo, hi in duplicate_groups:
+                f.write(f"- `{folder}/{stem}`: {count} page(s) (range {lo}-{hi}) in both account {a} and account {b}\n")
             f.write("\n")
-        if missing:
-            f.write("#### Missing pages rows\n\n")
-            for account_id, bucket, key, reason in missing:
-                f.write(f"- account {account_id}/`{bucket}`: `{key}` — {reason}\n")
+        if missing_groups:
+            f.write("#### Missing pages rows (grouped by PDF)\n\n")
+            for (account_id, bucket, folder, stem, reason), count, lo, hi in missing_groups:
+                f.write(f"- account {account_id}/`{bucket}` `{folder}/{stem}`: {count} page(s) (range {lo}-{hi}) — {reason}\n")
             f.write("\n")
-        if mismatched:
-            f.write("#### Mismatched pages rows\n\n")
-            for account_id, bucket, key, row in mismatched:
-                f.write(f"- account {account_id}/`{bucket}`: `{key}` — `pages` row says `{row}`\n")
+        if mismatched_groups:
+            f.write("#### Mismatched pages rows (grouped by PDF)\n\n")
+            for (account_id, bucket, folder, stem, db_account, db_bucket), count, lo, hi in mismatched_groups:
+                f.write(
+                    f"- account {account_id}/`{bucket}` `{folder}/{stem}`: {count} page(s) (range {lo}-{hi}) "
+                    f"— `pages` says account {db_account}/`{db_bucket}`\n"
+                )
             f.write("\n")
 
 

@@ -2,26 +2,24 @@
 vision-optimized WebP image, and upload it to Backblaze B2. Optionally (see
 UPLOAD_PAGE_PDFS) also splits out and uploads a single-page PDF per page.
 
-Supports up to two B2 accounts/buckets (see load_b2_accounts) so that once
-one bucket fills up, a second can take over new uploads without redoing
-PDFs already completed in the first — every configured account's
-`processed/` markers are checked (a PDF done in ANY of them is skipped
-outright), while all new work is written to a single "active" account
-(B2_ACTIVE_ACCOUNT) only. A PDF is never split page-wise across two
-accounts: if it isn't fully done anywhere, it's (re)processed entirely into
-the active account.
+Postgres (Supabase) is the source of truth for what's already been done —
+see supabase/migrations/20260909140000_init_processing_schema.sql. Every
+page's upload is recorded as a row in `pages` (which B2 account/bucket holds
+it, and when); a PDF is considered done once every one of its pages has a
+row with image_uploaded_at set (and page_pdf_uploaded_at too, if
+UPLOAD_PAGE_PDFS). Because the DB records exactly which account holds each
+page, pages of one PDF can legitimately live in different B2 accounts (e.g.
+after switching B2_ACTIVE_ACCOUNT partway through) with no ambiguity — unlike
+the older B2-object-listing approach, there's no need to ever "redo a whole
+PDF fresh" just to avoid split-page confusion.
 
-B2 is the source of truth for resumability: existing objects are listed
-*once* per run (a handful of cheap "Class C" ListObjectsV2 calls) rather than
-checked individually with HeadObject per page — B2's free tier caps "Class B"
-transactions (which HeadObject bills as) at 2,500/day, and a per-page-HEAD
-idiom burns through that almost immediately at this scale. A killed or
-re-dispatched run just continues where it left off. Designed to run as-is
-inside GitHub Actions (see .github/workflows/process-pdfs.yml) but only needs
-boto3/requests/pypdf/pdf2image/pillow and network access to run anywhere.
+New uploads always go to a single "active" B2 account (B2_ACTIVE_ACCOUNT;
+see load_b2_accounts) — this script never reads from B2, only writes there
+and records what it wrote in Postgres.
 
-B2 exposes an S3-compatible API, so the storage side of this script talks to
-it with the ordinary boto3 "s3" client pointed at each account's B2 endpoint.
+Designed to run as-is inside GitHub Actions (see
+.github/workflows/process-pdfs.yml) but only needs boto3/psycopg2/requests/
+pypdf/pdf2image/pillow and network access to run anywhere.
 """
 import io
 import os
@@ -31,12 +29,15 @@ import pathlib
 import tempfile
 
 import boto3
+import psycopg2
 import requests
 from pypdf import PdfReader, PdfWriter
 from pdf2image import convert_from_path
 
 PCLOUD_CODE = os.environ["PCLOUD_CODE"]  # the pCloud public-link share code
 PCLOUD_HOSTS = ["api.pcloud.com", "eapi.pcloud.com"]
+
+SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
 
 def load_b2_accounts():
@@ -192,111 +193,126 @@ def b2_client(account):
     )
 
 
-def list_existing_keys(client, bucket, prefix):
-    """Return every existing object key under prefix in a handful of B2
-    "Class C" list transactions, rather than one "Class B" HeadObject call
-    per key. B2's free tier caps Class B at 2,500/day; checking existence
-    per-page via HeadObject burns through that almost immediately at this
-    scale (thousands of pages), while ListObjectsV2 handles up to 1000 keys
-    per call and is billed in the much cheaper class.
-    """
-    paginator = client.get_paginator("list_objects_v2")
-    keys = set()
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            keys.add(obj["Key"])
-    return keys
-
-
 def b2_put_file(client, bucket, key, path, content_type):
     with open(path, "rb") as f:
         client.put_object(Bucket=bucket, Key=key, Body=f, ContentType=content_type)
 
 
-def b2_put_bytes(client, bucket, key, data, content_type="text/plain"):
-    client.put_object(Bucket=bucket, Key=key, Body=data, ContentType=content_type)
+def db_connect():
+    conn = psycopg2.connect(SUPABASE_DB_URL)
+    conn.autocommit = True  # each statement durable immediately, matching the
+    # old B2-marker semantics: a crash mid-run should never lose progress
+    # already recorded, and there's no multi-statement transaction here that
+    # needs all-or-nothing atomicity.
+    return conn
 
 
-def split_and_upload_pages(client, bucket, pdf_path, folder, stem, work_dir, existing):
-    """Render each page of pdf_path as a WebP image (and, if UPLOAD_PAGE_PDFS
-    is set, also split out a single-page PDF), uploading each to B2 (skipping
-    any key already in `existing`, mutated in place as uploads succeed).
-    Images are rendered directly from the source PDF via pdf2image's
-    first_page/last_page, with no per-page PDF needed as an intermediate.
-    Returns True only if every page uploaded successfully this run (a
-    put_object that doesn't raise is treated as confirmed; there's no
-    separate HeadObject re-verification pass — see list_existing_keys).
-    """
-    reader = PdfReader(str(pdf_path))
-    page_count = len(reader.pages)
-    all_ok = True
-
-    for idx in range(page_count):
-        page_no = idx + 1
-        image_key = f"images/{folder}/{stem}/page_{page_no:04d}.webp"
-
-        if image_key not in existing:
-            image_path = work_dir / f"page_{page_no:04d}.webp"
-            try:
-                images = convert_from_path(
-                    str(pdf_path), dpi=IMAGE_DPI, first_page=page_no, last_page=page_no
-                )
-                buf = io.BytesIO()
-                images[0].save(buf, format="WEBP", quality=IMAGE_QUALITY)
-                buf.seek(0)
-                image_path.write_bytes(buf.getvalue())
-                b2_put_file(client, bucket, image_key, image_path, "image/webp")
-                existing.add(image_key)
-            except Exception as exc:
-                print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed: {exc}; will retry next run")
-                all_ok = False
-            finally:
-                image_path.unlink(missing_ok=True)
-
-        if UPLOAD_PAGE_PDFS:
-            page_key = f"pages/{folder}/{stem}/page_{page_no:04d}.pdf"
-            if page_key not in existing:
-                page_pdf_path = work_dir / f"page_{page_no:04d}.pdf"
-                try:
-                    writer = PdfWriter()
-                    writer.add_page(reader.pages[idx])
-                    with open(page_pdf_path, "wb") as f:
-                        writer.write(f)
-                    b2_put_file(client, bucket, page_key, page_pdf_path, "application/pdf")
-                    existing.add(page_key)
-                except Exception as exc:
-                    print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed: {exc}; will retry next run")
-                    all_ok = False
-                finally:
-                    page_pdf_path.unlink(missing_ok=True)
-
-    return all_ok
+def db_upsert_pcloud_file(conn, fileid, name, folder):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO pcloud_files (pcloud_fileid, name, folder) VALUES (%s, %s, %s) "
+            "ON CONFLICT (pcloud_fileid) DO NOTHING",
+            (fileid, name, folder),
+        )
 
 
-def process_pdf(client, bucket, item, existing, done_anywhere):
-    """The .done marker is namespaced by output mode (images-only vs
-    images+pdfs), not just by stem: UPLOAD_PAGE_PDFS is a per-run toggle, so
-    a plain "done" flag would let a run with it off permanently block a
-    later backfill run with it on for the same PDF (the .done from the
-    earlier run would short-circuit process_pdf before split_and_upload_pages
-    ever got a chance to add the missing PDFs).
+def db_set_page_count(conn, fileid, page_count):
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE pcloud_files SET page_count = %s WHERE pcloud_fileid = %s",
+            (page_count, fileid),
+        )
 
-    `done_anywhere` (marker keys present in ANY configured B2 account) gates
-    whether this PDF is touched at all; `existing` (this run's active-account
-    listing only) gates individual page uploads. A PDF not done in any
-    account is always (re)processed entirely into the active account — never
-    resumed part-way from a *different* account, which would split its pages
-    across two buckets.
-    """
+
+def db_get_pdf_state(conn, fileid):
+    """Return (page_count_or_None, {page_no with image done}, {page_no with pdf done})."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT page_count FROM pcloud_files WHERE pcloud_fileid = %s", (fileid,))
+        row = cur.fetchone()
+        page_count = row[0] if row else None
+
+        cur.execute(
+            "SELECT page_no, image_uploaded_at IS NOT NULL, page_pdf_uploaded_at IS NOT NULL "
+            "FROM pages WHERE pcloud_fileid = %s",
+            (fileid,),
+        )
+        images_done = set()
+        pdfs_done = set()
+        for page_no, image_ok, pdf_ok in cur.fetchall():
+            if image_ok:
+                images_done.add(page_no)
+            if pdf_ok:
+                pdfs_done.add(page_no)
+    return page_count, images_done, pdfs_done
+
+
+def db_mark_image_uploaded(conn, fileid, page_no, account, bucket, image_key):
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO pages (pcloud_fileid, page_no, b2_account, b2_bucket, image_key, image_uploaded_at) "
+            "VALUES (%s, %s, %s, %s, %s, now()) "
+            "ON CONFLICT (pcloud_fileid, page_no) DO UPDATE SET "
+            "b2_account = EXCLUDED.b2_account, b2_bucket = EXCLUDED.b2_bucket, "
+            "image_key = EXCLUDED.image_key, image_uploaded_at = now()",
+            (fileid, page_no, account, bucket, image_key),
+        )
+
+
+def db_mark_pdf_uploaded(conn, fileid, page_no, page_pdf_key):
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE pages SET page_pdf_key = %s, page_pdf_uploaded_at = now() "
+            "WHERE pcloud_fileid = %s AND page_no = %s",
+            (page_pdf_key, fileid, page_no),
+        )
+
+
+def render_and_upload_image(client, bucket, pdf_path, folder, stem, page_no, work_dir):
+    image_key = f"images/{folder}/{stem}/page_{page_no:04d}.webp"
+    image_path = work_dir / f"page_{page_no:04d}.webp"
+    try:
+        images = convert_from_path(str(pdf_path), dpi=IMAGE_DPI, first_page=page_no, last_page=page_no)
+        buf = io.BytesIO()
+        images[0].save(buf, format="WEBP", quality=IMAGE_QUALITY)
+        buf.seek(0)
+        image_path.write_bytes(buf.getvalue())
+        b2_put_file(client, bucket, image_key, image_path, "image/webp")
+        return image_key
+    finally:
+        image_path.unlink(missing_ok=True)
+
+
+def split_and_upload_page_pdf(client, bucket, reader, idx, folder, stem, page_no, work_dir):
+    page_key = f"pages/{folder}/{stem}/page_{page_no:04d}.pdf"
+    page_pdf_path = work_dir / f"page_{page_no:04d}.pdf"
+    try:
+        writer = PdfWriter()
+        writer.add_page(reader.pages[idx])
+        with open(page_pdf_path, "wb") as f:
+            writer.write(f)
+        b2_put_file(client, bucket, page_key, page_pdf_path, "application/pdf")
+        return page_key
+    finally:
+        page_pdf_path.unlink(missing_ok=True)
+
+
+def process_pdf(conn, client, bucket, item):
+    """Returns True once every page needed (images, and pdfs if
+    UPLOAD_PAGE_PDFS) is confirmed uploaded — anywhere, per the DB, not
+    necessarily in the active account, since a page done in a prior run
+    under a different B2_ACTIVE_ACCOUNT still counts."""
     folder = item["folder"]
     stem = pathlib.Path(item["name"]).stem
-    images_done_key = f"processed/{folder}/{stem}.done"
-    pdfs_done_key = f"processed/{folder}/{stem}.with-pdfs.done"
-    required_done_key = pdfs_done_key if UPLOAD_PAGE_PDFS else images_done_key
+    fileid = item["fileid"]
 
-    if required_done_key in done_anywhere:
-        print(f"skip (already done in a configured B2 account): {folder}/{stem}")
-        return
+    db_upsert_pcloud_file(conn, fileid, item["name"], folder)
+    page_count, images_done, pdfs_done = db_get_pdf_state(conn, fileid)
+
+    if page_count is not None:
+        needed = set(range(1, page_count + 1))
+        if needed <= images_done and (not UPLOAD_PAGE_PDFS or needed <= pdfs_done):
+            print(f"skip (already done per DB): {folder}/{stem}")
+            return True
 
     print(f"processing: {folder}/{stem}")
     work_dir = TMP_DIR / folder / stem
@@ -307,19 +323,39 @@ def process_pdf(client, bucket, item, existing, done_anywhere):
         url = pcloud_download_url(PCLOUD_CODE, item["fileid"])
         download_to(url, pdf_path)
 
-        all_uploaded = split_and_upload_pages(client, bucket, pdf_path, folder, stem, work_dir, existing)
-        if all_uploaded:
-            if images_done_key not in existing:
-                b2_put_bytes(client, bucket, images_done_key, f"completed at {time.time()}".encode())
-                existing.add(images_done_key)
-                done_anywhere.add(images_done_key)
-            if UPLOAD_PAGE_PDFS and pdfs_done_key not in existing:
-                b2_put_bytes(client, bucket, pdfs_done_key, f"completed at {time.time()}".encode())
-                existing.add(pdfs_done_key)
-                done_anywhere.add(pdfs_done_key)
+        reader = PdfReader(str(pdf_path))
+        page_count = len(reader.pages)
+        db_set_page_count(conn, fileid, page_count)
+
+        all_ok = True
+        for idx in range(page_count):
+            page_no = idx + 1
+
+            if page_no not in images_done:
+                try:
+                    image_key = render_and_upload_image(client, bucket, pdf_path, folder, stem, page_no, work_dir)
+                    db_mark_image_uploaded(conn, fileid, page_no, B2_ACTIVE_ACCOUNT, bucket, image_key)
+                    images_done.add(page_no)
+                except Exception as exc:
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed: {exc}; will retry next run")
+                    all_ok = False
+                    continue  # don't attempt the page PDF for a page whose image just failed
+
+            if UPLOAD_PAGE_PDFS and page_no not in pdfs_done:
+                try:
+                    page_pdf_key = split_and_upload_page_pdf(
+                        client, bucket, reader, idx, folder, stem, page_no, work_dir
+                    )
+                    db_mark_pdf_uploaded(conn, fileid, page_no, page_pdf_key)
+                except Exception as exc:
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed: {exc}; will retry next run")
+                    all_ok = False
+
+        if all_ok:
             print(f"done: {folder}/{stem}")
         else:
-            print(f"WARNING: not all pages verified for {folder}/{stem}; will retry next run")
+            print(f"WARNING: not all pages uploaded for {folder}/{stem}; will retry next run")
+        return all_ok
     finally:
         pdf_path.unlink(missing_ok=True)
         for f in work_dir.glob("*"):
@@ -332,32 +368,14 @@ def process_pdf(client, bucket, item, existing, done_anywhere):
 
 def main():
     TMP_DIR.mkdir(parents=True, exist_ok=True)
-    clients = {aid: b2_client(acct) for aid, acct in B2_ACCOUNTS.items()}
-    write_client = clients[B2_ACTIVE_ACCOUNT]
-    write_bucket = B2_ACCOUNTS[B2_ACTIVE_ACCOUNT]["bucket"]
+    conn = db_connect()
+    client = b2_client(B2_ACCOUNTS[B2_ACTIVE_ACCOUNT])
+    bucket = B2_ACCOUNTS[B2_ACTIVE_ACCOUNT]["bucket"]
 
     print("listing PDFs on pCloud...")
     pdfs = list_pdfs_recursive(PCLOUD_CODE)
     print(f"found {len(pdfs)} PDF(s)")
-
-    print(f"listing existing objects in the active B2 account ({B2_ACTIVE_ACCOUNT})...")
-    existing = list_existing_keys(write_client, write_bucket, "images/") | list_existing_keys(
-        write_client, write_bucket, "processed/"
-    )
-    if UPLOAD_PAGE_PDFS:
-        existing |= list_existing_keys(write_client, write_bucket, "pages/")
-    print(f"found {len(existing)} existing object(s) in account {B2_ACTIVE_ACCOUNT}")
-
-    done_anywhere = {k for k in existing if k.startswith("processed/")}
-    if len(B2_ACCOUNTS) > 1:
-        for aid, acct in B2_ACCOUNTS.items():
-            if aid == B2_ACTIVE_ACCOUNT:
-                continue
-            done_anywhere |= list_existing_keys(clients[aid], acct["bucket"], "processed/")
-        print(
-            f"found {len(done_anywhere)} 'processed' marker(s) across "
-            f"{len(B2_ACCOUNTS)} configured B2 account(s)"
-        )
+    print(f"writing new uploads to B2 account {B2_ACTIVE_ACCOUNT}")
 
     for item in pdfs:
         if elapsed() > MAX_RUNTIME_SECONDS:
@@ -366,7 +384,7 @@ def main():
                 "stopping before starting a new file"
             )
             sys.exit(RUNTIME_GUARD_EXIT_CODE)
-        process_pdf(write_client, write_bucket, item, existing, done_anywhere)
+        process_pdf(conn, client, bucket, item)
 
     print("all PDFs processed")
 

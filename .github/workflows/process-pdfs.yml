@@ -56,6 +56,7 @@ jobs:
           PCLOUD_CODE: ${{ vars.PCLOUD_CODE }}
           UPLOAD_PAGE_PDFS: ${{ inputs.upload_page_pdfs }}
           B2_ACTIVE_ACCOUNT: ${{ inputs.b2_account }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
           B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
           B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
@@ -77,7 +78,7 @@ jobs:
         run: |
           echo "### ⏱️ Runtime guard tripped — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "The pipeline stopped after ~5 hours to stay under the runner limit. Already-uploaded pages and .done markers in B2 mean the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "The pipeline stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Action needed:** re-run this workflow (Actions → Process pCloud PDFs to B2 → Run workflow) to continue processing." >> "$GITHUB_STEP_SUMMARY"
 

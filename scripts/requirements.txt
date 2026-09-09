@@ -3,3 +3,4 @@ requests
 pypdf
 pdf2image
 pillow
+psycopg2-binary

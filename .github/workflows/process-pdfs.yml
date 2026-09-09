@@ -7,13 +7,6 @@ on:
         description: "Also split and upload a single-page PDF per page (in addition to the WebP image, which is always uploaded)"
         type: boolean
         default: false
-      b2_account:
-        description: "Which Backblaze account/bucket to WRITE new uploads to. Both accounts' 'processed' markers are always checked either way, so a PDF already done in the other account is never redone (see README's 'Second B2 account' section)."
-        type: choice
-        default: "1"
-        options:
-          - "1"
-          - "2"
 
 jobs:
   process:
@@ -55,7 +48,6 @@ jobs:
         env:
           PCLOUD_CODE: ${{ vars.PCLOUD_CODE }}
           UPLOAD_PAGE_PDFS: ${{ inputs.upload_page_pdfs }}
-          B2_ACTIVE_ACCOUNT: ${{ inputs.b2_account }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
           B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
@@ -81,6 +73,15 @@ jobs:
           echo "The pipeline stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Action needed:** re-run this workflow (Actions → Process pCloud PDFs to B2 → Run workflow) to continue processing." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Flag both-accounts-failed
+        if: steps.run.outputs.exit_code == '43'
+        run: |
+          echo "### 🚨 Every configured B2 account failed repeatedly — stopped early" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Uploads failed on every configured B2 account several times in a row, so the run stopped instead of spending the rest of the runtime budget failing the same way. Unlike a runtime-guard stop (exit 42, which just means \"resume whenever\"), this job is marked failed on purpose: it means every account is currently unusable and needs a person to look at it." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** check both accounts' credentials, storage caps, and quotas, then re-run this workflow once resolved." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail job on unexpected script error
         if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42'

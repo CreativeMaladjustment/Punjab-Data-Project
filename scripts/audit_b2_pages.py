@@ -5,8 +5,9 @@ cross-reference against the `pages` table in Postgres (Supabase), and report:
     `pages` row points at a different account/bucket/key than where the
     image actually is)
   - the same page's image uploaded to BOTH B2 accounts -- a duplicate, most
-    likely from B2_ACTIVE_ACCOUNT being switched without process_pcloud.py
-    knowing the other account already had this page
+    likely left over from before process_pcloud.py tracked upload state in
+    Postgres (it now checks the DB before every upload, so it can't create
+    a fresh duplicate this way on its own)
 
 Read-only: never writes to B2 or Postgres. Safe to run any time.
 

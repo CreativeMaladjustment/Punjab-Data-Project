@@ -2,12 +2,14 @@
 vision-optimized WebP image, and upload it to Backblaze B2. Optionally (see
 UPLOAD_PAGE_PDFS) also splits out and uploads a single-page PDF per page.
 
-B2 is the source of truth for resumability: every unit of work (a page image,
-optionally a page PDF, a "this whole PDF is done" marker) is checked against
-B2 before it is redone, so a killed or re-dispatched run just continues where
-it left off. Designed to run as-is inside GitHub Actions (see
-.github/workflows/process-pdfs.yml) but only needs boto3/requests/pypdf/
-pdf2image/pillow and network access to run anywhere.
+B2 is the source of truth for resumability: existing objects are listed
+*once* per run (a handful of cheap "Class C" ListObjectsV2 calls) rather than
+checked individually with HeadObject per page — B2's free tier caps "Class B"
+transactions (which HeadObject bills as) at 2,500/day, and a per-page-HEAD
+idiom burns through that almost immediately at this scale. A killed or
+re-dispatched run just continues where it left off. Designed to run as-is
+inside GitHub Actions (see .github/workflows/process-pdfs.yml) but only needs
+boto3/requests/pypdf/pdf2image/pillow and network access to run anywhere.
 
 B2 exposes an S3-compatible API, so the storage side of this script talks to
 it with the ordinary boto3 "s3" client pointed at the bucket's B2 endpoint.
@@ -21,7 +23,6 @@ import tempfile
 
 import boto3
 import requests
-from botocore.exceptions import ClientError
 from pypdf import PdfReader, PdfWriter
 from pdf2image import convert_from_path
 
@@ -150,14 +151,20 @@ def b2_client():
     )
 
 
-def b2_exists(client, key):
-    try:
-        client.head_object(Bucket=B2_BUCKET_NAME, Key=key)
-        return True
-    except ClientError as exc:
-        if exc.response["ResponseMetadata"]["HTTPStatusCode"] == 404:
-            return False
-        raise
+def list_existing_keys(client, prefix):
+    """Return every existing object key under prefix in a handful of B2
+    "Class C" list transactions, rather than one "Class B" HeadObject call
+    per key. B2's free tier caps Class B at 2,500/day; checking existence
+    per-page via HeadObject burns through that almost immediately at this
+    scale (thousands of pages), while ListObjectsV2 handles up to 1000 keys
+    per call and is billed in the much cheaper class.
+    """
+    paginator = client.get_paginator("list_objects_v2")
+    keys = set()
+    for page in paginator.paginate(Bucket=B2_BUCKET_NAME, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            keys.add(obj["Key"])
+    return keys
 
 
 def b2_put_file(client, key, path, content_type):
@@ -169,24 +176,27 @@ def b2_put_bytes(client, key, data, content_type="text/plain"):
     client.put_object(Bucket=B2_BUCKET_NAME, Key=key, Body=data, ContentType=content_type)
 
 
-def split_and_upload_pages(client, pdf_path, folder, stem, work_dir):
+def split_and_upload_pages(client, pdf_path, folder, stem, work_dir, existing):
     """Render each page of pdf_path as a WebP image (and, if UPLOAD_PAGE_PDFS
     is set, also split out a single-page PDF), uploading each to B2 (skipping
-    any that already exist there). Images are rendered directly from the
-    source PDF via pdf2image's first_page/last_page, with no per-page PDF
-    needed as an intermediate. Returns True once every expected output is
-    confirmed present on B2.
+    any key already in `existing`, mutated in place as uploads succeed).
+    Images are rendered directly from the source PDF via pdf2image's
+    first_page/last_page, with no per-page PDF needed as an intermediate.
+    Returns True only if every page uploaded successfully this run (a
+    put_object that doesn't raise is treated as confirmed; there's no
+    separate HeadObject re-verification pass — see list_existing_keys).
     """
     reader = PdfReader(str(pdf_path))
     page_count = len(reader.pages)
+    all_ok = True
 
     for idx in range(page_count):
         page_no = idx + 1
         image_key = f"images/{folder}/{stem}/page_{page_no:04d}.webp"
-        image_path = work_dir / f"page_{page_no:04d}.webp"
 
-        try:
-            if not b2_exists(client, image_key):
+        if image_key not in existing:
+            image_path = work_dir / f"page_{page_no:04d}.webp"
+            try:
                 images = convert_from_path(
                     str(pdf_path), dpi=IMAGE_DPI, first_page=page_no, last_page=page_no
                 )
@@ -195,41 +205,39 @@ def split_and_upload_pages(client, pdf_path, folder, stem, work_dir):
                 buf.seek(0)
                 image_path.write_bytes(buf.getvalue())
                 b2_put_file(client, image_key, image_path, "image/webp")
-        finally:
-            image_path.unlink(missing_ok=True)
+                existing.add(image_key)
+            except Exception as exc:
+                print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed: {exc}; will retry next run")
+                all_ok = False
+            finally:
+                image_path.unlink(missing_ok=True)
 
         if UPLOAD_PAGE_PDFS:
             page_key = f"pages/{folder}/{stem}/page_{page_no:04d}.pdf"
-            page_pdf_path = work_dir / f"page_{page_no:04d}.pdf"
-            try:
-                if not b2_exists(client, page_key):
+            if page_key not in existing:
+                page_pdf_path = work_dir / f"page_{page_no:04d}.pdf"
+                try:
                     writer = PdfWriter()
                     writer.add_page(reader.pages[idx])
                     with open(page_pdf_path, "wb") as f:
                         writer.write(f)
                     b2_put_file(client, page_key, page_pdf_path, "application/pdf")
-            finally:
-                page_pdf_path.unlink(missing_ok=True)
+                    existing.add(page_key)
+                except Exception as exc:
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed: {exc}; will retry next run")
+                    all_ok = False
+                finally:
+                    page_pdf_path.unlink(missing_ok=True)
 
-    # Final verification pass before the .done marker is written.
-    for idx in range(page_count):
-        page_no = idx + 1
-        image_key = f"images/{folder}/{stem}/page_{page_no:04d}.webp"
-        if not b2_exists(client, image_key):
-            return False
-        if UPLOAD_PAGE_PDFS:
-            page_key = f"pages/{folder}/{stem}/page_{page_no:04d}.pdf"
-            if not b2_exists(client, page_key):
-                return False
-    return True
+    return all_ok
 
 
-def process_pdf(client, item):
+def process_pdf(client, item, existing):
     folder = item["folder"]
     stem = pathlib.Path(item["name"]).stem
     done_key = f"processed/{folder}/{stem}.done"
 
-    if b2_exists(client, done_key):
+    if done_key in existing:
         print(f"skip (already done): {folder}/{stem}")
         return
 
@@ -242,9 +250,10 @@ def process_pdf(client, item):
         url = pcloud_download_url(PCLOUD_CODE, item["fileid"])
         download_to(url, pdf_path)
 
-        all_uploaded = split_and_upload_pages(client, pdf_path, folder, stem, work_dir)
+        all_uploaded = split_and_upload_pages(client, pdf_path, folder, stem, work_dir, existing)
         if all_uploaded:
             b2_put_bytes(client, done_key, f"completed at {time.time()}".encode())
+            existing.add(done_key)
             print(f"done: {folder}/{stem}")
         else:
             print(f"WARNING: not all pages verified for {folder}/{stem}; will retry next run")
@@ -266,6 +275,12 @@ def main():
     pdfs = list_pdfs_recursive(PCLOUD_CODE)
     print(f"found {len(pdfs)} PDF(s)")
 
+    print("listing existing B2 objects...")
+    existing = list_existing_keys(client, "images/") | list_existing_keys(client, "processed/")
+    if UPLOAD_PAGE_PDFS:
+        existing |= list_existing_keys(client, "pages/")
+    print(f"found {len(existing)} existing object(s) in B2")
+
     for item in pdfs:
         if elapsed() > MAX_RUNTIME_SECONDS:
             print(
@@ -273,7 +288,7 @@ def main():
                 "stopping before starting a new file"
             )
             sys.exit(RUNTIME_GUARD_EXIT_CODE)
-        process_pdf(client, item)
+        process_pdf(client, item, existing)
 
     print("all PDFs processed")
 

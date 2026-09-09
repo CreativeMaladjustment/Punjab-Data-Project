@@ -1,12 +1,14 @@
-# Frees up B2 account 2 space by removing pages whose image also exists in
-# account 1 (see scripts/audit_b2_pages.py's "duplicate" report). Account 1
-# is treated as authoritative and is never touched: for each duplicate, the
-# `pages` row is repointed to account 1 (if it isn't already) and then the
-# redundant account-2 copy is deleted.
+# Reconciles the `pages` table against what's actually in both B2 accounts
+# (see scripts/audit_b2_pages.py, which detects these mismatches but never
+# fixes them) and frees up account 2's space along the way. Account 1 is
+# treated as authoritative and is never touched: every page's `pages` row
+# is created or corrected to point wherever it actually lives (account 1
+# if present there, else account 2), and only once that's confirmed is a
+# redundant account-2 copy -- one that also exists in account 1 -- deleted.
 #
 # Defaults to a dry run every time (lists what it would do, changes
 # nothing) -- you must explicitly tick "Actually commit changes" to have it
-# repoint pages rows and delete duplicates. Safe to re-run either way.
+# fix pages rows and delete duplicates. Safe to re-run either way.
 name: Resolve duplicate B2 pages
 
 on:

@@ -1,21 +1,29 @@
-"""Resolve page images that exist in BOTH configured B2 accounts (see
-scripts/audit_b2_pages.py, which detects but never fixes this).
+"""Reconcile the `pages` table against what's actually in B2, across both
+configured accounts, and free up account 2's space along the way.
 
-Policy: account 1 is authoritative and is never touched. For every page
-found in both accounts, this repoints the `pages` row to account 1 (if it
-isn't already) and then deletes the redundant copy from account 2 --
-freeing account 2's space for PDFs that haven't been processed yet.
+Lists every images/*.webp object in account 1 and account 2, and for every
+page found in EITHER (not just ones already flagged as duplicates -- see
+scripts/audit_b2_pages.py, which detects these problems but never fixes
+them), works out where that page's image should be recorded as living:
 
-Never deletes an account-2 object unless the account-1 copy of that exact
-page is confirmed present in this same run's listing, and never repoints a
-`pages` row to account 1 without first confirming that copy exists. The
-`pages` row is always updated before the account-2 object is deleted, so a
+  - account 1, if it's there (account 1 is authoritative and never touched)
+  - otherwise account 2, wherever it actually is
+
+The `pages` row for that page is then created or corrected to match --
+whether it was missing entirely, pointing at the wrong account/bucket/key,
+or already correct. Only once the row is confirmed to point at account 1
+is the redundant account-2 copy (if the page exists in both) deleted, so a
 run interrupted partway through never leaves a row pointing at a
-just-deleted object.
+just-deleted object, and a page found in account 2 alone is left alone
+(it's not a duplicate -- it's simply not processed under account 1 yet).
+
+A page whose image can't be mapped to a `pcloud_files` row (no matching
+folder/name) is skipped rather than acted on blindly.
 
 Defaults to a dry run (lists what it would do, writes nothing, deletes
-nothing). Pass --execute to actually commit. Safe to re-run: repointing is
-idempotent, and a page whose account-2 copy is already gone is just skipped.
+nothing). Pass --execute to actually commit. Safe to re-run: every DB
+write is an upsert, and a page already correct with no lingering
+account-2 duplicate is a no-op.
 
 Usage:
   python scripts/resolve_duplicate_pages.py            # dry run
@@ -38,7 +46,7 @@ IMAGE_KEY_RE = re.compile(r"^images/(?P<folder>.+)/(?P<stem>[^/]+)/page_(?P<page
 
 def load_b2_accounts():
     """Return {"1": {"endpoint", "key_id", "app_key", "bucket"}, "2": {...}}.
-    Both accounts are required here -- there's nothing to resolve with only one.
+    Both accounts are required here -- there's nothing to reconcile with only one.
     """
     def _account(suffix):
         endpoint = os.environ.get(f"B2_ENDPOINT{suffix}", "")
@@ -57,7 +65,7 @@ def load_b2_accounts():
     secondary = _account("_2")
     if secondary is None:
         raise RuntimeError(
-            "B2 account 2 is not fully configured -- nothing to resolve without a second account"
+            "B2 account 2 is not fully configured -- nothing to reconcile without a second account"
         )
     return {"1": primary, "2": secondary}
 
@@ -89,7 +97,7 @@ def list_images(client, bucket):
 
 def db_connect():
     conn = psycopg2.connect(SUPABASE_DB_URL)
-    conn.autocommit = True  # each repoint is durable immediately, same as
+    conn.autocommit = True  # each fix is durable immediately, same as
     # process_pcloud.py -- a run interrupted partway through should never
     # lose progress already made, and there's no multi-statement atomicity
     # needed here.
@@ -105,10 +113,10 @@ def fetch_fileid_by_folder_stem(conn):
 
 
 def fetch_page_row(conn, fileid, page_no):
-    """Return (page_id, b2_account) for this page, or None if no row exists."""
+    """Return (b2_account, b2_bucket, image_key) for this page, or None."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, b2_account FROM pages WHERE pcloud_fileid = %s AND page_no = %s",
+            "SELECT b2_account, b2_bucket, image_key FROM pages WHERE pcloud_fileid = %s AND page_no = %s",
             (fileid, page_no),
         )
         row = cur.fetchone()
@@ -116,11 +124,18 @@ def fetch_page_row(conn, fileid, page_no):
     return row
 
 
-def repoint_to_account_1(conn, page_id, bucket_1, image_key_1):
+def upsert_page_location(conn, fileid, page_no, account, bucket, image_key):
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE pages SET b2_account = '1', b2_bucket = %s, image_key = %s WHERE id = %s",
-            (bucket_1, image_key_1, page_id),
+            "INSERT INTO pages (pcloud_fileid, page_no, b2_account, b2_bucket, image_key, image_uploaded_at) "
+            "VALUES (%s, %s, %s, %s, %s, now()) "
+            "ON CONFLICT (pcloud_fileid, page_no) DO UPDATE SET "
+            "b2_account = EXCLUDED.b2_account, b2_bucket = EXCLUDED.b2_bucket, "
+            "image_key = EXCLUDED.image_key",
+            # image_uploaded_at is deliberately left untouched on conflict --
+            # this corrects *where* the image is recorded, not *when* it was
+            # uploaded, so an existing row's original timestamp survives.
+            (fileid, page_no, account, bucket, image_key),
         )
 
 
@@ -131,7 +146,7 @@ def main():
     bucket_1 = accounts["1"]["bucket"]
     bucket_2 = accounts["2"]["bucket"]
 
-    print(f"mode: {'EXECUTE (will repoint pages rows and delete account-2 duplicates)' if EXECUTE else 'DRY RUN (no changes)'}")
+    print(f"mode: {'EXECUTE (will fix pages rows and delete account-2 duplicates)' if EXECUTE else 'DRY RUN (no changes)'}")
 
     print(f"listing images/ in account 1 (bucket {bucket_1})...")
     images_1 = list_images(client_1, bucket_1)
@@ -141,21 +156,24 @@ def main():
     images_2 = list_images(client_2, bucket_2)
     print(f"  found {len(images_2)} image(s)")
 
-    duplicate_keys = sorted(set(images_1) & set(images_2))
-    print(f"\nfound {len(duplicate_keys)} page(s) present in both accounts")
-
-    if not duplicate_keys:
-        print("nothing to resolve")
-        return
+    all_keys = sorted(set(images_1) | set(images_2))
+    print(f"\n{len(all_keys)} distinct page(s) found across both accounts")
 
     conn = db_connect()
     fileid_by_folder_stem = fetch_fileid_by_folder_stem(conn)
 
-    resolved = 0
+    fixed = 0
+    deleted = 0
+    already_ok = 0
     skipped = 0
-    for folder, stem, page_no in duplicate_keys:
-        key_1 = images_1[(folder, stem, page_no)]
-        key_2 = images_2[(folder, stem, page_no)]
+    for folder, stem, page_no in all_keys:
+        in_1 = (folder, stem, page_no) in images_1
+        in_2 = (folder, stem, page_no) in images_2
+        if in_1:
+            correct_account, correct_bucket, correct_key = "1", bucket_1, images_1[(folder, stem, page_no)]
+        else:
+            correct_account, correct_bucket, correct_key = "2", bucket_2, images_2[(folder, stem, page_no)]
+        needs_delete = in_1 and in_2  # a page in both accounts always has its account-2 copy freed
 
         fileid = fileid_by_folder_stem.get((folder, stem))
         if fileid is None:
@@ -163,29 +181,41 @@ def main():
             skipped += 1
             continue
 
-        row = fetch_page_row(conn, fileid, page_no)
-        if row is None:
-            print(f"  SKIP {folder}/{stem} page {page_no}: no pages row; can't safely act")
-            skipped += 1
+        current = fetch_page_row(conn, fileid, page_no)
+        needs_fix = current != (correct_account, correct_bucket, correct_key)
+
+        if not needs_fix and not needs_delete:
+            already_ok += 1
             continue
-        page_id, current_account = row
 
-        print(f"  {folder}/{stem} page {page_no}: repoint to account 1, delete account-2 copy")
+        action = []
+        if needs_fix:
+            action.append("CREATE pages row" if current is None else "REPOINT pages row")
+        if needs_delete:
+            action.append("delete account-2 copy")
+        print(f"  {folder}/{stem} page {page_no}: {', '.join(action)} -> account {correct_account}")
+
         if EXECUTE:
-            if current_account != "1":
-                repoint_to_account_1(conn, page_id, bucket_1, key_1)
-            client_2.delete_object(Bucket=bucket_2, Key=key_2)
-        resolved += 1
+            if needs_fix:
+                upsert_page_location(conn, fileid, page_no, correct_account, correct_bucket, correct_key)
+            if needs_delete:
+                client_2.delete_object(Bucket=bucket_2, Key=images_2[(folder, stem, page_no)])
+        if needs_fix:
+            fixed += 1
+        if needs_delete:
+            deleted += 1
 
-    print(f"\n{'resolved' if EXECUTE else 'would resolve'}: {resolved}, skipped: {skipped}")
+    verb = "did" if EXECUTE else "would do"
+    print(f"\nalready correct: {already_ok}, {verb} fix: {fixed}, {verb} delete: {deleted}, skipped: {skipped}")
 
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
         with open(summary_path, "a", encoding="utf-8") as f:
             f.write("### Resolve duplicate pages\n\n")
             f.write(f"- **Mode:** {'EXECUTE' if EXECUTE else 'dry run'}\n")
-            f.write(f"- **Duplicate pages found:** {len(duplicate_keys)}\n")
-            f.write(f"- **{'Resolved' if EXECUTE else 'Would resolve'}:** {resolved}\n")
+            f.write(f"- **Already correct:** {already_ok}\n")
+            f.write(f"- **{'Fixed' if EXECUTE else 'Would fix'} `pages` rows:** {fixed}\n")
+            f.write(f"- **{'Deleted' if EXECUTE else 'Would delete'} account-2 duplicates:** {deleted}\n")
             f.write(f"- **Skipped (couldn't safely act):** {skipped}\n")
 
     if not EXECUTE:

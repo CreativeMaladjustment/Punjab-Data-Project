@@ -28,6 +28,11 @@ PCLOUD_CODE = os.environ["PCLOUD_CODE"]  # the pCloud public-link share code
 PCLOUD_HOSTS = ["api.pcloud.com", "eapi.pcloud.com"]
 
 B2_ENDPOINT = os.environ["B2_ENDPOINT"]  # e.g. https://s3.us-west-004.backblazeb2.com
+if not B2_ENDPOINT.startswith(("http://", "https://")):
+    # The B2 console's bucket details page shows the endpoint without a
+    # scheme (e.g. "s3.us-west-004.backblazeb2.com"), which is easy to paste
+    # as-is; boto3 requires a full URL.
+    B2_ENDPOINT = f"https://{B2_ENDPOINT}"
 B2_KEY_ID = os.environ["B2_KEY_ID"]
 B2_APPLICATION_KEY = os.environ["B2_APPLICATION_KEY"]
 B2_BUCKET_NAME = os.environ["B2_BUCKET_NAME"]

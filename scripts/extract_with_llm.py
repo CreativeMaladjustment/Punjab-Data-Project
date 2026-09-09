@@ -195,8 +195,12 @@ def _coerce_to_entry_list(parsed):
     the actual list in these common shapes rather than failing the whole
     page over the model not nesting things exactly as asked:
 
-      - a dict with exactly one list-valued key (e.g. {"entries": [...]})
-        -> unwrap to that list
+      - a dict with exactly one list-valued key and no other dict-valued
+        keys (e.g. {"entries": [...]}, or {"entries": [...], "count": 3})
+        -> unwrap to that list. A second dict value alongside it (e.g.
+        {"entries": [...], "meta": {...}}) is exactly the "genuinely
+        unrecognized shape" this function is meant to still raise on, not
+        envelope metadata to silently discard.
       - a dict with no list/dict values at all -- i.e. it looks like a
         single flat entry object rather than a list of them -> [parsed]
 
@@ -207,9 +211,10 @@ def _coerce_to_entry_list(parsed):
         return parsed
     if isinstance(parsed, dict):
         list_values = [v for v in parsed.values() if isinstance(v, list)]
-        if len(list_values) == 1:
+        other_values = [v for v in parsed.values() if not isinstance(v, list)]
+        if len(list_values) == 1 and not any(isinstance(v, dict) for v in other_values):
             return list_values[0]
-        if all(not isinstance(v, (list, dict)) for v in parsed.values()):
+        if not list_values and all(not isinstance(v, dict) for v in other_values):
             return [parsed]
         raise ValueError(
             f"expected a JSON array, got dict with keys {sorted(parsed.keys())}"

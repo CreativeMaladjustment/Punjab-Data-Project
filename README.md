@@ -30,6 +30,7 @@ viewer that opens every record's source page image.
 | `scripts/migrate_b2_state_to_db.py`, `.github/workflows/migrate-b2-state.yml` | One-time backfill: existing B2 `.done` markers/extraction JSON → Postgres rows, old markers deleted (see below) |
 | `scripts/audit_b2_pages.py`, `.github/workflows/audit-b2-pages.yml` | Read-only audit: B2 page images vs. `pages` rows, cross-account duplicates (see below) |
 | `scripts/resolve_duplicate_pages.py`, `.github/workflows/resolve-duplicate-pages.yml` | Reconciles `pages` against what's actually in both B2 accounts, fixing every mismatch the audit finds (see below) |
+| `scripts/remove_unlinked_images.py`, `.github/workflows/remove-unlinked-images.yml` | Deletes B2 page images with no matching `pcloud_files` row at all (see below) |
 | `supabase/migrations/` | Postgres schema for the above: `pcloud_files`, `pages`, `llm_extractions`, `catalogue_entries` (see below) |
 | `analysis/slice_1910/` | Analysis over the corpus: `build_network.py`, `script_market.py`, `build_site.py` (regenerates `docs/index.html`) |
 | `analysis/ocr_lab/` | The native-script workstream: legibility measurements (`E0B_RESULTS.md`), localization results, and `REIMAGING_PILOT.md` — the 21-page experiment that decides whether re-imaging the volumes is worth buying |
@@ -265,6 +266,18 @@ account-2 object is deleted, so an interrupted run never leaves a row pointing a
 just-deleted object, and a page that can't be mapped to a `pcloud_files` row is skipped rather
 than acted on blindly. Defaults to a dry run; tick **Actually commit changes** on the workflow's
 dispatch form to actually commit.
+
+**Removing unlinked images**: `.github/workflows/remove-unlinked-images.yml` runs
+`scripts/remove_unlinked_images.py` to clear out the audit's "no matching `pages` row at all"
+finding for good. An image with no `pcloud_files` row isn't tracked by anything, and
+`process_pcloud.py` doesn't check what's already in B2 before it (re)uploads a PDF's pages
+anyway — it decides purely from `pcloud_files`/`pages` state — so keeping such an image around
+preserves nothing. This deletes every one it finds, in both accounts, then a
+later `process_pcloud.py` run reprocesses that PDF (if it's still on pCloud) completely fresh.
+It leaves alone any image whose PDF already has a `pcloud_files` row (even if a specific page's
+`pages` row is missing — `resolve_duplicate_pages.py` fixes that case by creating the row, not
+by deleting anything) and never touches page PDFs or extraction output. Defaults to a dry run;
+tick **Actually commit changes** on the workflow's dispatch form to actually delete.
 
 ## Security scanning
 

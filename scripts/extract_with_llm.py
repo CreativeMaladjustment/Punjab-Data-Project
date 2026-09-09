@@ -188,8 +188,38 @@ def flag_if_printed_page_missing(entry):
     return entry
 
 
-def extract_page(image_bytes):
+def _coerce_to_entry_list(parsed):
+    """Some local models wrap the requested JSON array in a dict, or emit a
+    single entry object instead of a one-entry array, even when told to
+    output the array only -- observed from minicpm-v4.5 in practice. Recover
+    the actual list in these common shapes rather than failing the whole
+    page over the model not nesting things exactly as asked:
+
+      - a dict with exactly one list-valued key (e.g. {"entries": [...]})
+        -> unwrap to that list
+      - a dict with no list/dict values at all -- i.e. it looks like a
+        single flat entry object rather than a list of them -> [parsed]
+
+    Anything else still raises, with the dict's keys included so a real
+    unrecognized shape is diagnosable from the error message alone.
+    """
+    if isinstance(parsed, list):
+        return parsed
+    if isinstance(parsed, dict):
+        list_values = [v for v in parsed.values() if isinstance(v, list)]
+        if len(list_values) == 1:
+            return list_values[0]
+        if all(not isinstance(v, (list, dict)) for v in parsed.values()):
+            return [parsed]
+        raise ValueError(
+            f"expected a JSON array, got dict with keys {sorted(parsed.keys())}"
+        )
+    raise ValueError(f"expected a JSON array, got {type(parsed).__name__}")
+
+
+def extract_page(image_bytes, context=""):
     b64 = base64.b64encode(image_bytes).decode()
+    started = time.time()
     resp = requests.post(
         f"{OLLAMA_HOST}/api/generate",
         json={
@@ -205,10 +235,12 @@ def extract_page(image_bytes):
     resp.raise_for_status()
     text = resp.json()["response"].strip()
     text = re.sub(r"^```(json)?|```$", "", text, flags=re.M).strip()
-    entries = json.loads(text)  # fail loudly; the page can be retried next run
-    if not isinstance(entries, list):
-        raise ValueError(f"expected a JSON array, got {type(entries).__name__}")
-    return entries
+    print(
+        f"    ollama response for {context} in {time.time() - started:.1f}s "
+        f"({len(text)} chars): {text[:300]!r}"
+    )
+    parsed = json.loads(text)  # fail loudly; the page can be retried next run
+    return _coerce_to_entry_list(parsed)
 
 
 def _text(entry, key):
@@ -339,6 +371,8 @@ def process_pdf(conn, clients, folder, stem, pages):
     print(f"processing: {MODEL_TAG}/{folder}/{stem} ({len(pages)} pages)")
     all_ok = True
     for page_id, _fileid, page_no, account, bucket, image_key in pages:
+        context = f"{folder}/{stem} page {page_no}"
+        print(f"  page {page_no}: b2 account={account} bucket={bucket} key={image_key}")
         try:
             client = clients[account]
         except KeyError:
@@ -348,7 +382,7 @@ def process_pdf(conn, clients, folder, stem, pages):
             )
         try:
             image_bytes = b2_get_bytes(client, bucket, image_key)
-            entries = extract_page(image_bytes)
+            entries = extract_page(image_bytes, context=context)
             for entry in entries:
                 entry.setdefault("source_folder", folder)
                 entry.setdefault("source_pdf", stem)

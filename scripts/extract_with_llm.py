@@ -180,8 +180,11 @@ def flag_if_printed_page_missing(entry):
         isinstance(pp, str) and pp.isdigit()
     )
     if not looks_valid:
-        entry.setdefault("flags", [])
-        entry["flags"].append({"field": "printed_page", "issue": "not visible or unparsable on page"})
+        flags = entry.get("flags")
+        if not isinstance(flags, list):
+            flags = []
+        flags.append({"field": "printed_page", "issue": "not visible or unparsable on page"})
+        entry["flags"] = flags
     return entry
 
 

@@ -211,7 +211,7 @@ Schema (`supabase/migrations/20260909140000_init_processing_schema.sql`):
 | Table | One row per... |
 |---|---|
 | `pcloud_files` | pCloud PDF (keyed by pCloud's own file id — stable, no surrogate key needed) |
-| `pages` | page of a PDF — which B2 account/bucket/key holds its image, and (optionally) its single-page PDF, and when each was uploaded |
+| `pages` | page of a PDF — which B2 account/bucket/key holds its image, and — tracked separately, since a later run can upload it under a different active account — the account/bucket/key of its optional single-page PDF, and when each was uploaded |
 | `llm_extractions` | (page, model) extraction attempt — status, the model's raw JSON response, error message if it failed |
 | `catalogue_entries` | extracted catalogue entry — the same ~30 typed fields as `pipeline/schema.md`, one row per entry (a page can hold several) |
 

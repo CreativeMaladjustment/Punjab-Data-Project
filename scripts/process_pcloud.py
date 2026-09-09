@@ -258,12 +258,13 @@ def db_mark_image_uploaded(conn, fileid, page_no, account, bucket, image_key):
         )
 
 
-def db_mark_pdf_uploaded(conn, fileid, page_no, page_pdf_key):
+def db_mark_pdf_uploaded(conn, fileid, page_no, account, bucket, page_pdf_key):
     with conn.cursor() as cur:
         cur.execute(
-            "UPDATE pages SET page_pdf_key = %s, page_pdf_uploaded_at = now() "
+            "UPDATE pages SET page_pdf_account = %s, page_pdf_bucket = %s, "
+            "page_pdf_key = %s, page_pdf_uploaded_at = now() "
             "WHERE pcloud_fileid = %s AND page_no = %s",
-            (page_pdf_key, fileid, page_no),
+            (account, bucket, page_pdf_key, fileid, page_no),
         )
 
 
@@ -346,7 +347,7 @@ def process_pdf(conn, client, bucket, item):
                     page_pdf_key = split_and_upload_page_pdf(
                         client, bucket, reader, idx, folder, stem, page_no, work_dir
                     )
-                    db_mark_pdf_uploaded(conn, fileid, page_no, page_pdf_key)
+                    db_mark_pdf_uploaded(conn, fileid, page_no, B2_ACTIVE_ACCOUNT, bucket, page_pdf_key)
                 except Exception as exc:
                     print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed: {exc}; will retry next run")
                     all_ok = False

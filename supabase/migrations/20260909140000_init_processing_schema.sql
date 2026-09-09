@@ -20,6 +20,10 @@ create table pcloud_files (
 -- different B2 accounts if the active account changed between runs --
 -- the row says exactly where each one is, so there's no ambiguity the way
 -- there was when B2 object listing was the only source of truth.
+-- image and page_pdf each carry their own account/bucket: a page's image and
+-- its optional single-page PDF can be uploaded in different runs under
+-- different B2_ACTIVE_ACCOUNT settings, so one shared account/bucket pair
+-- isn't enough to unambiguously locate both.
 create table pages (
     id bigint generated always as identity primary key,
     pcloud_fileid bigint not null references pcloud_files (pcloud_fileid) on delete cascade,
@@ -28,6 +32,8 @@ create table pages (
     b2_bucket text not null,
     image_key text not null,
     image_uploaded_at timestamptz,
+    page_pdf_account text,
+    page_pdf_bucket text,
     page_pdf_key text,
     page_pdf_uploaded_at timestamptz,
     created_at timestamptz not null default now(),

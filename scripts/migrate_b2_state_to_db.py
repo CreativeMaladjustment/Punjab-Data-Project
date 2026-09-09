@@ -173,15 +173,17 @@ def db_mark_image_uploaded(conn, fileid, page_no, account, bucket, image_key, up
 def db_mark_pdf_uploaded(conn, fileid, page_no, account, bucket, page_pdf_key, uploaded_at):
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO pages (pcloud_fileid, page_no, b2_account, b2_bucket, image_key, page_pdf_key, page_pdf_uploaded_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            "INSERT INTO pages (pcloud_fileid, page_no, b2_account, b2_bucket, image_key, "
+            "page_pdf_account, page_pdf_bucket, page_pdf_key, page_pdf_uploaded_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (pcloud_fileid, page_no) DO UPDATE SET "
+            "page_pdf_account = EXCLUDED.page_pdf_account, page_pdf_bucket = EXCLUDED.page_pdf_bucket, "
             "page_pdf_key = EXCLUDED.page_pdf_key, page_pdf_uploaded_at = EXCLUDED.page_pdf_uploaded_at "
             "WHERE pages.page_pdf_uploaded_at IS NULL",
             # image_key is NOT NULL; if a pages row doesn't exist yet, reuse the pdf key as a
             # placeholder so this insert can't fail — the real image_key (if any) will overwrite
             # it once/if the image migration step for this account runs.
-            (fileid, page_no, account, bucket, page_pdf_key, page_pdf_key, uploaded_at),
+            (fileid, page_no, account, bucket, page_pdf_key, account, bucket, page_pdf_key, uploaded_at),
         )
 
 
@@ -288,15 +290,16 @@ def migrate_images_and_pdfs(conn, client, bucket, account_id, fileid_by_key):
                 (int(m["page"]), obj["Key"], obj["LastModified"])
             )
 
-    done_markers = []  # (key_to_delete_if_executed,)
+    done_markers = []  # (key, folder, stem)
     for obj in list_all(client, bucket, "processed/"):
         m = IMAGES_DONE_RE.match(obj["Key"]) or PDFS_DONE_RE.match(obj["Key"])
         if m:
-            done_markers.append(obj["Key"])
+            done_markers.append((obj["Key"], m["folder"], m["stem"]))
 
     stems = set(by_stem_images) | set(by_stem_pdfs)
     print(f"found {len(stems)} stem(s) with images and/or page-pdfs, {len(done_markers)} done marker(s)")
 
+    migrated_stems = set()
     for folder, stem in sorted(stems):
         item = fileid_by_key.get((folder, stem))
         if item is None:
@@ -317,9 +320,13 @@ def migrate_images_and_pdfs(conn, client, bucket, account_id, fileid_by_key):
             db_mark_image_uploaded(conn, fileid, page_no, account_id, bucket, key, last_modified)
         for page_no, key, last_modified in pdfs:
             db_mark_pdf_uploaded(conn, fileid, page_no, account_id, bucket, key, last_modified)
+        migrated_stems.add((folder, stem))
 
     if EXECUTE:
-        for key in done_markers:
+        for key, folder, stem in done_markers:
+            if (folder, stem) not in migrated_stems:
+                print(f"  skipping marker (stem not confirmed migrated): {key}")
+                continue
             print(f"  deleting marker: {key}")
             client.delete_object(Bucket=bucket, Key=key)
 
@@ -332,7 +339,7 @@ def migrate_llm_extractions(conn, client, bucket, account_id, fileid_by_key):
 
     for model_tag in model_tags:
         pages_by_stem = {}
-        done_markers = []
+        done_markers = []  # (key, folder, stem)
         for obj in list_all(client, bucket, f"extractions/{model_tag}/"):
             m = EXTRACTION_PAGE_RE.match(obj["Key"])
             if m:
@@ -340,10 +347,11 @@ def migrate_llm_extractions(conn, client, bucket, account_id, fileid_by_key):
                 continue
             m = EXTRACTION_DONE_RE.match(obj["Key"])
             if m:
-                done_markers.append(obj["Key"])
+                done_markers.append((obj["Key"], m["folder"], m["stem"]))
 
         print(f"  model {model_tag}: {len(pages_by_stem)} stem(s), {len(done_markers)} done marker(s)")
 
+        migrated_stems = set()
         for (folder, stem), pages in sorted(pages_by_stem.items()):
             item = fileid_by_key.get((folder, stem))
             if item is None:
@@ -353,6 +361,7 @@ def migrate_llm_extractions(conn, client, bucket, account_id, fileid_by_key):
             if not EXECUTE:
                 print(f"    {folder}/{stem}: {len(pages)} page(s) to migrate")
                 continue
+            stem_fully_migrated = True
             for page_no, key in pages:
                 page_id = db_get_page_id(conn, fileid, page_no)
                 if page_id is None:
@@ -360,13 +369,19 @@ def migrate_llm_extractions(conn, client, bucket, account_id, fileid_by_key):
                         f"WARNING: {folder}/{stem} page {page_no} has extraction output but no "
                         "pages row yet (run the images/pdfs migration first); skipping"
                     )
+                    stem_fully_migrated = False
                     continue
                 body = client.get_object(Bucket=bucket, Key=key)["Body"].read()
                 entries = json.loads(body)
                 db_save_extraction(conn, page_id, model_tag, entries)
+            if stem_fully_migrated:
+                migrated_stems.add((folder, stem))
 
         if EXECUTE:
-            for key in done_markers:
+            for key, folder, stem in done_markers:
+                if (folder, stem) not in migrated_stems:
+                    print(f"    skipping marker (stem not fully migrated): {key}")
+                    continue
                 print(f"    deleting marker: {key}")
                 client.delete_object(Bucket=bucket, Key=key)
 

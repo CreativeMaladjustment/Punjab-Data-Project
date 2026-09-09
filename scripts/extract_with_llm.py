@@ -188,6 +188,28 @@ def flag_if_printed_page_missing(entry):
     return entry
 
 
+# pipeline/schema.md's entry field names. `flags` is the schema's only
+# array-valued field -- every other field is a scalar -- so a single entry
+# emitted flat (not wrapped in a list) that fills in `flags` (the system
+# prompt says to use it "aggressively") is otherwise indistinguishable by
+# value shape alone from a dict with one list-valued envelope key. Checking
+# against these known field names resolves that ambiguity instead of
+# guessing from types.
+ENTRY_FIELD_NAMES = {
+    "quarter", "pdf_page", "printed_page", "section", "lang", "char", "topic",
+    "serial", "reg", "copies", "printer_verbatim", "printer", "pcity", "author",
+    "title", "title_native", "gloss", "pp_verbatim", "publisher", "pubcity",
+    "date", "price", "edition", "format", "method", "educ", "copyright",
+    "notes", "marks", "flags", "source_folder", "source_pdf",
+}
+
+
+def _looks_like_single_entry(d):
+    """True if every one of d's keys is a known schema entry field -- i.e.
+    it's a single catalogue entry emitted flat, not an envelope dict."""
+    return bool(d) and set(d.keys()) <= ENTRY_FIELD_NAMES
+
+
 def _coerce_to_entry_list(parsed):
     """Some local models wrap the requested JSON array in a dict, or emit a
     single entry object instead of a one-entry array, even when told to
@@ -195,14 +217,20 @@ def _coerce_to_entry_list(parsed):
     the actual list in these common shapes rather than failing the whole
     page over the model not nesting things exactly as asked:
 
-      - a dict with exactly one list-valued key and no other dict-valued
-        keys (e.g. {"entries": [...]}, or {"entries": [...], "count": 3})
-        -> unwrap to that list. A second dict value alongside it (e.g.
-        {"entries": [...], "meta": {...}}) is exactly the "genuinely
-        unrecognized shape" this function is meant to still raise on, not
-        envelope metadata to silently discard.
-      - a dict with no list/dict values at all -- i.e. it looks like a
-        single flat entry object rather than a list of them -> [parsed]
+      - a dict whose keys are all known schema entry fields (see
+        ENTRY_FIELD_NAMES) -> [parsed], a single entry emitted flat.
+        Checked before the envelope-unwrap case below so a real entry that
+        happens to have `flags` (its one array field) filled in is never
+        mistaken for a one-list-valued envelope and replaced by just that
+        list.
+      - otherwise, a dict with exactly one list-valued key and no other
+        dict-valued keys (e.g. {"entries": [...]}, or {"entries": [...],
+        "count": 3}) -> unwrap to that list. A second dict value alongside
+        it (e.g. {"entries": [...], "meta": {...}}) is exactly the
+        "genuinely unrecognized shape" this function is meant to still
+        raise on, not envelope metadata to silently discard.
+      - a dict with no list/dict values at all -- i.e. an entry with no
+        recognized field names, but flat and scalar-only -> [parsed]
 
     Anything else still raises, with the dict's keys included so a real
     unrecognized shape is diagnosable from the error message alone.
@@ -210,6 +238,8 @@ def _coerce_to_entry_list(parsed):
     if isinstance(parsed, list):
         return parsed
     if isinstance(parsed, dict):
+        if _looks_like_single_entry(parsed):
+            return [parsed]
         list_values = [v for v in parsed.values() if isinstance(v, list)]
         other_values = [v for v in parsed.values() if not isinstance(v, list)]
         if len(list_values) == 1 and not any(isinstance(v, dict) for v in other_values):

@@ -9,9 +9,10 @@ it, and when); a PDF is considered done once every one of its pages has a
 row with image_uploaded_at set (and page_pdf_uploaded_at too, if
 UPLOAD_PAGE_PDFS).
 
-New PDFs are spread across every configured B2 account round-robin (PDF 1 to
-account 1, PDF 2 to account 2, PDF 3 back to account 1, and so on for however
-many accounts are configured) rather than all going to one "active" account.
+New PDFs are spread across whichever of the one or two configured B2
+accounts are set up, round-robin (PDF 1 to account 1, PDF 2 to account 2,
+PDF 3 back to account 1, and so on) rather than all going to one "active"
+account.
 If a page's upload to its assigned account fails, it's retried immediately
 against every other configured account before being given up on for this
 run -- so a single account being full or erroring doesn't stall pages that
@@ -388,38 +389,44 @@ def process_pdf(conn, clients, item, assigned_account, health):
             page_no = idx + 1
 
             if page_no not in images_done:
-                image_path = None
                 try:
                     image_key, image_path = render_image(pdf_path, folder, stem, page_no, work_dir)
+                except Exception as exc:
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed to render: {exc}; will retry next run")
+                    all_ok = False
+                    continue  # not a B2 problem -- don't count it against the health tracker
+                try:
                     account_id = upload_with_fallback(clients, image_key, image_path, "image/webp", assigned_account)
                     bucket = B2_ACCOUNTS[account_id]["bucket"]
                     db_mark_image_uploaded(conn, fileid, page_no, account_id, bucket, image_key)
                     images_done.add(page_no)
                     health.record_success()
                 except Exception as exc:
-                    print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed: {exc}; will retry next run")
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed to upload: {exc}; will retry next run")
                     all_ok = False
                     health.record_total_failure()
                     continue  # don't attempt the page PDF for a page whose image just failed
                 finally:
-                    if image_path is not None:
-                        image_path.unlink(missing_ok=True)
+                    image_path.unlink(missing_ok=True)
 
             if UPLOAD_PAGE_PDFS and page_no not in pdfs_done:
-                page_pdf_path = None
                 try:
                     page_pdf_key, page_pdf_path = render_page_pdf(reader, idx, folder, stem, page_no, work_dir)
+                except Exception as exc:
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed to render: {exc}; will retry next run")
+                    all_ok = False
+                    continue  # not a B2 problem -- don't count it against the health tracker
+                try:
                     account_id = upload_with_fallback(clients, page_pdf_key, page_pdf_path, "application/pdf", assigned_account)
                     bucket = B2_ACCOUNTS[account_id]["bucket"]
                     db_mark_pdf_uploaded(conn, fileid, page_no, account_id, bucket, page_pdf_key)
                     health.record_success()
                 except Exception as exc:
-                    print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed: {exc}; will retry next run")
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed to upload: {exc}; will retry next run")
                     all_ok = False
                     health.record_total_failure()
                 finally:
-                    if page_pdf_path is not None:
-                        page_pdf_path.unlink(missing_ok=True)
+                    page_pdf_path.unlink(missing_ok=True)
 
         if all_ok:
             print(f"done: {folder}/{stem}")

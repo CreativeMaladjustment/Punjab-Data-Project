@@ -177,10 +177,10 @@ The original `B2_ENDPOINT`/`B2_KEY_ID`/`B2_APPLICATION_KEY`/`B2_BUCKET_NAME` sec
 account `1` — nothing to rename. Account `2` is entirely optional: leave its four secrets unset
 and `process_pcloud.py` behaves exactly as if there were only ever one account.
 
-**`process_pcloud.py`** spreads new PDFs across every configured account round-robin (the 1st
-PDF in this run's pCloud listing goes to account 1, the 2nd to account 2, the 3rd back to
-account 1, and so on for however many accounts are configured) rather than sending everything
-to one account you pick per run. If a page's upload to its assigned account fails, it's retried
+**`process_pcloud.py`** spreads new PDFs across whichever of the one or two configured accounts
+are set up, round-robin (the 1st PDF in this run's pCloud listing goes to account 1, the 2nd to
+account 2, the 3rd back to account 1, and so on) rather than sending everything to one account
+you pick per run. If a page's upload to its assigned account fails, it's retried
 immediately against every other configured account before being given up on for this run, so
 one account being full or erroring doesn't stall pages the other account can still take. If
 uploads fail on *every* configured account several times in a row (`BOTH_ACCOUNTS_FAILURE_THRESHOLD`

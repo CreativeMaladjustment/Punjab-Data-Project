@@ -434,7 +434,7 @@ def main():
     print("listing PDFs on pCloud...")
     pdfs = list_pdfs_recursive(PCLOUD_CODE)
     print(f"found {len(pdfs)} PDF(s)")
-    print(f"round-robining new uploads across account(s): {', '.join(ACCOUNT_ORDER)}")
+    print(f"round-robinning new uploads across account(s): {', '.join(ACCOUNT_ORDER)}")
 
     try:
         for i, item in enumerate(pdfs):

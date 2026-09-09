@@ -79,7 +79,7 @@ jobs:
         run: |
           echo "### 🚨 Every configured B2 account failed repeatedly — stopped early" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Uploads failed on every configured B2 account several times in a row, so the run stopped instead of spending the rest of the runtime budget failing the same way." >> "$GITHUB_STEP_SUMMARY"
+          echo "Uploads failed on every configured B2 account several times in a row, so the run stopped instead of spending the rest of the runtime budget failing the same way. Unlike a runtime-guard stop (exit 42, which just means \"resume whenever\"), this job is marked failed on purpose: it means every account is currently unusable and needs a person to look at it." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Action needed:** check both accounts' credentials, storage caps, and quotas, then re-run this workflow once resolved." >> "$GITHUB_STEP_SUMMARY"
 

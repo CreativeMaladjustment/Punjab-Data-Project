@@ -229,7 +229,8 @@ will just hang and time out from CI. In the Supabase dashboard's "Connect" panel
 `aws-0-<region>.pooler.supabase.com`) — both support IPv4.
 
 **Audit and clean up B2/Postgres**: `.github/workflows/audit-and-clean-b2.yml` runs one audit
-step and three cleanup scripts in sequence, then a final audit on every execute run:
+step and three cleanup scripts in sequence, then a final audit whenever the workflow is run with
+**Actually commit changes** ticked:
 
 1. **Audit** (`scripts/audit_b2_pages.py`) — read-only (never writes to B2 or Postgres), lists
    every `images/**/*.webp` object in each configured B2 account/bucket and cross-references it

@@ -215,17 +215,19 @@ def _coerce_to_entry_list(parsed):
     the actual list in these common shapes rather than failing the whole
     page over the model not nesting things exactly as asked:
 
-      - a single entry emitted flat -> [parsed]. Recognized by at least
-        one key being a known schema entry field (see ENTRY_FIELD_NAMES;
-        without this check an unrelated dict, e.g. an error payload, would
-        pass as a bogus "entry" just because it has no list/dict values)
-        *and*, if it has a list-valued key at all, that key is specifically
-        `flags` -- the schema's one array field. Keying off the name
-        rather than "there's exactly one list value" means an extra
-        key the model hallucinates alongside `flags` doesn't make this
-        look like an envelope and get replaced by just the flags list.
-      - otherwise, a dict with exactly one list-valued key (under any
-        other name) and no dict-valued keys -- e.g. {"entries": [...]},
+      - a single entry emitted flat -> [parsed], recognized by at least one
+        key being a known schema entry field (see ENTRY_FIELD_NAMES;
+        without this an unrelated dict, e.g. an error payload, would pass
+        as a bogus "entry" just because it has no dict values) and no
+        dict-valued keys at all -- the schema has no dict-valued fields,
+        so one present means something is genuinely off, not a real entry.
+        Deliberately *not* conditioned on how many list-valued keys it has
+        or what they're named: `flags` is the schema's one array field,
+        but a real entry hallucinating some other list field alongside
+        known fields (e.g. {"title": "x", "tags": [...]}) is still a
+        single entry, not an envelope to unwrap into just that list.
+      - otherwise (no known schema keys at all), a dict with exactly one
+        list-valued key and no dict-valued keys -- e.g. {"entries": [...]},
         or {"entries": [...], "count": 3} -- is an envelope -> unwrap to
         that list. A dict-valued key alongside it (e.g. {"entries": [...],
         "meta": {...}}) is exactly the "genuinely unrecognized shape" this
@@ -240,13 +242,14 @@ def _coerce_to_entry_list(parsed):
         raise ValueError(f"expected a JSON array, got {type(parsed).__name__}")
 
     known_keys = parsed.keys() & ENTRY_FIELD_NAMES
-    list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
     has_dict_value = any(isinstance(v, dict) for v in parsed.values())
 
-    if known_keys and len(list_items) <= 1 and (not list_items or list_items[0][0] == "flags"):
+    if known_keys and not has_dict_value:
         return [parsed]
-    if len(list_items) == 1 and not has_dict_value:
-        return list_items[0][1]
+    if not known_keys and not has_dict_value:
+        list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
+        if len(list_items) == 1:
+            return list_items[0][1]
     raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
 
 

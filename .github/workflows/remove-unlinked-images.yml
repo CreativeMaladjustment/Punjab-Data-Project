@@ -2,8 +2,8 @@
 # pcloud_files row at all (see scripts/audit_b2_pages.py's "no matching
 # pcloud_files row" finding). Such an image isn't tracked by anything, and
 # process_pcloud.py doesn't consult existing B2 objects before it
-# (re)uploads a PDF's pages anyway -- so there's nothing keeping it around
-# would preserve.
+# (re)uploads a PDF's pages anyway -- so keeping it around preserves
+# nothing.
 #
 # Defaults to a dry run every time (lists what it would delete, changes
 # nothing) -- you must explicitly tick "Actually commit changes" to have it

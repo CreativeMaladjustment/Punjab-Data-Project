@@ -271,8 +271,8 @@ dispatch form to actually commit.
 `scripts/remove_unlinked_images.py` to clear out the audit's "no matching `pages` row at all"
 finding for good. An image with no `pcloud_files` row isn't tracked by anything, and
 `process_pcloud.py` doesn't check what's already in B2 before it (re)uploads a PDF's pages
-anyway — it decides purely from `pcloud_files`/`pages` state — so there's nothing keeping such
-an image around would preserve. This deletes every one it finds, in both accounts, then a
+anyway — it decides purely from `pcloud_files`/`pages` state — so keeping such an image around
+preserves nothing. This deletes every one it finds, in both accounts, then a
 later `process_pcloud.py` run reprocesses that PDF (if it's still on pCloud) completely fresh.
 It leaves alone any image whose PDF already has a `pcloud_files` row (even if a specific page's
 `pages` row is missing — `resolve_duplicate_pages.py` fixes that case by creating the row, not

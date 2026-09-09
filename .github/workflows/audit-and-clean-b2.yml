@@ -1,0 +1,145 @@
+# Audits B2 page images against Postgres, then runs three cleanup steps
+# against whatever the audit found, then -- only if any of those three
+# steps actually changed something -- re-runs the audit to confirm the
+# cleanup worked.
+#
+#   1. Audit (scripts/audit_b2_pages.py) -- read-only; reports duplicates,
+#      images with no matching `pages` row, and mismatched `pages` rows.
+#      Never fails the job even if it finds issues -- that's expected going
+#      into the cleanup steps below, not a workflow failure.
+#   2. Resolve duplicate pages (scripts/resolve_duplicate_pages.py) --
+#      reconciles `pages` against both B2 accounts.
+#   3. Remove unlinked images (scripts/remove_unlinked_images.py) -- deletes
+#      B2 images with no matching `pcloud_files` row at all.
+#   4. Remove stale pages (scripts/remove_stale_pages.py) -- deletes `pages`
+#      rows with no backing image in either account.
+#   5. Final audit -- only runs if step 2, 3, or 4 actually changed
+#      something; its exit code (0 = clean, 1 = issues remain) is this
+#      job's exit code, so a still-dirty state after cleanup shows up as a
+#      failed run.
+#
+# Defaults to a dry run for steps 2-4 every time (each reports what it
+# would do, changes nothing) -- tick "Actually commit changes" to have them
+# write/delete for real. The initial and final audits are always read-only
+# regardless of this setting.
+name: Audit and clean up B2/Postgres
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Actually commit changes (resolve duplicates, delete unlinked images, delete stale pages rows). Leave unchecked for a dry run."
+        type: boolean
+        default: false
+
+jobs:
+  audit-and-clean:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: b2-upload
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Audit (before)
+        continue-on-error: true
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          # Second account's secrets are optional (only account 1 above is
+          # required) — the scripts detect whether they're fully set.
+          B2_ENDPOINT_2: ${{ secrets.B2_ENDPOINT_2 }}
+          B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+          B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+          B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+        run: python scripts/audit_b2_pages.py
+
+      - name: Resolve duplicate pages
+        id: resolve
+        env:
+          EXECUTE_FLAG: ${{ inputs.execute }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT_2: ${{ secrets.B2_ENDPOINT_2 }}
+          B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+          B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+          B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+        run: |
+          if [ "$EXECUTE_FLAG" = "true" ]; then
+            python scripts/resolve_duplicate_pages.py --execute
+          else
+            python scripts/resolve_duplicate_pages.py
+          fi
+
+      - name: Remove unlinked images
+        id: remove_unlinked
+        env:
+          EXECUTE_FLAG: ${{ inputs.execute }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT_2: ${{ secrets.B2_ENDPOINT_2 }}
+          B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+          B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+          B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+        run: |
+          if [ "$EXECUTE_FLAG" = "true" ]; then
+            python scripts/remove_unlinked_images.py --execute
+          else
+            python scripts/remove_unlinked_images.py
+          fi
+
+      - name: Remove stale pages
+        id: remove_stale
+        env:
+          EXECUTE_FLAG: ${{ inputs.execute }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT_2: ${{ secrets.B2_ENDPOINT_2 }}
+          B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+          B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+          B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+        run: |
+          if [ "$EXECUTE_FLAG" = "true" ]; then
+            python scripts/remove_stale_pages.py --execute
+          else
+            python scripts/remove_stale_pages.py
+          fi
+
+      - name: Audit (after)
+        if: >-
+          steps.resolve.outputs.changed == 'true' ||
+          steps.remove_unlinked.outputs.changed == 'true' ||
+          steps.remove_stale.outputs.changed == 'true'
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT_2: ${{ secrets.B2_ENDPOINT_2 }}
+          B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+          B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+          B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+        run: python scripts/audit_b2_pages.py

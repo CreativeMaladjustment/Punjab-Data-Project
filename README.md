@@ -27,10 +27,7 @@ viewer that opens every record's source page image.
 | `pipeline/data/<quarter>/marginalia_*.md` | Documentation of the handwritten verso indexes found in the bound volumes |
 | `scripts/process_pcloud.py`, `.github/workflows/process-pdfs.yml` | On-demand pipeline: pCloud source PDFs → LLM-vision-ready images (optionally single-page PDFs too) → Backblaze B2, status tracked in Postgres (see below) |
 | `scripts/extract_with_llm.py`, `.github/workflows/extract-pages.yml` | On-demand pipeline: B2 page images → catalogue entries via a local vision LLM (Ollama, on-runner) → Postgres (see below) |
-| `scripts/migrate_b2_state_to_db.py`, `.github/workflows/migrate-b2-state.yml` | One-time backfill: existing B2 `.done` markers/extraction JSON → Postgres rows, old markers deleted (see below) |
-| `scripts/audit_b2_pages.py`, `.github/workflows/audit-b2-pages.yml` | Read-only audit: B2 page images vs. `pages` rows, cross-account duplicates (see below) |
-| `scripts/resolve_duplicate_pages.py`, `.github/workflows/resolve-duplicate-pages.yml` | Reconciles `pages` against what's actually in both B2 accounts, fixing every mismatch the audit finds (see below) |
-| `scripts/remove_unlinked_images.py`, `.github/workflows/remove-unlinked-images.yml` | Deletes B2 page images with no matching `pcloud_files` row at all (see below) |
+| `scripts/audit_b2_pages.py`, `scripts/resolve_duplicate_pages.py`, `scripts/remove_unlinked_images.py`, `scripts/remove_stale_pages.py`, `.github/workflows/audit-and-clean-b2.yml` | Audits B2 page images against `pages`, then fixes what it finds: cross-account duplicates, unlinked images, and stale `pages` rows (see below) |
 | `supabase/migrations/` | Postgres schema for the above: `pcloud_files`, `pages`, `llm_extractions`, `catalogue_entries` (see below) |
 | `analysis/slice_1910/` | Analysis over the corpus: `build_network.py`, `script_market.py`, `build_site.py` (regenerates `docs/index.html`) |
 | `analysis/ocr_lab/` | The native-script workstream: legibility measurements (`E0B_RESULTS.md`), localization results, and `REIMAGING_PILOT.md` — the 21-page experiment that decides whether re-imaging the volumes is worth buying |
@@ -205,8 +202,7 @@ a blind switch either:**
 
 A Supabase Postgres project (linked to this repo via Supabase's GitHub integration, which
 deploys `supabase/migrations/*.sql` automatically) is the source of truth for pipeline status
-and LLM output — replacing the B2 `.done` markers and per-page JSON files the pipeline used to
-write. B2 still holds every actual byte (page images, optionally page PDFs); Postgres tracks
+and LLM output. B2 holds every actual byte (page images, optionally page PDFs); Postgres tracks
 what's been uploaded where, and holds every extracted catalogue entry for analysis.
 
 Schema (`supabase/migrations/20260909140000_init_processing_schema.sql`):
@@ -233,51 +229,51 @@ will just hang and time out from CI. In the Supabase dashboard's "Connect" panel
 **Session pooler** or **Transaction pooler** string instead (hostname like
 `aws-0-<region>.pooler.supabase.com`) — both support IPv4.
 
-**One-time backfill**, for data already processed before this schema existed:
-`.github/workflows/migrate-b2-state.yml` runs `scripts/migrate_b2_state_to_db.py`, which
-discovers the existing `processed/*.done`/`*.with-pdfs.done` markers (and, for LLM output, the
-`extractions/<model>/**/page_*.json` files) across every configured B2 account, writes the
-equivalent rows into Postgres, and — only once a stem's migration is confirmed, and only when
-you tick **Actually commit changes** on the workflow's dispatch form — deletes the now-redundant
-`.done` marker objects from B2. Page images, page PDFs, and extraction JSON content are left in
-B2 untouched; only the markers are ever deleted. Defaults to a dry run (prints what it would
-do, changes nothing) every time you *don't* tick that box, and is safe to re-run either way —
-every write is an upsert, so a stem already migrated is just skipped.
+**Audit and clean up B2/Postgres**: `.github/workflows/audit-and-clean-b2.yml` runs one audit
+step and three cleanup scripts in sequence, then a final audit if anything actually changed:
 
-**Audit**: `.github/workflows/audit-b2-pages.yml` runs `scripts/audit_b2_pages.py`, a read-only
-check (never writes to B2 or Postgres) that lists every `images/**/*.webp` object in each
-configured B2 account/bucket and cross-references it against `pages`. It reports three things
-in the job summary: images with no matching `pages` row at all, images whose `pages` row points
-at a different account/bucket/key than where the image actually is (a stale record), and any
-page whose image was uploaded to more than one B2 account (most likely from switching
-`B2_ACTIVE_ACCOUNT` without `process_pcloud.py` knowing the other account already had that
-page). Exits non-zero if it finds anything, so the workflow run visibly flags a problem.
+1. **Audit** (`scripts/audit_b2_pages.py`) — read-only (never writes to B2 or Postgres), lists
+   every `images/**/*.webp` object in each configured B2 account/bucket and cross-references it
+   against `pages`, reporting three things in the job summary: images with no matching `pages`
+   row at all, images whose `pages` row points at a different account/bucket/key than where the
+   image actually is, and any page whose image was uploaded to more than one B2 account (most
+   likely from switching `B2_ACTIVE_ACCOUNT` without `process_pcloud.py` knowing the other
+   account already had that page). Exits non-zero if it finds anything — this step is allowed
+   to "fail" without failing the job, since that's expected going into the cleanup steps below.
+2. **Resolve duplicate pages** (`scripts/resolve_duplicate_pages.py`) — lists every
+   `images/*.webp` object in both accounts and, for every page found in *either* one, works out
+   where it should be recorded: account 1 (authoritative, never touched) if it's there,
+   otherwise account 2, wherever it actually is. The `pages` row for that page is created or
+   corrected to match — whether it was missing entirely, pointing at the wrong
+   account/bucket/key, or already right — and only once the row is confirmed to point at
+   account 1 is the redundant account-2 copy deleted (only when the page exists in both; an
+   account-2-only page is left alone, since it's simply not processed under account 1 yet, not
+   a duplicate). The row is always fixed before the account-2 object is deleted, so an
+   interrupted run never leaves a row pointing at a just-deleted object, and a page that can't
+   be mapped to a `pcloud_files` row is skipped rather than acted on blindly.
+3. **Remove unlinked images** (`scripts/remove_unlinked_images.py`) — deletes every
+   `images/*.webp` object, in either account, that has no matching `pcloud_files` row at all.
+   Such an image isn't tracked by anything, and `process_pcloud.py` doesn't check what's already
+   in B2 before it (re)uploads a PDF's pages anyway — it decides purely from
+   `pcloud_files`/`pages` state — so keeping it around preserves nothing. A later
+   `process_pcloud.py` run reprocesses that PDF (if it's still on pCloud) completely fresh. This
+   leaves alone any image whose PDF already has a `pcloud_files` row (even if a specific page's
+   `pages` row is missing — step 2 fixes that by creating the row, not by deleting anything) and
+   never touches page PDFs or extraction output.
+4. **Remove stale pages** (`scripts/remove_stale_pages.py`) — the mirror of step 3: deletes
+   every `pages` row whose (folder, stem, page number) has no backing image in *either* B2
+   account. Such a row has nothing to extract from, link, or serve. "No backing image" is
+   checked against both accounts, not just the account/bucket the row happens to currently
+   record, so a row step 2 would instead repoint (its image exists, just under the other
+   account) is never mistaken for stale. Deleting a `pages` row cascades to its
+   `llm_extractions` and `catalogue_entries` rows via the schema's own `ON DELETE CASCADE`.
+5. **Final audit** — only runs if step 2, 3, or 4 actually changed something; its exit code (0
+   clean, 1 issues remain) becomes this job's exit code, so a still-dirty state after cleanup
+   shows up as a failed run instead of a silently-skipped one.
 
-**Resolving duplicates**: `.github/workflows/resolve-duplicate-pages.yml` runs
-`scripts/resolve_duplicate_pages.py` to fix what the audit above only reports. It lists every
-`images/*.webp` object in both accounts and, for every page found in *either* one, works out
-where it should be recorded: account 1 (authoritative, never touched) if it's there, otherwise
-account 2, wherever it actually is. The `pages` row for that page is then created or corrected
-to match — whether it was missing entirely, pointing at the wrong account/bucket/key, or already
-right — and only once the row is confirmed to point at account 1 is the redundant account-2 copy
-deleted (only when the page exists in both; an account-2-only page is left alone, since it's
-simply not processed under account 1 yet, not a duplicate). The row is always fixed before the
-account-2 object is deleted, so an interrupted run never leaves a row pointing at a
-just-deleted object, and a page that can't be mapped to a `pcloud_files` row is skipped rather
-than acted on blindly. Defaults to a dry run; tick **Actually commit changes** on the workflow's
-dispatch form to actually commit.
-
-**Removing unlinked images**: `.github/workflows/remove-unlinked-images.yml` runs
-`scripts/remove_unlinked_images.py` to clear out the audit's "no matching `pages` row at all"
-finding for good. An image with no `pcloud_files` row isn't tracked by anything, and
-`process_pcloud.py` doesn't check what's already in B2 before it (re)uploads a PDF's pages
-anyway — it decides purely from `pcloud_files`/`pages` state — so keeping such an image around
-preserves nothing. This deletes every one it finds, in both accounts, then a
-later `process_pcloud.py` run reprocesses that PDF (if it's still on pCloud) completely fresh.
-It leaves alone any image whose PDF already has a `pcloud_files` row (even if a specific page's
-`pages` row is missing — `resolve_duplicate_pages.py` fixes that case by creating the row, not
-by deleting anything) and never touches page PDFs or extraction output. Defaults to a dry run;
-tick **Actually commit changes** on the workflow's dispatch form to actually delete.
+Steps 2-4 default to a dry run (each reports what it would do, changes nothing) every time you
+*don't* tick **Actually commit changes** on the workflow's dispatch form; the audits are always
+read-only regardless. All three writes are upserts/idempotent, so re-running is always safe.
 
 ## Security scanning
 

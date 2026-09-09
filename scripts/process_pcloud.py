@@ -233,11 +233,20 @@ def split_and_upload_pages(client, pdf_path, folder, stem, work_dir, existing):
 
 
 def process_pdf(client, item, existing):
+    """The .done marker is namespaced by output mode (images-only vs
+    images+pdfs), not just by stem: UPLOAD_PAGE_PDFS is a per-run toggle, so
+    a plain "done" flag would let a run with it off permanently block a
+    later backfill run with it on for the same PDF (the .done from the
+    earlier run would short-circuit process_pdf before split_and_upload_pages
+    ever got a chance to add the missing PDFs).
+    """
     folder = item["folder"]
     stem = pathlib.Path(item["name"]).stem
-    done_key = f"processed/{folder}/{stem}.done"
+    images_done_key = f"processed/{folder}/{stem}.done"
+    pdfs_done_key = f"processed/{folder}/{stem}.with-pdfs.done"
+    required_done_key = pdfs_done_key if UPLOAD_PAGE_PDFS else images_done_key
 
-    if done_key in existing:
+    if required_done_key in existing:
         print(f"skip (already done): {folder}/{stem}")
         return
 
@@ -252,8 +261,12 @@ def process_pdf(client, item, existing):
 
         all_uploaded = split_and_upload_pages(client, pdf_path, folder, stem, work_dir, existing)
         if all_uploaded:
-            b2_put_bytes(client, done_key, f"completed at {time.time()}".encode())
-            existing.add(done_key)
+            if images_done_key not in existing:
+                b2_put_bytes(client, images_done_key, f"completed at {time.time()}".encode())
+                existing.add(images_done_key)
+            if UPLOAD_PAGE_PDFS and pdfs_done_key not in existing:
+                b2_put_bytes(client, pdfs_done_key, f"completed at {time.time()}".encode())
+                existing.add(pdfs_done_key)
             print(f"done: {folder}/{stem}")
         else:
             print(f"WARNING: not all pages verified for {folder}/{stem}; will retry next run")

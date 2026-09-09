@@ -1,0 +1,12 @@
+[extend]
+useDefault = true
+
+# Large generated/data artifacts, not hand-authored code: excluded to keep
+# the scan fast and avoid false positives on high-entropy embedded binary
+# data (rendered page images, base64 blobs).
+[allowlist]
+paths = [
+  '''docs/img/''',
+  '''pipeline/data/.*/(extractions|out)/''',
+  '''analysis/.*/(out|data)/''',
+]

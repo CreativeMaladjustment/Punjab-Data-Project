@@ -1,0 +1,6 @@
+# Large generated/data artifacts, not hand-authored code.
+docs/img/
+pipeline/data/*/extractions/
+pipeline/data/*/out/
+analysis/*/out/
+analysis/*/data/

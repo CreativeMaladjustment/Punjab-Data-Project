@@ -25,6 +25,7 @@ viewer that opens every record's source page image.
 | `pipeline/data/<quarter>/extractions/` | The verbatim record layer: one JSON per catalog page, the catalog's own words preserved (misprints, editorializing and all) |
 | `pipeline/data/<quarter>/out/` | Derived open data: `entries.csv`, `adjudication_queue.csv`, `validation_report.md` |
 | `pipeline/data/<quarter>/marginalia_*.md` | Documentation of the handwritten verso indexes found in the bound volumes |
+| `scripts/process_pcloud.py`, `.github/workflows/process-pdfs.yml` | On-demand pipeline: pCloud source PDFs → single-page PDFs + LLM-vision-ready images → Backblaze B2 (see below) |
 | `analysis/slice_1910/` | Analysis over the corpus: `build_network.py`, `script_market.py`, `build_site.py` (regenerates `docs/index.html`) |
 | `analysis/ocr_lab/` | The native-script workstream: legibility measurements (`E0B_RESULTS.md`), localization results, and `REIMAGING_PILOT.md` — the 21-page experiment that decides whether re-imaging the volumes is worth buying |
 | `analysis/integrity/` | Sweeps testing whether the stored record matches its own specification (`INTEGRITY_SWEEP.md`) |
@@ -72,6 +73,64 @@ python build_site.py --public                # web build: no local-path PDF link
 cp out/explore_1910_1912.html ../../docs/index.html
 python build_site.py                         # local build (with PDF deep-links)
 ```
+
+## pCloud → B2 scan pipeline
+
+`scripts/process_pcloud.py`, run on demand via the `.github/workflows/process-pdfs.yml`
+GitHub Actions workflow, pulls the source volume PDFs from a public pCloud folder, splits
+each into single-page PDFs, renders each page as a 200 DPI WebP image for LLM vision input,
+and uploads both to a Backblaze B2 bucket (via B2's S3-compatible API). B2 itself is the
+resumability ledger: every page PDF, page image, and per-PDF `processed/.../<stem>.done`
+marker is checked against the bucket before being redone, so a run that hits the 5-hour
+GitHub Actions runner ceiling exits `42`, flags this in the run's job summary, and stops —
+a human re-runs the workflow (Actions → *Process pCloud PDFs to B2* → **Run workflow**) to
+pick up where it left off; nothing needs re-checking or re-configuring first.
+
+The job runs against a GitHub **environment** named `b2-upload` (Settings → Environments →
+New environment) rather than plain repository secrets, so a run can be gated behind manual
+approval before any secret is exposed:
+
+1. Create the `b2-upload` environment (rename it in `.github/workflows/process-pdfs.yml`'s
+   `environment:` key if you'd rather call it something else).
+2. Add **Required reviewers** under that environment's protection rules — every run of this
+   workflow will then pause at "Waiting for review" until one of the listed reviewers
+   approves it, before the job (and its secrets) starts.
+3. Add these secrets to the *environment* (not the repository's plain Actions secrets):
+
+   | Secret | Purpose |
+   |---|---|
+   | `B2_ENDPOINT` | The bucket's B2 S3-compatible endpoint, e.g. `https://s3.us-west-004.backblazeb2.com` (find it on the bucket's details page) |
+   | `B2_KEY_ID` / `B2_APPLICATION_KEY` | A B2 application key scoped to the destination bucket (Account → App Keys) |
+   | `B2_BUCKET_NAME` | Destination B2 bucket |
+4. Set the pCloud share link's code as a **repository variable** named `PCLOUD_CODE`
+   (Settings → Secrets and variables → Actions → *Variables* tab — not *Secrets*, since it's
+   just the public share-link identifier, not a credential). The script reads it from the
+   `PCLOUD_CODE` environment variable and fails fast if it isn't set, so the source link is
+   explicit and changeable without editing code.
+
+## Security scanning
+
+`.github/workflows/security-scans.yml` runs on every pull request against `main`, weekly
+(Mondays), and on demand — all with free/open-source tools, no paid service or license:
+
+| Job | Tool | Checks |
+|---|---|---|
+| CodeQL | [`github/codeql-action`](https://github.com/github/codeql-action) | Python SAST (free for public repos) |
+| Bandit + Semgrep | `bandit`, `semgrep` | Python-specific and general-purpose SAST (`p/security-audit`, `p/secrets`, `p/owasp-top-ten` rulesets) |
+| Gitleaks | [`gitleaks`](https://github.com/gitleaks/gitleaks) | Secret scanning across the working tree |
+| pip-audit | [`pip-audit`](https://github.com/pypa/pip-audit) | Known CVEs in `scripts/requirements.txt` |
+| ZAP baseline | [OWASP ZAP](https://www.zaproxy.org/) | Passive DAST against the live explorer |
+
+Findings from the SARIF-emitting scanners (CodeQL, Bandit, Semgrep, Gitleaks) land in the
+repo's **Security → Code scanning alerts** tab; pip-audit's output goes to the run's job
+summary. None of these jobs currently block merges — they're wired up to build visibility
+first — so tighten branch protection around them once the initial signal has been triaged.
+
+**DAST caveat:** this repo's only deployed surface is the static GitHub Pages explorer
+(`docs/`) — there's no backend/API and no per-PR preview deployment. The ZAP baseline job
+always scans the live production URL, so a PR run is a drift/regression check against
+production, not a test of that PR's own changes. If preview deployments are added later,
+point the `target` input at the preview URL for PR runs instead.
 
 ## Source
 

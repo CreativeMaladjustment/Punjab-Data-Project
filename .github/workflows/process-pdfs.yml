@@ -1,0 +1,66 @@
+name: Process pCloud PDFs to B2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    environment: b2-upload
+    steps:
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run pCloud to B2 pipeline
+        id: run
+        env:
+          PCLOUD_CODE: ${{ vars.PCLOUD_CODE }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+        run: |
+          set +e
+          python scripts/process_pcloud.py
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Flag runtime guard trip for manual resume
+        if: steps.run.outputs.exit_code == '42'
+        run: |
+          echo "### ⏱️ Runtime guard tripped — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The pipeline stopped after ~5 hours to stay under the runner limit. Already-uploaded pages and .done markers in B2 mean the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** re-run this workflow (Actions → Process pCloud PDFs to B2 → Run workflow) to continue processing." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail job on unexpected script error
+        if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42'
+        run: exit 1

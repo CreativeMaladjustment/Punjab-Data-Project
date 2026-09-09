@@ -26,6 +26,7 @@ viewer that opens every record's source page image.
 | `pipeline/data/<quarter>/out/` | Derived open data: `entries.csv`, `adjudication_queue.csv`, `validation_report.md` |
 | `pipeline/data/<quarter>/marginalia_*.md` | Documentation of the handwritten verso indexes found in the bound volumes |
 | `scripts/process_pcloud.py`, `.github/workflows/process-pdfs.yml` | On-demand pipeline: pCloud source PDFs → single-page PDFs + LLM-vision-ready images → Backblaze B2 (see below) |
+| `scripts/extract_with_llm.py`, `.github/workflows/extract-pages.yml` | On-demand pipeline: B2 page images → catalogue-entry JSON via a local vision LLM (Ollama, on-runner) → Backblaze B2 (see below) |
 | `analysis/slice_1910/` | Analysis over the corpus: `build_network.py`, `script_market.py`, `build_site.py` (regenerates `docs/index.html`) |
 | `analysis/ocr_lab/` | The native-script workstream: legibility measurements (`E0B_RESULTS.md`), localization results, and `REIMAGING_PILOT.md` — the 21-page experiment that decides whether re-imaging the volumes is worth buying |
 | `analysis/integrity/` | Sweeps testing whether the stored record matches its own specification (`INTEGRITY_SWEEP.md`) |
@@ -107,6 +108,42 @@ approval before any secret is exposed:
    just the public share-link identifier, not a credential). The script reads it from the
    `PCLOUD_CODE` environment variable and fails fast if it isn't set, so the source link is
    explicit and changeable without editing code.
+
+## Local-LLM catalogue extraction
+
+`.github/workflows/extract-pages.yml`, run on demand, is the next stage after the pCloud → B2
+pipeline above: it reads the page images already uploaded to B2 (`images/.../page_XXXX.webp`)
+and runs each one through a vision LLM to transcribe catalogue entries, following the same
+per-entry schema as the existing extraction pipeline (`pipeline/schema.md`) so the output is
+compatible with `pipeline/postprocess.py` once a `quarter` is assigned to it.
+
+The model runs **locally on the GitHub Actions runner** via [Ollama](https://ollama.com) — no
+external API, no API key, nothing sent off-runner except to B2. GitHub-hosted runners have no
+GPU, so this is CPU inference and will be slow per page; the workflow uses the same
+runtime-guard-and-manual-resume pattern as `process-pdfs.yml` (exits `42` after ~5 hours, a job
+summary notice tells you to re-run it) rather than trying to finish in one run.
+
+`workflow_dispatch` takes a `model` choice — a shortlist of small (1B-8B), non-cloud-gated
+vision models pulled from Ollama's current vision listing (`minicpm-v4.6`, `qwen3-vl:2b`,
+`qwen3-vl:4b`, `gemma4:e2b`, `glm-ocr`, `minicpm-v4.5`), or `all` to fan them out as a parallel
+matrix so you can bake off quality/speed across models on the same page images. `glm-ocr` is
+included because it's purpose-built for document OCR — exactly this task. Default is
+**`minicpm-v4.5`** (8B): the largest model in this CPU-feasible set, and MiniCPM-V's line has a
+well-established OCR/document-understanding benchmark track record combined with being a full
+general-purpose model, so it should follow the 25-field schema more reliably than a narrower or
+smaller model — reasoned from published model positioning, not benchmarked against this
+project's actual pages, so treat an `all` bake-off as the real source of truth once you can
+eyeball output quality yourself.
+Each model's output is namespaced under `extractions/<model-tag>/...` in B2, where `<model-tag>`
+is the `model` value slugified (`:` and other non-alphanumeric characters replaced with `-` —
+e.g. `qwen3-vl:2b` becomes the path segment `qwen3-vl-2b`), so different models' runs never
+clobber each other and can be compared side by side. Ollama's library can rename or
+drop model tags over time — if `ollama pull` fails for one of these, check
+[ollama.com/library](https://ollama.com/library) for the current tag and update the `options`
+list in the workflow.
+
+Uses the same `b2-upload` environment and secrets as `process-pdfs.yml` — no additional secrets
+needed.
 
 ## Security scanning
 

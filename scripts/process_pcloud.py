@@ -116,14 +116,21 @@ class UploadHealthTracker:
     account. Any single success (on any account) resets the streak -- only
     a sustained run of total failures looks like every account being stuck."""
 
-    def __init__(self, threshold):
+    def __init__(self, threshold, account_count):
         self.threshold = threshold
+        self.account_count = account_count
         self.consecutive_total_failures = 0
 
     def record_success(self):
         self.consecutive_total_failures = 0
 
     def record_total_failure(self):
+        if self.account_count < 2:
+            # Nothing to fall back to -- a "failed on every account" streak
+            # is trivially true after any single real failure, so with only
+            # one account configured this must behave exactly like before
+            # this class existed: log it and retry next run, never stop early.
+            return
         self.consecutive_total_failures += 1
         if self.consecutive_total_failures >= self.threshold:
             raise AllAccountsFailedError(
@@ -381,34 +388,38 @@ def process_pdf(conn, clients, item, assigned_account, health):
             page_no = idx + 1
 
             if page_no not in images_done:
-                image_key, image_path = render_image(pdf_path, folder, stem, page_no, work_dir)
+                image_path = None
                 try:
+                    image_key, image_path = render_image(pdf_path, folder, stem, page_no, work_dir)
                     account_id = upload_with_fallback(clients, image_key, image_path, "image/webp", assigned_account)
                     bucket = B2_ACCOUNTS[account_id]["bucket"]
                     db_mark_image_uploaded(conn, fileid, page_no, account_id, bucket, image_key)
                     images_done.add(page_no)
                     health.record_success()
                 except Exception as exc:
-                    print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed on every account: {exc}; will retry next run")
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (image) failed: {exc}; will retry next run")
                     all_ok = False
                     health.record_total_failure()
                     continue  # don't attempt the page PDF for a page whose image just failed
                 finally:
-                    image_path.unlink(missing_ok=True)
+                    if image_path is not None:
+                        image_path.unlink(missing_ok=True)
 
             if UPLOAD_PAGE_PDFS and page_no not in pdfs_done:
-                page_pdf_key, page_pdf_path = render_page_pdf(reader, idx, folder, stem, page_no, work_dir)
+                page_pdf_path = None
                 try:
+                    page_pdf_key, page_pdf_path = render_page_pdf(reader, idx, folder, stem, page_no, work_dir)
                     account_id = upload_with_fallback(clients, page_pdf_key, page_pdf_path, "application/pdf", assigned_account)
                     bucket = B2_ACCOUNTS[account_id]["bucket"]
                     db_mark_pdf_uploaded(conn, fileid, page_no, account_id, bucket, page_pdf_key)
                     health.record_success()
                 except Exception as exc:
-                    print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed on every account: {exc}; will retry next run")
+                    print(f"WARNING: page {page_no} of {folder}/{stem} (pdf) failed: {exc}; will retry next run")
                     all_ok = False
                     health.record_total_failure()
                 finally:
-                    page_pdf_path.unlink(missing_ok=True)
+                    if page_pdf_path is not None:
+                        page_pdf_path.unlink(missing_ok=True)
 
         if all_ok:
             print(f"done: {folder}/{stem}")
@@ -429,7 +440,7 @@ def main():
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     conn = db_connect()
     clients = {account_id: b2_client(account) for account_id, account in B2_ACCOUNTS.items()}
-    health = UploadHealthTracker(BOTH_ACCOUNTS_FAILURE_THRESHOLD)
+    health = UploadHealthTracker(BOTH_ACCOUNTS_FAILURE_THRESHOLD, len(ACCOUNT_ORDER))
 
     print("listing PDFs on pCloud...")
     pdfs = list_pdfs_recursive(PCLOUD_CODE)

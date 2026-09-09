@@ -235,22 +235,36 @@ def _coerce_to_entry_list(parsed):
 
     Anything else still raises, with the dict's keys included so a real
     unrecognized shape is diagnosable from the error message alone.
+
+    Every element of the returned list is checked to be an entry dict
+    (not e.g. a bare string from {"entries": ["oops"]}) before returning,
+    on every path -- including the plain-list pass-through -- so a
+    genuinely malformed element shape raises a clear error here instead
+    of an opaque AttributeError from process_pdf()'s entry.setdefault(...)
+    calls three frames away.
     """
     if isinstance(parsed, list):
-        return parsed
-    if not isinstance(parsed, dict):
+        result = parsed
+    elif not isinstance(parsed, dict):
         raise ValueError(f"expected a JSON array, got {type(parsed).__name__}")
+    else:
+        known_keys = parsed.keys() & ENTRY_FIELD_NAMES
+        has_dict_value = any(isinstance(v, dict) for v in parsed.values())
 
-    known_keys = parsed.keys() & ENTRY_FIELD_NAMES
-    has_dict_value = any(isinstance(v, dict) for v in parsed.values())
+        if known_keys and not has_dict_value:
+            result = [parsed]
+        elif not known_keys and not has_dict_value:
+            list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
+            if len(list_items) != 1:
+                raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
+            result = list_items[0][1]
+        else:
+            raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
 
-    if known_keys and not has_dict_value:
-        return [parsed]
-    if not known_keys and not has_dict_value:
-        list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
-        if len(list_items) == 1:
-            return list_items[0][1]
-    raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
+    bad_types = sorted({type(e).__name__ for e in result if not isinstance(e, dict)})
+    if bad_types:
+        raise ValueError(f"expected a list of entry objects, got element type(s) {bad_types}")
+    return result
 
 
 def extract_page(image_bytes, context=""):

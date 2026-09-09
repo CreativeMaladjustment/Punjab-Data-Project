@@ -204,12 +204,6 @@ ENTRY_FIELD_NAMES = {
 }
 
 
-def _looks_like_single_entry(d):
-    """True if every one of d's keys is a known schema entry field -- i.e.
-    it's a single catalogue entry emitted flat, not an envelope dict."""
-    return bool(d) and set(d.keys()) <= ENTRY_FIELD_NAMES
-
-
 def _coerce_to_entry_list(parsed):
     """Some local models wrap the requested JSON array in a dict, or emit a
     single entry object instead of a one-entry array, even when told to
@@ -217,39 +211,39 @@ def _coerce_to_entry_list(parsed):
     the actual list in these common shapes rather than failing the whole
     page over the model not nesting things exactly as asked:
 
-      - a dict whose keys are all known schema entry fields (see
-        ENTRY_FIELD_NAMES) -> [parsed], a single entry emitted flat.
-        Checked before the envelope-unwrap case below so a real entry that
-        happens to have `flags` (its one array field) filled in is never
-        mistaken for a one-list-valued envelope and replaced by just that
-        list.
-      - otherwise, a dict with exactly one list-valued key and no other
-        dict-valued keys (e.g. {"entries": [...]}, or {"entries": [...],
-        "count": 3}) -> unwrap to that list. A second dict value alongside
-        it (e.g. {"entries": [...], "meta": {...}}) is exactly the
-        "genuinely unrecognized shape" this function is meant to still
-        raise on, not envelope metadata to silently discard.
-      - a dict with no list/dict values at all -- i.e. an entry with no
-        recognized field names, but flat and scalar-only -> [parsed]
+      - a single entry emitted flat -> [parsed]. Recognized by at least
+        one key being a known schema entry field (see ENTRY_FIELD_NAMES;
+        without this check an unrelated dict, e.g. an error payload, would
+        pass as a bogus "entry" just because it has no list/dict values)
+        *and*, if it has a list-valued key at all, that key is specifically
+        `flags` -- the schema's one array field. Keying off the name
+        rather than "there's exactly one list value" means an extra
+        key the model hallucinates alongside `flags` doesn't make this
+        look like an envelope and get replaced by just the flags list.
+      - otherwise, a dict with exactly one list-valued key (under any
+        other name) and no dict-valued keys -- e.g. {"entries": [...]},
+        or {"entries": [...], "count": 3} -- is an envelope -> unwrap to
+        that list. A dict-valued key alongside it (e.g. {"entries": [...],
+        "meta": {...}}) is exactly the "genuinely unrecognized shape" this
+        function is meant to still raise on, not metadata to discard.
 
     Anything else still raises, with the dict's keys included so a real
     unrecognized shape is diagnosable from the error message alone.
     """
     if isinstance(parsed, list):
         return parsed
-    if isinstance(parsed, dict):
-        if _looks_like_single_entry(parsed):
-            return [parsed]
-        list_values = [v for v in parsed.values() if isinstance(v, list)]
-        other_values = [v for v in parsed.values() if not isinstance(v, list)]
-        if len(list_values) == 1 and not any(isinstance(v, dict) for v in other_values):
-            return list_values[0]
-        if not list_values and all(not isinstance(v, dict) for v in other_values):
-            return [parsed]
-        raise ValueError(
-            f"expected a JSON array, got dict with keys {sorted(parsed.keys())}"
-        )
-    raise ValueError(f"expected a JSON array, got {type(parsed).__name__}")
+    if not isinstance(parsed, dict):
+        raise ValueError(f"expected a JSON array, got {type(parsed).__name__}")
+
+    known_keys = parsed.keys() & ENTRY_FIELD_NAMES
+    list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
+    has_dict_value = any(isinstance(v, dict) for v in parsed.values())
+
+    if known_keys and len(list_items) <= 1 and (not list_items or list_items[0][0] == "flags"):
+        return [parsed]
+    if len(list_items) == 1 and not has_dict_value:
+        return list_items[0][1]
+    raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
 
 
 def extract_page(image_bytes, context=""):

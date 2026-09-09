@@ -6,8 +6,9 @@ pipeline/schema.md's entry schema) back to B2.
 
 B2 is the source of truth for resumability, same pattern as
 process_pcloud.py: every page's output is checked before being redone, and a
-processed/<stem>.done marker is only written once every page for that source
-PDF is verified present. Results are namespaced by model (OLLAMA_MODEL,
+extractions/<MODEL_TAG>/processed/<folder>/<stem>.done marker is only written
+once every page for that source PDF is verified present. Results are
+namespaced by model (OLLAMA_MODEL,
 slugified into MODEL_TAG) so multiple models can be tried against the same
 page images without clobbering each other's output — run the workflow once
 per model to bake them off against each other.
@@ -53,8 +54,9 @@ never correct or invent. Flag every uncertain reading in `flags`. If the page \
 has no catalog entries (cover, blank, title page, index), output [].
 
 Read the printed page number directly off the page image if one is visible \
-(printed in a margin, header, or footer) and put it in `printed_page`; leave \
-it "" if none is visible. Leave `quarter` as "" — it isn't known for this \
+(printed in a margin, header, or footer) and put it in `printed_page` as an \
+integer. If none is visible, use 0 and add a `flags` entry noting the printed \
+page number wasn't visible. Leave `quarter` as "" — it isn't known for this \
 source. Output the JSON array only, no commentary.
 
 SCHEMA:
@@ -125,6 +127,27 @@ def wait_for_ollama(timeout=120):
     raise RuntimeError(f"Ollama server did not become ready in time: {last_error}")
 
 
+def normalize_entry(entry, folder, stem):
+    """Enforce the schema's int type for printed_page regardless of what the
+    model actually emitted (it may ignore the prompt's instructions), so
+    downstream code doing int(printed_page) (e.g. postprocess.py) never
+    breaks on a stray "" or None."""
+    entry.setdefault("source_folder", folder)
+    entry.setdefault("source_pdf", stem)
+    printed_page = entry.get("printed_page")
+    if isinstance(printed_page, str):
+        printed_page = printed_page.strip()
+    if isinstance(printed_page, int) and not isinstance(printed_page, bool):
+        return entry
+    if isinstance(printed_page, str) and printed_page.isdigit():
+        entry["printed_page"] = int(printed_page)
+        return entry
+    entry["printed_page"] = 0
+    entry.setdefault("flags", [])
+    entry["flags"].append({"field": "printed_page", "issue": "not visible or unparsable on page"})
+    return entry
+
+
 def extract_page(image_bytes):
     b64 = base64.b64encode(image_bytes).decode()
     resp = requests.post(
@@ -149,10 +172,13 @@ def extract_page(image_bytes):
 
 
 def process_pdf(client, folder, stem, page_keys):
+    """Returns True once every page for this PDF is verified present in B2
+    (including pages that were already done on a prior run); False if any
+    page still needs a retry."""
     done_key = f"extractions/{MODEL_TAG}/processed/{folder}/{stem}.done"
     if b2_exists(client, done_key):
         print(f"skip (already done): {MODEL_TAG}/{folder}/{stem}")
-        return
+        return True
 
     print(f"processing: {MODEL_TAG}/{folder}/{stem} ({len(page_keys)} pages)")
     for page_no, image_key in page_keys:
@@ -161,9 +187,7 @@ def process_pdf(client, folder, stem, page_keys):
             continue
         try:
             entries = extract_page(b2_get_bytes(client, image_key))
-            for entry in entries:
-                entry.setdefault("source_folder", folder)
-                entry.setdefault("source_pdf", stem)
+            entries = [normalize_entry(e, folder, stem) for e in entries]
             body = json.dumps(entries, ensure_ascii=False, indent=2).encode()
             b2_put_bytes(client, out_key, body, "application/json")
         except Exception as exc:
@@ -178,6 +202,7 @@ def process_pdf(client, folder, stem, page_keys):
         print(f"done: {MODEL_TAG}/{folder}/{stem}")
     else:
         print(f"WARNING: not all pages verified for {folder}/{stem}; will retry next run")
+    return all_present
 
 
 def main():
@@ -190,6 +215,7 @@ def main():
     total_pages = sum(len(v) for v in by_pdf.values())
     print(f"found {len(by_pdf)} source PDF(s), {total_pages} page(s)")
 
+    any_incomplete = False
     for (folder, stem), page_keys in sorted(by_pdf.items()):
         if elapsed() > MAX_RUNTIME_SECONDS:
             print(
@@ -197,7 +223,12 @@ def main():
                 "stopping before starting a new file"
             )
             sys.exit(RUNTIME_GUARD_EXIT_CODE)
-        process_pdf(client, folder, stem, page_keys)
+        if not process_pdf(client, folder, stem, page_keys):
+            any_incomplete = True
+
+    if any_incomplete:
+        print("one or more PDFs had pages that could not be verified; exiting non-zero so this is visible")
+        sys.exit(1)
 
     print("all pages processed")
 

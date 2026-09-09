@@ -134,8 +134,10 @@ general-purpose model, so it should follow the 25-field schema more reliably tha
 smaller model — reasoned from published model positioning, not benchmarked against this
 project's actual pages, so treat an `all` bake-off as the real source of truth once you can
 eyeball output quality yourself.
-Each model's output is namespaced under `extractions/<model>/...` in B2, so different models'
-runs never clobber each other and can be compared side by side. Ollama's library can rename or
+Each model's output is namespaced under `extractions/<model-tag>/...` in B2, where `<model-tag>`
+is the `model` value slugified (`:` and other non-alphanumeric characters replaced with `-` —
+e.g. `qwen3-vl:2b` becomes the path segment `qwen3-vl-2b`), so different models' runs never
+clobber each other and can be compared side by side. Ollama's library can rename or
 drop model tags over time — if `ollama pull` fails for one of these, check
 [ollama.com/library](https://ollama.com/library) for the current tag and update the `options`
 list in the workflow.

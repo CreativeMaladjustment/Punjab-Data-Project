@@ -78,14 +78,21 @@ python build_site.py                         # local build (with PDF deep-links)
 ## pCloud → B2 scan pipeline
 
 `scripts/process_pcloud.py`, run on demand via the `.github/workflows/process-pdfs.yml`
-GitHub Actions workflow, pulls the source volume PDFs from a public pCloud folder, splits
-each into single-page PDFs, renders each page as a 200 DPI WebP image for LLM vision input,
-and uploads both to a Backblaze B2 bucket (via B2's S3-compatible API). B2 itself is the
-resumability ledger: every page PDF, page image, and per-PDF `processed/.../<stem>.done`
-marker is checked against the bucket before being redone, so a run that hits the 5-hour
-GitHub Actions runner ceiling exits `42`, flags this in the run's job summary, and stops —
-a human re-runs the workflow (Actions → *Process pCloud PDFs to B2* → **Run workflow**) to
-pick up where it left off; nothing needs re-checking or re-configuring first.
+GitHub Actions workflow, pulls the source volume PDFs from a public pCloud folder, renders
+each page as a 200 DPI WebP image for LLM vision input, and uploads it to a Backblaze B2
+bucket (via B2's S3-compatible API) — the image is rendered directly from the source PDF, no
+intermediate per-page PDF needed. B2 itself is the resumability ledger: every page image and
+per-PDF `processed/.../<stem>.done` marker is checked against the bucket before being redone,
+so a run that hits the 5-hour GitHub Actions runner ceiling exits `42`, flags this in the
+run's job summary, and stops — a human re-runs the workflow (Actions → *Process pCloud PDFs
+to B2* → **Run workflow**) to pick up where it left off; nothing needs re-checking or
+re-configuring first.
+
+A single-page PDF per page isn't currently used by anything downstream (only the WebP images
+feed the LLM extraction stage), so it's **not** split out or uploaded by default. Tick
+**Also split and upload a single-page PDF per page** when running the workflow (or set
+`UPLOAD_PAGE_PDFS=true` if running the script directly) to bring it back — output goes to
+`pages/{folder}/{stem}/page_XXXX.pdf`, same as before.
 
 The job runs against a GitHub **environment** named `b2-upload` (Settings → Environments →
 New environment) rather than plain repository secrets, so a run can be gated behind manual

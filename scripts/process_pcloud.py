@@ -29,17 +29,20 @@ This script never reads existing content from B2, only writes there and
 records what it wrote in Postgres.
 
 Three ways to run it (see .github/workflows/process-pdfs.yml):
-- No args, no PCLOUD_FILEID: the original full scan -- lists every PDF and
-  processes whichever aren't already done, sequentially, one process.
-- `--list-remaining`: prints a JSON array of {fileid, name, folder, account}
-  for every PDF not yet done, and nothing else. Powers the `list-remaining`
-  job that builds the `process` job's matrix -- each matrix entry is a
-  disjoint PDF assigned in advance, so unlike the LLM extraction pipeline's
+- No args, no PCLOUD_PDFS_JSON: the original full scan -- lists every PDF
+  and processes whichever aren't already done, sequentially, one process.
+- `--list-remaining`: prints one compact JSON line, an array of up to
+  MAX_PARALLEL_PDF_WORKERS slices (each a list of {fileid, name, folder,
+  account}) covering every PDF not yet done, and nothing else. Powers the
+  `list-remaining` job that builds the `process` job's matrix -- each
+  matrix entry is a disjoint slice assigned in advance (see
+  chunk_remaining_pdfs()), so unlike the LLM extraction pipeline's
   claim_next_page(), no live atomic claiming is needed to keep parallel
-  workers from picking the same PDF.
-- PCLOUD_FILEID (+ PCLOUD_FILE_NAME, PCLOUD_FOLDER, PCLOUD_ASSIGNED_ACCOUNT)
-  set: processes just that one PDF and returns. Used by the `process` job's
-  matrix, one call per matrix entry.
+  workers from picking the same PDF, and the matrix stays a small, fixed
+  size regardless of how large the backlog grows.
+- PCLOUD_PDFS_JSON set (one slice, as produced by chunk_remaining_pdfs()):
+  processes just those PDFs, sequentially, and returns. Used by the
+  `process` job's matrix, one call per matrix entry.
 
 Designed to run as-is inside GitHub Actions but only needs
 boto3/psycopg2/requests/pypdf/pdf2image/pillow and network access to run
@@ -117,6 +120,14 @@ RUNTIME_GUARD_EXIT_CODE = 42
 # of spending the rest of the runtime budget failing the same way.
 BOTH_ACCOUNTS_FAILURE_THRESHOLD = 5
 BOTH_ACCOUNTS_FAILURE_EXIT_CODE = 43
+# How many `process` matrix jobs .github/workflows/process-pdfs.yml's
+# `list-remaining` job fans work out into. Fixed, not backlog-size-dependent:
+# GitHub Actions caps a single job's matrix at 256 combinations, so one
+# matrix entry per remaining PDF would eventually break outright as the
+# backlog grows. chunk_remaining_pdfs() instead always produces at most this
+# many slices, each containing a share of the remaining PDFs, however many
+# there are.
+MAX_PARALLEL_PDF_WORKERS = 10
 
 START_TIME = time.time()
 
@@ -381,9 +392,7 @@ def list_remaining_pdfs():
     """List every PDF on pCloud not yet fully processed per the DB, each
     tagged with which B2 account it should try first -- round-robin over
     just the remaining ones, spreading the parallel matrix's load evenly.
-    Doesn't touch B2. Powers --list-remaining (see main()), which the
-    `list-remaining` job in .github/workflows/process-pdfs.yml calls to
-    build the `process` job's matrix."""
+    Doesn't touch B2."""
     conn = db_connect()
     pdfs = list_pdfs_recursive(PCLOUD_CODE)
     remaining = [
@@ -395,6 +404,22 @@ def list_remaining_pdfs():
         {**item, "account": ACCOUNT_ORDER[i % len(ACCOUNT_ORDER)]}
         for i, item in enumerate(remaining)
     ]
+
+
+def chunk_remaining_pdfs():
+    """list_remaining_pdfs(), split round-robin into at most
+    MAX_PARALLEL_PDF_WORKERS slices -- so the `process` job's matrix (see
+    .github/workflows/process-pdfs.yml) stays a small, fixed size no matter
+    how large the backlog grows. Powers --list-remaining (see main()), which
+    the `list-remaining` job calls to build that matrix; each slice becomes
+    one matrix entry, processed sequentially by one worker (main()'s
+    PCLOUD_PDFS_JSON mode)."""
+    remaining = list_remaining_pdfs()
+    num_workers = min(MAX_PARALLEL_PDF_WORKERS, len(remaining))
+    chunks = [[] for _ in range(num_workers)]
+    for i, item in enumerate(remaining):
+        chunks[i % num_workers].append(item)
+    return chunks
 
 
 def process_pdf(conn, clients, item, assigned_account, health):
@@ -490,7 +515,7 @@ def main():
     if "--list-remaining" in sys.argv[1:]:
         # Prints one compact JSON line to stdout and nothing else -- the
         # `list-remaining` workflow job captures it straight into a matrix.
-        print(json.dumps(list_remaining_pdfs()))
+        print(json.dumps(chunk_remaining_pdfs(), separators=(",", ":")))
         return
 
     TMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -498,20 +523,18 @@ def main():
     clients = {account_id: b2_client(account) for account_id, account in B2_ACCOUNTS.items()}
     health = UploadHealthTracker(BOTH_ACCOUNTS_FAILURE_THRESHOLD, len(ACCOUNT_ORDER))
 
-    single_fileid = os.environ.get("PCLOUD_FILEID", "").strip()
-    if single_fileid:
-        # One PDF per invocation -- used by the `process` job's matrix
-        # (see .github/workflows/process-pdfs.yml), where list_remaining_pdfs()
-        # already assigned each matrix entry a disjoint PDF and a B2 account,
-        # so there's no listing or looping left to do here.
-        item = {
-            "fileid": int(single_fileid),
-            "name": os.environ["PCLOUD_FILE_NAME"],
-            "folder": os.environ.get("PCLOUD_FOLDER", ""),
-        }
-        assigned_account = os.environ.get("PCLOUD_ASSIGNED_ACCOUNT") or ACCOUNT_ORDER[0]
+    pdfs_json = os.environ.get("PCLOUD_PDFS_JSON", "").strip()
+    if pdfs_json:
+        # One slice of the remaining-PDF backlog per invocation -- used by
+        # the `process` job's matrix (see .github/workflows/process-pdfs.yml),
+        # where chunk_remaining_pdfs() already split the full remaining list
+        # into disjoint slices (each item already carries its assigned B2
+        # account), so there's no listing left to do here, just looping
+        # through this worker's share.
+        items = json.loads(pdfs_json)
         try:
-            process_pdf(conn, clients, item, assigned_account, health)
+            for item in items:
+                process_pdf(conn, clients, item, item["account"], health)
         except AllAccountsFailedError as exc:
             print(f"stopping: {exc}")
             sys.exit(BOTH_ACCOUNTS_FAILURE_EXIT_CODE)

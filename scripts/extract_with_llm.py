@@ -221,6 +221,19 @@ ENTRY_FIELD_NAMES = {
 }
 
 
+def _looks_like_entry_list(value):
+    """True if value is a non-empty list where every element is a dict
+    containing at least one known schema entry field -- i.e. a real list
+    of catalogue entries, as opposed to (for example) a `flags` list whose
+    elements have keys like "field"/"issue", none of which are schema
+    entry fields."""
+    return (
+        isinstance(value, list)
+        and len(value) > 0
+        and all(isinstance(e, dict) and (e.keys() & ENTRY_FIELD_NAMES) for e in value)
+    )
+
+
 def _coerce_to_entry_list(parsed):
     """Some local models wrap the requested JSON array in a dict, or emit a
     single entry object instead of a one-entry array, even when told to
@@ -228,17 +241,34 @@ def _coerce_to_entry_list(parsed):
     the actual list in these common shapes rather than failing the whole
     page over the model not nesting things exactly as asked:
 
-      - a single entry emitted flat -> [parsed], recognized by at least one
-        key being a known schema entry field (see ENTRY_FIELD_NAMES;
-        without this an unrelated dict, e.g. an error payload, would pass
-        as a bogus "entry" just because it has no dict values) and no
-        dict-valued keys at all -- the schema has no dict-valued fields,
-        so one present means something is genuinely off, not a real entry.
-        Deliberately *not* conditioned on how many list-valued keys it has
-        or what they're named: `flags` is the schema's one array field,
-        but a real entry hallucinating some other list field alongside
-        known fields (e.g. {"title": "x", "tags": [...]}) is still a
-        single entry, not an envelope to unwrap into just that list.
+      - a dict with exactly one list-valued key, no dict-valued keys, and
+        that list's elements each look like entry dicts (see
+        _looks_like_entry_list) -> unwrap to that list, e.g.
+        {"printed_page": 1, "entries": [{...one real entry...}]} unwraps
+        to the entry inside, *not* the whole wrapper as one bogus entry --
+        observed for real: minicpm-v4.5 hoisting a page-level
+        `printed_page` alongside the actual `entries` array trips the
+        "known schema key present" signal below if checked first. Any
+        other top-level key that's also a known schema field (like that
+        `printed_page`) is backfilled onto each entry that doesn't already
+        have it, so page-level metadata the model chose to hoist isn't
+        lost -- schema.md defines printed_page/quarter etc. per entry, so
+        applying the wrapper's value to every entry on the page is exactly
+        the intended shape, just written once instead of repeated.
+      - otherwise, a single entry emitted flat -> [parsed], recognized by
+        at least one key being a known schema entry field (see
+        ENTRY_FIELD_NAMES; without this an unrelated dict, e.g. an error
+        payload, would pass as a bogus "entry" just because it has no
+        dict values) and no dict-valued keys at all -- the schema has no
+        dict-valued fields, so one present means something is genuinely
+        off, not a real entry. Deliberately *not* conditioned on how many
+        list-valued keys it has or what they're named otherwise: `flags`
+        is the schema's one array field, but a real entry hallucinating
+        some other list field alongside known fields (e.g. {"title": "x",
+        "tags": [...]}) is still a single entry, not an envelope --
+        _looks_like_entry_list already rules out matching on `flags`
+        itself here, since flag objects (`{"field": ..., "issue": ...}`)
+        aren't entry-shaped.
       - otherwise (no known schema keys at all), a dict with exactly one
         list-valued key and no dict-valued keys -- e.g. {"entries": [...]},
         or {"entries": [...], "count": 3} -- is an envelope -> unwrap to
@@ -261,18 +291,26 @@ def _coerce_to_entry_list(parsed):
     elif not isinstance(parsed, dict):
         raise ValueError(f"expected a JSON array, got {type(parsed).__name__}")
     else:
-        known_keys = parsed.keys() & ENTRY_FIELD_NAMES
+        list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
         has_dict_value = any(isinstance(v, dict) for v in parsed.values())
 
-        if known_keys and not has_dict_value:
-            result = [parsed]
-        elif not known_keys and not has_dict_value:
-            list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
-            if len(list_items) != 1:
-                raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
-            result = list_items[0][1]
+        if len(list_items) == 1 and not has_dict_value and _looks_like_entry_list(list_items[0][1]):
+            list_key, entries = list_items[0]
+            backfill = {k: v for k, v in parsed.items() if k != list_key and k in ENTRY_FIELD_NAMES}
+            for entry in entries:
+                for k, v in backfill.items():
+                    entry.setdefault(k, v)
+            result = entries
         else:
-            raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
+            known_keys = parsed.keys() & ENTRY_FIELD_NAMES
+            if known_keys and not has_dict_value:
+                result = [parsed]
+            elif not known_keys and not has_dict_value:
+                if len(list_items) != 1:
+                    raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
+                result = list_items[0][1]
+            else:
+                raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
 
     bad_types = sorted({type(e).__name__ for e in result if not isinstance(e, dict)})
     if bad_types:

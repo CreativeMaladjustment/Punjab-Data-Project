@@ -86,8 +86,13 @@ RUNTIME_GUARD_EXIT_CODE = 42
 # A dense page (a full multi-column table with many entries) can take an
 # 8B CPU-only vision model well past 10 minutes; 600s was cutting those off
 # before Ollama ever responded. Still well inside MAX_RUNTIME_SECONDS's
-# budget for a single page.
-OLLAMA_REQUEST_TIMEOUT_SECONDS = 1800
+# budget for a single page. (connect, read) rather than one shared value:
+# wait_for_ollama() already confirms OLLAMA_HOST is up before any of this
+# runs, but if the server dies mid-run, a single 1800s timeout would let
+# requests hang that long just trying to connect, not only while waiting
+# on a slow model response.
+OLLAMA_CONNECT_TIMEOUT_SECONDS = 10
+OLLAMA_READ_TIMEOUT_SECONDS = 1800
 START_TIME = time.time()
 
 SCHEMA_PATH = pathlib.Path(__file__).resolve().parent.parent / "pipeline" / "schema.md"
@@ -286,7 +291,7 @@ def extract_page(image_bytes, context=""):
             "stream": False,
             "format": "json",
         },
-        timeout=OLLAMA_REQUEST_TIMEOUT_SECONDS,
+        timeout=(OLLAMA_CONNECT_TIMEOUT_SECONDS, OLLAMA_READ_TIMEOUT_SECONDS),
     )
     resp.raise_for_status()
     text = resp.json()["response"].strip()

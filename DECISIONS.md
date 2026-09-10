@@ -388,7 +388,7 @@ rather than a paid API. Full reasoning, alternatives considered, and tradeoffs i
 **Consequences:** Near-zero marginal infra cost and nothing to patch, at the cost of free
 external quotas becoming the real operational ceiling. Observed directly on 2026-09-10: both
 configured B2 accounts hit `AccessDenied: ... download bandwidth or transaction (Class B) cap
-exceeded` (the message names two distinct quotas without saying which tripped), producing a
+exceeded` (the message names two distinct quotas without saying which tripped), leaving
 22,387 of 22,398 rows (99.95%) sitting in `failed` status at export time (6 `claimed` were
 still unresolved, not themselves failures, and 5 had reached `success`) across ~11 hours and
 three separate runs — the claiming/retry logic itself worked correctly

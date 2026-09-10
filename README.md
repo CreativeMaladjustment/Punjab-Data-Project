@@ -93,9 +93,13 @@ ones not yet fully uploaded per Postgres, and splits them round-robin into up to
 in parallel. Each `process` job works straight through its own slice with no internal
 runtime guard — it relies on the job's `timeout-minutes: 350` to stop it if a slice draws an
 unlucky mix of large PDFs, with no graceful mid-slice resume signal (see `ARCHITECTURE.md`).
-Just re-running the workflow (Actions → *Process pCloud PDFs to B2* → **Run workflow**) picks
-up whatever's still unfinished on the next `list-remaining` pass; nothing needs re-checking or
-re-configuring first. (`scripts/process_pcloud.py`'s original single-process, full-scan mode
+For a run that simply hit the timeout mid-slice, re-running the workflow (Actions → *Process
+pCloud PDFs to B2* → **Run workflow**) picks up whatever's still unfinished on the next
+`list-remaining` pass, with nothing to re-check or re-configure first. That's not true for a
+run that stopped with exit code 43 (every configured B2 account failing repeatedly — see
+"Second B2 account" below): re-running without first resolving the account/quota problem
+will just fail the same way again and burn more runner time. (`scripts/process_pcloud.py`'s
+original single-process, full-scan mode
 — list everything, loop sequentially, exit `42` after ~5 hours for a human to resume — still
 exists in the script for manual/local runs outside the workflow, but the production workflow
 no longer uses it.)

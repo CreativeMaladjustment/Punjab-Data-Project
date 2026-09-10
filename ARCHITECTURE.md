@@ -22,9 +22,19 @@ That constraint is the actual design driver. Every choice below follows from "wh
 project run entirely on free or near-free managed services, coordinated by nothing more than
 what's already checked into the repo."
 
+**Scope:** this ADR covers the pCloud → B2 → Postgres pipeline (`process-pdfs.yml`,
+`extract-pages.yml`, `scripts/process_pcloud.py`, `scripts/extract_with_llm.py`) — the path
+that scales to the full ~tens-of-thousands-of-pages backlog. It does not cover
+`pipeline/extract_api.py`, a separate, manually-run, manifest-scoped extraction path that
+calls Anthropic's Batch API directly (`ANTHROPIC_API_KEY`, no GitHub Actions, no B2, output to
+local SQLite) documented in `pipeline/README.md`; that path is a different, smaller-scale tool
+for specific quarters, not an alternative production pipeline, and the "no paid hosted LLM
+API" reasoning below applies to the GitHub Actions pipeline this document is about, not as a
+blanket claim about every extraction path in the repository.
+
 ## Decision
 
-Build the whole pipeline on **GitHub Actions as the compute layer**, coordinating a handful of
+Build this pipeline on **GitHub Actions as the compute layer**, coordinating a handful of
 **free/cheap-tier managed cloud services** for everything stateful, with **Postgres as the only
 shared coordination point** between otherwise-stateless, ephemeral jobs.
 
@@ -110,11 +120,14 @@ running a queue service.
   this workload is bursty (manually triggered, runs for hours, then idle for days) — paying
   for 24/7 uptime for an intermittent job is the wrong shape. Also means someone has to patch
   and monitor it; nobody is staffed to do that here.
-- **A paid hosted LLM API** (rather than local Ollama on the runner) for extraction. Rejected
-  on cost: tens of thousands of vision-LLM calls at API pricing is real money for a
-  no-budget project, versus free CPU-minutes already available from GitHub Actions. The
-  tradeoff is speed (CPU inference is slow) and model quality (only small, non-gated models
-  fit), which the project accepted.
+- **A paid hosted LLM API** (rather than local Ollama on the runner) for this pipeline's
+  extraction. Rejected on cost: tens of thousands of vision-LLM calls at API pricing is real
+  money for a no-budget project, versus free CPU-minutes already available from GitHub
+  Actions. The tradeoff is speed (CPU inference is slow) and model quality (only small,
+  non-gated models fit), which the project accepted. This is scoped to this pipeline, not a
+  blanket rejection of hosted APIs project-wide — `pipeline/extract_api.py` already uses
+  Anthropic's Batch API for its own, much smaller, manually-run extraction path (see Scope
+  above), where the cost math and operational shape are different.
 - **A real task queue** (Celery/Redis, SQS, or similar) for coordinating parallel workers.
   Rejected as disproportionate for `extract-pages.yml`'s page-level contention, where the
   actual need is "don't let two workers grab the same `(page, model)` row," which a

@@ -34,8 +34,8 @@ shared coordination point** between otherwise-stateless, ephemeral jobs.
 |---|---|---|
 | Source volumes | pCloud (public share link) | Already where the scans lived; no migration needed; free tier serves public downloads. |
 | Compute | GitHub Actions (`ubuntu-latest` runners) | Free minutes on a public repo; ephemeral — nothing to patch, nothing idling between runs; `strategy.matrix` gives horizontal parallelism for free. |
-| Object storage | Backblaze B2 (two accounts, round-robinned) | Cheapest S3-compatible storage available; two accounts split load and give a fallback path (`upload_with_fallback` in `process_pcloud.py`) if one account errors. |
-| Database | Supabase-hosted Postgres | Free-tier managed Postgres; single source of truth for what's been processed, what's claimed, what's failed — see `supabase/migrations/`. |
+| Object storage | Backblaze B2 (two accounts, round-robin assigned) | Cheapest S3-compatible storage available; two accounts split load and give a fallback path (`upload_with_fallback` in `process_pcloud.py`) if one account errors. |
+| Database | Supabase-hosted Postgres | Free-tier managed Postgres; single source of truth for upload state and extraction results (`pages.image_uploaded_at`, `llm_extractions.status`) — see `supabase/migrations/`. PDF-stage render/upload failures aren't persisted as a status anywhere; a failed page just stays absent from `pages`, with the failure itself only visible in that run's Actions log. |
 | LLM inference | Ollama, self-hosted **on the runner itself** | GitHub-hosted runners have no GPU, so this is CPU inference — slow per page, but it costs nothing beyond runner-minutes. No API key, no per-token billing, no external vendor for the actual OCR/extraction work. |
 | Orchestration | None (deliberately) | No Celery, no SQS, no Redis, no K8s. Coordination between parallel jobs is a handful of SQL statements against Postgres (see below), not a service. |
 
@@ -123,9 +123,9 @@ running a queue service.
   project can run the identical pipeline from a clean checkout.
 - **Demonstrated horizontal scaling** at the scale this project needs it: 9 parallel
   extraction workers, up to 10 parallel PDF-processing workers. The extraction claim loop
-  is verified safe against no double-processing under *arbitrary* concurrency (including
-  across separate runs); the PDF-processing chunking is safe against double-processing
-  *within a single run* only — see the accepted cross-run duplication gap above.
+  is verified to prevent double-processing under *arbitrary* concurrency (including across
+  separate runs); the PDF-processing chunking prevents double-processing *within a single
+  run* only — see the accepted cross-run duplication gap above.
 
 ### What it costs
 
@@ -156,10 +156,14 @@ running a queue service.
   matrix jobs actually run has no internal runtime check, so a slice with an unlucky mix of
   large PDFs can run until GitHub's hard timeout kills it mid-item, with no graceful
   "resume" signal. Worth closing, not yet done.
-- **No persistent compute state.** Every matrix job starts from nothing; anything that needs
-  to survive between jobs (or between runs) must be written to Postgres or B2 explicitly.
-  This is why the whole design centers on "Postgres as source of truth for what's done" —
-  it's not optional, it's the only place state *can* live.
+- **No persistent compute state.** Every matrix job starts from nothing; any
+  *application/source-of-truth* state that needs to survive between jobs or runs — what's
+  been uploaded, what's been extracted — must be written to Postgres or B2 explicitly. This
+  is why the whole design centers on Postgres as source of truth for what's done; it's not
+  optional, it's the only place that state can live. (Incidental build/dependency caches are
+  a separate thing and do survive elsewhere on purpose — `extract-pages.yml` caches the
+  pulled Ollama model under `~/.ollama` via `actions/cache`, and `setup-python` caches pip
+  packages — but losing either just costs a slower re-download next run, not correctness.)
 - **CPU-only LLM inference is slow.** No GPU on standard GitHub-hosted runners bounds
   per-page throughput regardless of parallelism; this was an accepted tradeoff against the
   cost of GPU compute or a paid API.

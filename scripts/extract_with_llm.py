@@ -226,7 +226,9 @@ def _looks_like_entry_list(value):
     containing at least one known schema entry field -- i.e. a real list
     of catalogue entries, as opposed to (for example) a `flags` list whose
     elements have keys like "field"/"issue", none of which are schema
-    entry fields."""
+    entry fields. Only meaningful for a non-empty list: an empty list's
+    contents can't tell you anything, so _coerce_to_entry_list decides
+    that case by the list's key name instead (see its comments)."""
     return (
         isinstance(value, list)
         and len(value) > 0
@@ -241,12 +243,13 @@ def _coerce_to_entry_list(parsed):
     the actual list in these common shapes rather than failing the whole
     page over the model not nesting things exactly as asked:
 
-      - a dict with exactly one list-valued key, no dict-valued keys, and
-        that list's elements each look like entry dicts (see
-        _looks_like_entry_list) -> unwrap to that list, e.g.
-        {"printed_page": 1, "entries": [{...one real entry...}]} unwraps
-        to the entry inside, *not* the whole wrapper as one bogus entry --
-        observed for real: minicpm-v4.5 hoisting a page-level
+      - a dict with exactly one list-valued key and no dict-valued keys,
+        where that list either (a) is non-empty and its elements each look
+        like entry dicts (see _looks_like_entry_list), or (b) is empty and
+        its key isn't itself a known schema field -> unwrap to that list,
+        e.g. {"printed_page": 1, "entries": [{...one real entry...}]}
+        unwraps to the entry inside, *not* the whole wrapper as one bogus
+        entry -- observed for real: minicpm-v4.5 hoisting a page-level
         `printed_page` alongside the actual `entries` array trips the
         "known schema key present" signal below if checked first. Any
         other top-level key that's also a known schema field (like that
@@ -255,6 +258,13 @@ def _coerce_to_entry_list(parsed):
         lost -- schema.md defines printed_page/quarter etc. per entry, so
         applying the wrapper's value to every entry on the page is exactly
         the intended shape, just written once instead of repeated.
+        The empty-list case is its own branch because content can't
+        disambiguate an empty list -- {"printed_page": 12, "entries": []}
+        (a legitimate zero-entries page, explicitly allowed by the system
+        prompt) must still unwrap to [], while {"title": "x", "flags": []}
+        (a single entry with nothing flagged) must not: checking the key's
+        *name* against ENTRY_FIELD_NAMES tells them apart where the
+        (necessarily vacuous) contents check can't.
       - otherwise, a single entry emitted flat -> [parsed], recognized by
         at least one key being a known schema entry field (see
         ENTRY_FIELD_NAMES; without this an unrelated dict, e.g. an error
@@ -294,7 +304,15 @@ def _coerce_to_entry_list(parsed):
         list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
         has_dict_value = any(isinstance(v, dict) for v in parsed.values())
 
-        if len(list_items) == 1 and not has_dict_value and _looks_like_entry_list(list_items[0][1]):
+        is_entries_envelope = False
+        if len(list_items) == 1 and not has_dict_value:
+            sole_key, sole_value = list_items[0]
+            if len(sole_value) == 0:
+                is_entries_envelope = sole_key not in ENTRY_FIELD_NAMES
+            else:
+                is_entries_envelope = _looks_like_entry_list(sole_value)
+
+        if is_entries_envelope:
             list_key, entries = list_items[0]
             backfill = {k: v for k, v in parsed.items() if k != list_key and k in ENTRY_FIELD_NAMES}
             for entry in entries:

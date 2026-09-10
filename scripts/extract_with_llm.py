@@ -156,17 +156,23 @@ CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours; a worker that dies mid-page leav
 CLAIM_MAX_ATTEMPTS = 5  # see the "lost the race" note in claim_next_page()
 
 # candidate CTE narrows to one page: uploaded, and either never attempted
-# under model_tag, previously failed, or claimed but now stale. FOR UPDATE OF
-# p SKIP LOCKED makes two concurrent claims very unlikely to even consider the
-# same pages row -- but it locks `pages`, not `llm_extractions`, so it can't
-# fully prevent two transactions from both treating a page with *no existing
-# llm_extractions row* as available and both attempting to insert one: with
-# ON CONFLICT DO UPDATE unconditional, the second writer would silently
-# overwrite the first's fresh claim and *both* callers would come away
-# believing they'd claimed the same page. The WHERE on DO UPDATE is what
-# actually closes that: it only re-claims a conflicting row that's still
-# 'failed' or claim-stale, so the loser of a real race updates zero rows
-# and RETURNING gives it nothing back, instead of clobbering the winner.
+# under model_tag, or claimed/failed but stale (claimed_at is set on both a
+# fresh claim and a failure, so it doubles as "last touched" either way).
+# A fresh failure is deliberately NOT immediately reclaimable -- without the
+# same staleness gate a permanently-failing page (e.g. a corrupt image) would
+# get claimed, fail, and be claimed right back in the same tight loop for as
+# long as it's the only page left, burning the runtime budget on one page
+# instead of exiting cleanly. FOR UPDATE OF p SKIP LOCKED makes two
+# concurrent claims very unlikely to even consider the same pages row -- but
+# it locks `pages`, not `llm_extractions`, so it can't fully prevent two
+# transactions from both treating a page with *no existing llm_extractions
+# row* as available and both attempting to insert one: with ON CONFLICT DO
+# UPDATE unconditional, the second writer would silently overwrite the
+# first's fresh claim and *both* callers would come away believing they'd
+# claimed the same page. The WHERE on DO UPDATE is what actually closes
+# that: it only re-claims a conflicting row that's still claim/fail-stale,
+# so the loser of a real race updates zero rows and RETURNING gives it
+# nothing back, instead of clobbering the winner.
 CLAIM_NEXT_PAGE_SQL = """
     WITH candidate AS (
         SELECT p.id
@@ -176,8 +182,8 @@ CLAIM_NEXT_PAGE_SQL = """
         WHERE p.image_uploaded_at IS NOT NULL
           AND (
             le.id IS NULL
-            OR le.status = 'failed'
-            OR (le.status = 'claimed' AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second')
+            OR (le.status IN ('claimed', 'failed')
+                AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second')
           )
         ORDER BY random()
         LIMIT 1
@@ -188,9 +194,8 @@ CLAIM_NEXT_PAGE_SQL = """
     FROM candidate
     ON CONFLICT (page_id, model_tag) DO UPDATE SET
         status = 'claimed', claimed_at = now(), error_message = NULL, raw_response = NULL
-    WHERE llm_extractions.status = 'failed'
-       OR (llm_extractions.status = 'claimed'
-           AND llm_extractions.claimed_at < now() - %(claim_timeout)s * interval '1 second')
+    WHERE llm_extractions.status IN ('claimed', 'failed')
+      AND llm_extractions.claimed_at < now() - %(claim_timeout)s * interval '1 second'
     RETURNING page_id
 """
 
@@ -578,13 +583,13 @@ def process_page(conn, clients, claim):
 
     print(f"  page {page_no}: b2 account={account} bucket={bucket} key={image_key}")
     try:
-        client = clients[account]
-    except KeyError:
-        raise RuntimeError(
-            f"page {folder}/{stem} page_no={page_no} is recorded in account "
-            f"{account!r}, but that account isn't configured in this run's secrets"
-        )
-    try:
+        try:
+            client = clients[account]
+        except KeyError:
+            raise RuntimeError(
+                f"page {folder}/{stem} page_no={page_no} is recorded in account "
+                f"{account!r}, but that account isn't configured in this run's secrets"
+            )
         image_bytes = b2_get_bytes(client, bucket, image_key)
         entries = extract_page(image_bytes, context=context)
         for entry in entries:

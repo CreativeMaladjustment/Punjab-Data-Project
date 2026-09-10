@@ -16,11 +16,10 @@
 # on OCR/document-understanding benchmarks combined with being a full
 # general-purpose model (so it should follow the 25-field schema more
 # reliably than a narrower or smaller model) — reasoned from published
-# model positioning, not benchmarked here, so treat the "all" bake-off below
-# as the real source of truth once you can eyeball actual output quality.
-# Pick "all" to fan them out as a matrix run so you can compare quality/speed
-# across models; each model's output is namespaced separately in Postgres
-# (llm_extractions.model_tag) so runs never clobber each other.
+# model positioning, not benchmarked here; treat actual output quality as
+# the real source of truth once you can eyeball it. Each model's output is
+# namespaced separately in Postgres (llm_extractions.model_tag) so runs
+# against different models never clobber each other.
 #
 # Ollama's model library changes over time — if `ollama pull` fails for one
 # of these, check https://ollama.com/library for the current tag and update
@@ -31,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Ollama vision model to run (or 'all' to matrix every shortlisted model)"
+        description: "Ollama vision model to run"
         type: choice
         default: minicpm-v4.5
         options:
@@ -41,57 +40,29 @@ on:
           - gemma4:e2b
           - glm-ocr
           - minicpm-v4.5
-          - all
-      workers:
-        description: "Parallel workers per model -- each independently claims and processes pages (see scripts/extract_with_llm.py's claim_next_page()), so raising this speeds up a big backlog without any of them stepping on each other's pages"
-        type: choice
-        default: "1"
-        options:
-          - "1"
-          - "2"
-          - "3"
-          - "4"
-          - "5"
 
 permissions:
   contents: read
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      models: ${{ steps.set.outputs.models }}
-      workers: ${{ steps.set.outputs.workers }}
-    steps:
-      - id: set
-        env:
-          MODEL_INPUT: ${{ inputs.model }}
-          WORKERS_INPUT: ${{ inputs.workers }}
-        run: |
-          if [ "$MODEL_INPUT" = "all" ]; then
-            echo 'models=["minicpm-v4.6","qwen3-vl:2b","qwen3-vl:4b","gemma4:e2b","glm-ocr","minicpm-v4.5"]' >> "$GITHUB_OUTPUT"
-          else
-            echo "models=[\"$MODEL_INPUT\"]" >> "$GITHUB_OUTPUT"
-          fi
-
-          workers_json="["
-          for i in $(seq 1 "$WORKERS_INPUT"); do
-            [ "$i" != "1" ] && workers_json="$workers_json,"
-            workers_json="$workers_json$i"
-          done
-          workers_json="$workers_json]"
-          echo "workers=$workers_json" >> "$GITHUB_OUTPUT"
-
   extract:
-    needs: setup
     strategy:
       fail-fast: false
+      # 9 parallel workers -- each independently claims and processes pages
+      # (see scripts/extract_with_llm.py's claim_next_page()), so this fans
+      # a big backlog out across 9 runners without any of them stepping on
+      # each other's pages.
       matrix:
-        model: ${{ fromJSON(needs.setup.outputs.models) }}
-        worker: ${{ fromJSON(needs.setup.outputs.workers) }}
+        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload
+    env:
+      # Routed through an env var rather than interpolating ${{ inputs.model }}
+      # directly into run: scripts below (Semgrep: yaml.github-actions.security.
+      # run-shell-injection) -- inputs.model is a fixed `type: choice` today, but
+      # this is the correct pattern regardless of whether that stays true.
+      OLLAMA_MODEL_INPUT: ${{ inputs.model }}
     steps:
       - name: Free runner disk space
         run: |
@@ -117,6 +88,23 @@ jobs:
           curl -fsSL https://ollama.com/install.sh -o install-ollama.sh
           sh install-ollama.sh
 
+      - name: Cache Ollama model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # ~ resolves to whatever $HOME "ollama serve" below will use (this
+          # step runs as the same user, on the same runner) -- avoids
+          # hardcoding a path that only holds for the separate
+          # systemd-service install this workflow doesn't use. Restored
+          # *before* the server starts: it runs backgrounded and stays alive
+          # through every later step, so extracting into ~/.ollama while it's
+          # already serving requests against that same directory risks
+          # contention/partial state. Keyed per model since each pull is
+          # several GB; "ollama pull" only re-fetches a manifest and skips
+          # any blob already on disk with a matching digest, so a cache hit
+          # turns that step into a fast no-op instead of a multi-GB download.
+          path: ~/.ollama
+          key: ollama-model-${{ inputs.model }}
+
       - name: Start Ollama server
         run: |
           nohup ollama serve > ollama.log 2>&1 &
@@ -127,7 +115,7 @@ jobs:
           echo "Ollama server did not come up in time"; cat ollama.log; exit 1
 
       - name: Pull model
-        run: ollama pull "${{ matrix.model }}"
+        run: ollama pull "$OLLAMA_MODEL_INPUT"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -149,7 +137,7 @@ jobs:
           # DB writes (a separate, immediate network call per page) went
           # through the whole time.
           PYTHONUNBUFFERED: "1"
-          OLLAMA_MODEL: ${{ matrix.model }}
+          OLLAMA_MODEL: ${{ inputs.model }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
           B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
@@ -170,11 +158,11 @@ jobs:
       - name: Flag runtime guard trip for manual resume
         if: steps.run.outputs.exit_code == '42'
         run: |
-          echo "### ⏱️ Runtime guard tripped for \`${{ matrix.model }}\` (worker ${{ matrix.worker }}) — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ⏱️ Runtime guard tripped for \`$OLLAMA_MODEL_INPUT\` (worker ${{ matrix.worker }}) — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "The extraction stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off -- pages this worker claimed but didn't finish become claimable again once their claim goes stale (see CLAIM_TIMEOUT_SECONDS)." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Action needed:** re-run this workflow with the same model (\`${{ matrix.model }}\`) to continue." >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** re-run this workflow with the same model (\`$OLLAMA_MODEL_INPUT\`) to continue." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail job on unexpected script error
         if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42'

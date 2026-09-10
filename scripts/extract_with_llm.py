@@ -17,6 +17,19 @@ multiple models can be tried against the same page images without
 clobbering each other's rows — run the workflow once per model to bake
 them off against each other.
 
+main() runs a claim loop rather than fetching every outstanding page up
+front: each iteration calls claim_next_page() to atomically pick one
+random page and mark it 'claimed' in llm_extractions (see
+supabase/migrations/20260910040000_claim_pages_for_extraction.sql),
+processes it, then claims the next one. Multiple instances of this script
+can run concurrently against the same model (see .github/workflows/
+extract-pages.yml's `workers` matrix) without ever claiming the same page:
+claim_next_page() locks candidate rows with FOR UPDATE SKIP LOCKED, so a
+row already under consideration by one worker simply isn't visible as a
+candidate to another. A worker that dies mid-page leaves its claim behind;
+it's treated as available again once older than CLAIM_TIMEOUT_SECONDS,
+picked up by whichever worker gets there next -- no separate cleanup step.
+
 Supports up to two B2 accounts (see load_b2_accounts), same as
 process_pcloud.py, since a page's image may live in either one depending on
 which was active when it was uploaded — `pages.b2_account`/`b2_bucket`
@@ -123,34 +136,101 @@ def db_connect():
     return psycopg2.connect(SUPABASE_DB_URL)
 
 
-def db_fetch_pages_needing_extraction(conn, model_tag):
-    """Return {(folder, stem): [(page_id, pcloud_fileid, page_no, b2_account,
-    b2_bucket, image_key), ...]} for every page with an uploaded image that
-    doesn't already have a successful extraction for model_tag."""
+CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours; a worker that dies mid-page leaves
+# its claim behind for this long before another worker (or the same one, next
+# run) is allowed to pick the page back up.
+
+CLAIM_MAX_ATTEMPTS = 5  # see the "lost the race" note in claim_next_page()
+
+# candidate CTE narrows to one page: uploaded, and either never attempted
+# under model_tag, previously failed, or claimed but now stale. FOR UPDATE OF
+# p SKIP LOCKED makes two concurrent claims very unlikely to even consider the
+# same pages row -- but it locks `pages`, not `llm_extractions`, so it can't
+# fully prevent two transactions from both treating a page with *no existing
+# llm_extractions row* as available and both attempting to insert one: with
+# ON CONFLICT DO UPDATE unconditional, the second writer would silently
+# overwrite the first's fresh claim and *both* callers would come away
+# believing they'd claimed the same page. The WHERE on DO UPDATE is what
+# actually closes that: it only re-claims a conflicting row that's still
+# 'failed' or claim-stale, so the loser of a real race updates zero rows
+# and RETURNING gives it nothing back, instead of clobbering the winner.
+CLAIM_NEXT_PAGE_SQL = """
+    WITH candidate AS (
+        SELECT p.id
+        FROM pages p
+        LEFT JOIN llm_extractions le
+            ON le.page_id = p.id AND le.model_tag = %(model_tag)s
+        WHERE p.image_uploaded_at IS NOT NULL
+          AND (
+            le.id IS NULL
+            OR le.status = 'failed'
+            OR (le.status = 'claimed' AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second')
+          )
+        ORDER BY random()
+        LIMIT 1
+        FOR UPDATE OF p SKIP LOCKED
+    )
+    INSERT INTO llm_extractions (page_id, model, model_tag, status, claimed_at)
+    SELECT candidate.id, %(model)s, %(model_tag)s, 'claimed', now()
+    FROM candidate
+    ON CONFLICT (page_id, model_tag) DO UPDATE SET
+        status = 'claimed', claimed_at = now(), error_message = NULL, raw_response = NULL
+    WHERE llm_extractions.status = 'failed'
+       OR (llm_extractions.status = 'claimed'
+           AND llm_extractions.claimed_at < now() - %(claim_timeout)s * interval '1 second')
+    RETURNING page_id
+"""
+
+
+def claim_next_page(conn, model, model_tag, claim_timeout_seconds):
+    """Atomically claim one page still needing extraction under model_tag.
+    Returns {"page_id", "page_no", "account", "bucket", "image_key",
+    "folder", "stem"}, or None if nothing is claimable right now.
+
+    A single attempt can come back empty even when pages *are* still
+    available: it narrows to exactly one candidate up front, and if another
+    worker's concurrent claim wins the race for that specific page (see the
+    module-level SQL comment), this attempt's write affects zero rows --
+    indistinguishable, from one query alone, from "nothing left at all".
+    Retrying a few times (each picks a fresh random candidate) resolves
+    that ambiguity in practice; only genuine exhaustion survives every
+    attempt. A worker that gives up after CLAIM_MAX_ATTEMPTS real races in
+    a row just exits a little early -- a later run mops up whatever's left,
+    never a double-claim or a permanently skipped page.
+    """
+    for _ in range(CLAIM_MAX_ATTEMPTS):
+        with conn.cursor() as cur:
+            cur.execute(
+                CLAIM_NEXT_PAGE_SQL,
+                {"model_tag": model_tag, "claim_timeout": claim_timeout_seconds, "model": model},
+            )
+            row = cur.fetchone()
+        conn.commit()  # releases the row lock candidate took, whether or not it matched
+        if row is not None:
+            break
+    else:
+        return None
+    page_id = row[0]
+
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT p.id, p.pcloud_fileid, p.page_no, p.b2_account, p.b2_bucket, "
-            "p.image_key, pf.folder, pf.name "
-            "FROM pages p "
-            "JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid "
-            "WHERE p.image_uploaded_at IS NOT NULL "
-            "AND NOT EXISTS ("
-            "  SELECT 1 FROM llm_extractions le "
-            "  WHERE le.page_id = p.id AND le.model_tag = %s AND le.status = 'success'"
-            ") "
-            "ORDER BY pf.folder, pf.name, p.page_no",
-            (model_tag,),
+            "SELECT p.page_no, p.b2_account, p.b2_bucket, p.image_key, pf.folder, pf.name "
+            "FROM pages p JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid "
+            "WHERE p.id = %s",
+            (page_id,),
         )
-        rows = cur.fetchall()
+        page_no, account, bucket, image_key, folder, name = cur.fetchone()
     conn.rollback()  # read-only; drop the implicit transaction
 
-    by_pdf = {}
-    for page_id, fileid, page_no, account, bucket, image_key, folder, name in rows:
-        stem = pathlib.Path(name).stem
-        by_pdf.setdefault((folder, stem), []).append(
-            (page_id, fileid, page_no, account, bucket, image_key)
-        )
-    return by_pdf
+    return {
+        "page_id": page_id,
+        "page_no": page_no,
+        "account": account,
+        "bucket": bucket,
+        "image_key": image_key,
+        "folder": folder,
+        "stem": pathlib.Path(name).stem,
+    }
 
 
 def wait_for_ollama(timeout=120):
@@ -414,43 +494,44 @@ def db_save_extraction_failure(conn, page_id, model, model_tag, error_message):
     conn.commit()
 
 
-def process_pdf(conn, clients, folder, stem, pages):
-    """pages: [(page_id, pcloud_fileid, page_no, b2_account, b2_bucket,
-    image_key), ...]. Returns True if every page extracted successfully
-    this run; False if any page needs a retry."""
-    print(f"processing: {MODEL_TAG}/{folder}/{stem} ({len(pages)} pages)")
-    all_ok = True
-    for page_id, _fileid, page_no, account, bucket, image_key in pages:
-        context = f"{folder}/{stem} page {page_no}"
-        print(f"  page {page_no}: b2 account={account} bucket={bucket} key={image_key}")
-        try:
-            client = clients[account]
-        except KeyError:
-            raise RuntimeError(
-                f"page {folder}/{stem} page_no={page_no} is recorded in account "
-                f"{account!r}, but that account isn't configured in this run's secrets"
-            )
-        try:
-            image_bytes = b2_get_bytes(client, bucket, image_key)
-            entries = extract_page(image_bytes, context=context)
-            for entry in entries:
-                entry.setdefault("source_folder", folder)
-                entry.setdefault("source_pdf", stem)
-                entry["pdf_page"] = page_no - 1  # known exactly; don't trust the model's guess
-                flag_if_printed_page_missing(entry)
-            entries_json = json.dumps(entries)
-            print(f"    saving {len(entries)} entries for {context}: {entries_json[:500]!r}")
-            db_save_extraction_success(conn, page_id, OLLAMA_MODEL, MODEL_TAG, entries)
-        except Exception as exc:
-            print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")
-            db_save_extraction_failure(conn, page_id, OLLAMA_MODEL, MODEL_TAG, str(exc))
-            all_ok = False
+def process_page(conn, clients, claim):
+    """Extract one already-claimed page and record success or failure.
+    claim: the dict returned by claim_next_page(). Returns True on
+    success, False if it needs a retry."""
+    page_id = claim["page_id"]
+    page_no = claim["page_no"]
+    account = claim["account"]
+    bucket = claim["bucket"]
+    image_key = claim["image_key"]
+    folder = claim["folder"]
+    stem = claim["stem"]
+    context = f"{folder}/{stem} page {page_no}"
 
-    if all_ok:
-        print(f"done: {MODEL_TAG}/{folder}/{stem}")
-    else:
-        print(f"WARNING: not all pages extracted for {folder}/{stem}; will retry next run")
-    return all_ok
+    print(f"  page {page_no}: b2 account={account} bucket={bucket} key={image_key}")
+    try:
+        client = clients[account]
+    except KeyError:
+        raise RuntimeError(
+            f"page {folder}/{stem} page_no={page_no} is recorded in account "
+            f"{account!r}, but that account isn't configured in this run's secrets"
+        )
+    try:
+        image_bytes = b2_get_bytes(client, bucket, image_key)
+        entries = extract_page(image_bytes, context=context)
+        for entry in entries:
+            entry.setdefault("source_folder", folder)
+            entry.setdefault("source_pdf", stem)
+            entry["pdf_page"] = page_no - 1  # known exactly; don't trust the model's guess
+            flag_if_printed_page_missing(entry)
+        entries_json = json.dumps(entries)
+        print(f"    saving {len(entries)} entries for {context}: {entries_json[:500]!r}")
+        db_save_extraction_success(conn, page_id, OLLAMA_MODEL, MODEL_TAG, entries)
+        print(f"done: {context}")
+        return True
+    except Exception as exc:
+        print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")
+        db_save_extraction_failure(conn, page_id, OLLAMA_MODEL, MODEL_TAG, str(exc))
+        return False
 
 
 def main():
@@ -459,21 +540,24 @@ def main():
     clients = {aid: b2_client(acct) for aid, acct in B2_ACCOUNTS.items()}
 
     print(f"model: {OLLAMA_MODEL} (tag: {MODEL_TAG})")
-    print("querying pages needing extraction...")
-    by_pdf = db_fetch_pages_needing_extraction(conn, MODEL_TAG)
-    total_pages = sum(len(v) for v in by_pdf.values())
-    print(f"found {len(by_pdf)} source PDF(s), {total_pages} page(s) needing extraction")
-
+    processed = 0
     any_incomplete = False
-    for (folder, stem), pages in sorted(by_pdf.items()):
+    while True:
         if elapsed() > MAX_RUNTIME_SECONDS:
             print(
                 f"runtime guard tripped after {elapsed():.0f}s; "
-                "stopping before starting a new file"
+                "stopping before claiming another page"
             )
             sys.exit(RUNTIME_GUARD_EXIT_CODE)
-        if not process_pdf(conn, clients, folder, stem, pages):
+
+        claim = claim_next_page(conn, OLLAMA_MODEL, MODEL_TAG, CLAIM_TIMEOUT_SECONDS)
+        if claim is None:
+            break
+        if not process_page(conn, clients, claim):
             any_incomplete = True
+        processed += 1
+
+    print(f"processed {processed} page(s); no more claimable pages for this worker")
 
     if any_incomplete:
         print("one or more pages failed extraction; exiting non-zero so this is visible")

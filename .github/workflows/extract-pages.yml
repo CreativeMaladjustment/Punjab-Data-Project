@@ -42,6 +42,16 @@ on:
           - glm-ocr
           - minicpm-v4.5
           - all
+      workers:
+        description: "Parallel workers per model -- each independently claims and processes pages (see scripts/extract_with_llm.py's claim_next_page()), so raising this speeds up a big backlog without any of them stepping on each other's pages"
+        type: choice
+        default: "1"
+        options:
+          - "1"
+          - "2"
+          - "3"
+          - "4"
+          - "5"
 
 permissions:
   contents: read
@@ -51,10 +61,12 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       models: ${{ steps.set.outputs.models }}
+      workers: ${{ steps.set.outputs.workers }}
     steps:
       - id: set
         env:
           MODEL_INPUT: ${{ inputs.model }}
+          WORKERS_INPUT: ${{ inputs.workers }}
         run: |
           if [ "$MODEL_INPUT" = "all" ]; then
             echo 'models=["minicpm-v4.6","qwen3-vl:2b","qwen3-vl:4b","gemma4:e2b","glm-ocr","minicpm-v4.5"]' >> "$GITHUB_OUTPUT"
@@ -62,12 +74,21 @@ jobs:
             echo "models=[\"$MODEL_INPUT\"]" >> "$GITHUB_OUTPUT"
           fi
 
+          workers_json="["
+          for i in $(seq 1 "$WORKERS_INPUT"); do
+            [ "$i" != "1" ] && workers_json="$workers_json,"
+            workers_json="$workers_json$i"
+          done
+          workers_json="$workers_json]"
+          echo "workers=$workers_json" >> "$GITHUB_OUTPUT"
+
   extract:
     needs: setup
     strategy:
       fail-fast: false
       matrix:
         model: ${{ fromJSON(needs.setup.outputs.models) }}
+        worker: ${{ fromJSON(needs.setup.outputs.workers) }}
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload
@@ -149,9 +170,9 @@ jobs:
       - name: Flag runtime guard trip for manual resume
         if: steps.run.outputs.exit_code == '42'
         run: |
-          echo "### ⏱️ Runtime guard tripped for \`${{ matrix.model }}\` — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ⏱️ Runtime guard tripped for \`${{ matrix.model }}\` (worker ${{ matrix.worker }}) — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "The extraction stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "The extraction stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off -- pages this worker claimed but didn't finish become claimable again once their claim goes stale (see CLAIM_TIMEOUT_SECONDS)." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Action needed:** re-run this workflow with the same model (\`${{ matrix.model }}\`) to continue." >> "$GITHUB_STEP_SUMMARY"
 

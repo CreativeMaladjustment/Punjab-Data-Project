@@ -86,7 +86,9 @@ RUNTIME_GUARD_EXIT_CODE = 42
 # A dense page (a full multi-column table with many entries) can take an
 # 8B CPU-only vision model well past 10 minutes; 600s was cutting those off
 # before Ollama ever responded. Still well inside MAX_RUNTIME_SECONDS's
-# budget for a single page. (connect, read) rather than one shared value:
+# budget for a single page.
+#
+# Split into separate connect/read values rather than one shared timeout:
 # wait_for_ollama() already confirms OLLAMA_HOST is up before any of this
 # runs, but if the server dies mid-run, a single 1800s timeout would let
 # requests hang that long just trying to connect, not only while waiting

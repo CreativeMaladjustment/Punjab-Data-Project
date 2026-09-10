@@ -9,32 +9,17 @@ on:
         default: false
 
 jobs:
-  process:
+  list-remaining:
     runs-on: ubuntu-latest
-    timeout-minutes: 350
     environment: b2-upload
+    outputs:
+      chunks: ${{ steps.list.outputs.chunks }}
     steps:
-      - name: Free runner disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          df -h
-
       - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.x"
           cache: pip
@@ -43,10 +28,15 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r scripts/requirements.txt
 
-      - name: Run pCloud to B2 pipeline
-        id: run
+      - name: List PDFs still needing processing
+        id: list
         env:
+          PYTHONUNBUFFERED: "1"
           PCLOUD_CODE: ${{ vars.PCLOUD_CODE }}
+          # Must match the `process` job's own UPLOAD_PAGE_PDFS below --
+          # otherwise a PDF whose images are uploaded but whose page-PDFs
+          # aren't (when upload_page_pdfs=true) would look "done" here and
+          # never make it into a matrix slice.
           UPLOAD_PAGE_PDFS: ${{ inputs.upload_page_pdfs }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
@@ -60,29 +50,103 @@ jobs:
           B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
           B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
         run: |
+          chunks=$(python scripts/process_pcloud.py --list-remaining)
+          echo "found: $chunks"
+          echo "chunks=$chunks" >> "$GITHUB_OUTPUT"
+
+  process:
+    needs: list-remaining
+    if: needs.list-remaining.outputs.chunks != '[]'
+    strategy:
+      fail-fast: false
+      # Each matrix entry is one slice of the remaining PDFs, pre-assigned by
+      # chunk_remaining_pdfs() (see scripts/process_pcloud.py) -- unlike the
+      # LLM extraction pipeline's claim_next_page(), no live atomic claiming
+      # is needed here to keep parallel jobs from picking the same PDF,
+      # since the full remaining-PDF list is computed once, up front, into
+      # disjoint slices. Slicing (rather than one matrix entry per PDF) also
+      # keeps the matrix a small, fixed size (MAX_PARALLEL_PDF_WORKERS, 10)
+      # regardless of backlog size -- GitHub Actions caps a single job's
+      # matrix at 256 combinations, which one-entry-per-PDF would eventually
+      # hit as the backlog grows.
+      matrix:
+        chunk: ${{ fromJSON(needs.list-remaining.outputs.chunks) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    environment: b2-upload
+    env:
+      # Routed through an env var rather than interpolating
+      # ${{ toJSON(matrix.chunk) }} directly into run: scripts below
+      # (Semgrep: yaml.github-actions.security.run-shell-injection) --
+      # matrix.chunk carries pCloud filenames, which this workflow doesn't
+      # control.
+      PCLOUD_PDFS_JSON: ${{ toJSON(matrix.chunk) }}
+    steps:
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Process this worker's slice of PDFs
+        id: run
+        env:
+          # Without this, Python fully buffers stdout when it isn't a TTY
+          # (as here) -- print() output sits in memory until the buffer
+          # fills or the process exits cleanly, so a long run or one that
+          # gets cancelled mid-way can show *zero* log output even though
+          # DB writes (a separate, immediate network call per PDF) went
+          # through the whole time.
+          PYTHONUNBUFFERED: "1"
+          PCLOUD_CODE: ${{ vars.PCLOUD_CODE }}
+          UPLOAD_PAGE_PDFS: ${{ inputs.upload_page_pdfs }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT_2: ${{ secrets.B2_ENDPOINT_2 }}
+          B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+          B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+          B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+        run: |
           set +e
           python scripts/process_pcloud.py
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
-
-      - name: Flag runtime guard trip for manual resume
-        if: steps.run.outputs.exit_code == '42'
-        run: |
-          echo "### ⏱️ Runtime guard tripped — resume needed" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "The pipeline stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Action needed:** re-run this workflow (Actions → Process pCloud PDFs to B2 → Run workflow) to continue processing." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Flag both-accounts-failed
         if: steps.run.outputs.exit_code == '43'
         run: |
           echo "### 🚨 Every configured B2 account failed repeatedly — stopped early" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Uploads failed on every configured B2 account several times in a row, so the run stopped instead of spending the rest of the runtime budget failing the same way. Unlike a runtime-guard stop (exit 42, which just means \"resume whenever\"), this job is marked failed on purpose: it means every account is currently unusable and needs a person to look at it." >> "$GITHUB_STEP_SUMMARY"
+          echo "Uploads failed on every configured B2 account several times in a row while processing this worker's slice of PDFs, so this job stopped instead of spending the rest of its runtime budget failing the same way. This job is marked failed on purpose: it means every account is currently unusable and needs a person to look at it." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Action needed:** check both accounts' credentials, storage caps, and quotas, then re-run this workflow once resolved." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail job on unexpected script error
-        if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42'
+        if: steps.run.outputs.exit_code != '0'
         run: exit 1

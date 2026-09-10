@@ -28,11 +28,25 @@ whole PDF fresh" just to avoid split-page confusion.
 This script never reads existing content from B2, only writes there and
 records what it wrote in Postgres.
 
-Designed to run as-is inside GitHub Actions (see
-.github/workflows/process-pdfs.yml) but only needs boto3/psycopg2/requests/
-pypdf/pdf2image/pillow and network access to run anywhere.
+Three ways to run it (see .github/workflows/process-pdfs.yml):
+- No args, no PCLOUD_FILEID: the original full scan -- lists every PDF and
+  processes whichever aren't already done, sequentially, one process.
+- `--list-remaining`: prints a JSON array of {fileid, name, folder, account}
+  for every PDF not yet done, and nothing else. Powers the `list-remaining`
+  job that builds the `process` job's matrix -- each matrix entry is a
+  disjoint PDF assigned in advance, so unlike the LLM extraction pipeline's
+  claim_next_page(), no live atomic claiming is needed to keep parallel
+  workers from picking the same PDF.
+- PCLOUD_FILEID (+ PCLOUD_FILE_NAME, PCLOUD_FOLDER, PCLOUD_ASSIGNED_ACCOUNT)
+  set: processes just that one PDF and returns. Used by the `process` job's
+  matrix, one call per matrix entry.
+
+Designed to run as-is inside GitHub Actions but only needs
+boto3/psycopg2/requests/pypdf/pdf2image/pillow and network access to run
+anywhere.
 """
 import io
+import json
 import os
 import sys
 import time
@@ -352,6 +366,37 @@ def render_page_pdf(reader, idx, folder, stem, page_no, work_dir):
     return page_key, page_pdf_path
 
 
+def _pdf_needs_processing(page_count, images_done, pdfs_done):
+    """Pure predicate version of the "is this PDF already done" check, shared
+    by process_pdf()'s early-return and list_remaining_pdfs(). A PDF never
+    opened before (page_count is None, since it's only set once a run has
+    actually read the file -- see db_set_page_count) always needs it."""
+    if page_count is None:
+        return True
+    needed = set(range(1, page_count + 1))
+    return not (needed <= images_done and (not UPLOAD_PAGE_PDFS or needed <= pdfs_done))
+
+
+def list_remaining_pdfs():
+    """List every PDF on pCloud not yet fully processed per the DB, each
+    tagged with which B2 account it should try first -- round-robin over
+    just the remaining ones, spreading the parallel matrix's load evenly.
+    Doesn't touch B2. Powers --list-remaining (see main()), which the
+    `list-remaining` job in .github/workflows/process-pdfs.yml calls to
+    build the `process` job's matrix."""
+    conn = db_connect()
+    pdfs = list_pdfs_recursive(PCLOUD_CODE)
+    remaining = [
+        item
+        for item in pdfs
+        if _pdf_needs_processing(*db_get_pdf_state(conn, item["fileid"]))
+    ]
+    return [
+        {**item, "account": ACCOUNT_ORDER[i % len(ACCOUNT_ORDER)]}
+        for i, item in enumerate(remaining)
+    ]
+
+
 def process_pdf(conn, clients, item, assigned_account, health):
     """Returns True once every page needed (images, and pdfs if
     UPLOAD_PAGE_PDFS) is confirmed uploaded — anywhere, per the DB, not
@@ -365,11 +410,9 @@ def process_pdf(conn, clients, item, assigned_account, health):
     db_upsert_pcloud_file(conn, fileid, item["name"], folder)
     page_count, images_done, pdfs_done = db_get_pdf_state(conn, fileid)
 
-    if page_count is not None:
-        needed = set(range(1, page_count + 1))
-        if needed <= images_done and (not UPLOAD_PAGE_PDFS or needed <= pdfs_done):
-            print(f"skip (already done per DB): {folder}/{stem}")
-            return True
+    if not _pdf_needs_processing(page_count, images_done, pdfs_done):
+        print(f"skip (already done per DB): {folder}/{stem}")
+        return True
 
     print(f"processing: {folder}/{stem} (primary account: {assigned_account})")
     work_dir = TMP_DIR / folder / stem
@@ -444,10 +487,35 @@ def process_pdf(conn, clients, item, assigned_account, health):
 
 
 def main():
+    if "--list-remaining" in sys.argv[1:]:
+        # Prints one compact JSON line to stdout and nothing else -- the
+        # `list-remaining` workflow job captures it straight into a matrix.
+        print(json.dumps(list_remaining_pdfs()))
+        return
+
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     conn = db_connect()
     clients = {account_id: b2_client(account) for account_id, account in B2_ACCOUNTS.items()}
     health = UploadHealthTracker(BOTH_ACCOUNTS_FAILURE_THRESHOLD, len(ACCOUNT_ORDER))
+
+    single_fileid = os.environ.get("PCLOUD_FILEID", "").strip()
+    if single_fileid:
+        # One PDF per invocation -- used by the `process` job's matrix
+        # (see .github/workflows/process-pdfs.yml), where list_remaining_pdfs()
+        # already assigned each matrix entry a disjoint PDF and a B2 account,
+        # so there's no listing or looping left to do here.
+        item = {
+            "fileid": int(single_fileid),
+            "name": os.environ["PCLOUD_FILE_NAME"],
+            "folder": os.environ.get("PCLOUD_FOLDER", ""),
+        }
+        assigned_account = os.environ.get("PCLOUD_ASSIGNED_ACCOUNT") or ACCOUNT_ORDER[0]
+        try:
+            process_pdf(conn, clients, item, assigned_account, health)
+        except AllAccountsFailedError as exc:
+            print(f"stopping: {exc}")
+            sys.exit(BOTH_ACCOUNTS_FAILURE_EXIT_CODE)
+        return
 
     print("listing PDFs on pCloud...")
     pdfs = list_pdfs_recursive(PCLOUD_CODE)

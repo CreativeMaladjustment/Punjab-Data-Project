@@ -9,15 +9,9 @@
 # be slow per page. The model list below is a shortlist of small (1B-8B),
 # non-cloud-gated vision models pulled from Ollama's current vision-model
 # listing (ollama.com/search?c=vision) — "cloud"-badged entries there are
-# Ollama-hosted-only and can't run locally, so they're excluded. glm-ocr is
-# included because it's purpose-built for document OCR, which is exactly
-# this task. Default is minicpm-v4.5 (8B): the largest model in this
-# CPU-feasible set, and MiniCPM-V's line has a well-established track record
-# on OCR/document-understanding benchmarks combined with being a full
-# general-purpose model (so it should follow the 25-field schema more
-# reliably than a narrower or smaller model) — reasoned from published
-# model positioning, not benchmarked here; treat actual output quality as
-# the real source of truth once you can eyeball it. Each model's output is
+# Ollama-hosted-only and can't run locally, so they're excluded. Default is
+# glm-ocr: it's purpose-built for document OCR, which is exactly this task.
+# Each model's output is
 # namespaced separately in Postgres (llm_extractions.model_tag) so runs
 # against different models never clobber each other.
 #
@@ -32,7 +26,7 @@ on:
       model:
         description: "Ollama vision model to run"
         type: choice
-        default: minicpm-v4.5
+        default: glm-ocr
         options:
           - minicpm-v4.6
           - qwen3-vl:2b
@@ -46,6 +40,14 @@ permissions:
 
 jobs:
   extract:
+    strategy:
+      fail-fast: false
+      # 9 parallel workers -- each independently claims and processes pages
+      # (see scripts/extract_with_llm.py's claim_next_page()), so this fans
+      # a big backlog out across 9 runners without any of them stepping on
+      # each other's pages.
+      matrix:
+        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload
@@ -150,9 +152,9 @@ jobs:
       - name: Flag runtime guard trip for manual resume
         if: steps.run.outputs.exit_code == '42'
         run: |
-          echo "### ⏱️ Runtime guard tripped for \`$OLLAMA_MODEL_INPUT\` — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ⏱️ Runtime guard tripped for \`$OLLAMA_MODEL_INPUT\` (worker ${{ matrix.worker }}) — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "The extraction stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "The extraction stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off -- pages this worker claimed but didn't finish become claimable again once their claim goes stale (see CLAIM_TIMEOUT_SECONDS)." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Action needed:** re-run this workflow with the same model (\`$OLLAMA_MODEL_INPUT\`) to continue." >> "$GITHUB_STEP_SUMMARY"
 

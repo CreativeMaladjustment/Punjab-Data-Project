@@ -86,9 +86,19 @@ coordination strategies depending on the shape of the work:
   physical object in B2 that no `pages` row ever points to, an orphan invisible to anything
   that only audits Postgres. Wasteful and untracked, not corrupting — but a real gap this
   design accepts rather than closes. `extract-pages.yml`'s live claim, by contrast,
-  is safe under *arbitrary* concurrency, including two separate workflow runs racing each
-  other, because the guarantee lives in the database transaction itself rather than in
-  a one-time, run-scoped snapshot.
+  is safe against two workers *simultaneously* believing they hold the same
+  `(page, model)` claim, including across two separate workflow runs racing each other,
+  because that guarantee lives in the database transaction itself (the conditional
+  `ON CONFLICT DO UPDATE ... WHERE`) rather than in a one-time, run-scoped snapshot. It is
+  not a guarantee against a *stale* claim: `db_save_extraction_success()` /
+  `db_save_extraction_failure()` write their result unconditionally on `(page_id,
+  model_tag)`, with no check that the claim they're writing against is still theirs — so a
+  worker that stalls past `CLAIM_TIMEOUT_SECONDS` (3h) without dying can have its page
+  reclaimed and reprocessed by another worker, and then still write its own late,
+  stale result over the newer one when it finally finishes. Rare in practice (a
+  worker has to survive well past the 3h timeout and still complete), but real, and
+  closing it would need a claim token or ownership check on the write path, not just the
+  claim itself.
 
 Postgres is doing the job a message queue would normally do, at zero additional
 infrastructure cost, because the coordination need (five-ish SQL predicates) doesn't justify
@@ -132,11 +142,13 @@ running a queue service.
   project can run the identical pipeline from a clean checkout.
 - **Demonstrated horizontal scaling** at the scale this project needs it: 9 parallel
   extraction workers, up to 10 parallel PDF-processing workers. The extraction claim loop
-  is verified to prevent double-processing of the same `(page, model)` pair under *arbitrary*
-  concurrency (including across separate runs) — it does not, and isn't meant to, prevent
+  is verified to prevent two workers from simultaneously claiming the same `(page, model)`
+  pair, including across separate runs — it does not, and isn't meant to, prevent
   different-model runs from processing the same page concurrently, since that's an
-  intentional feature, not a race; the PDF-processing chunking prevents double-processing
-  *within a single run* only — see the accepted cross-run duplication gap above.
+  intentional feature, not a race, and it doesn't cover a worker that stalls past the claim
+  timeout and writes a late, stale result (see above); the PDF-processing chunking prevents
+  double-processing *within a single run* only — see the accepted cross-run duplication gap
+  above.
 
 ### What it costs
 
@@ -145,8 +157,9 @@ running a queue service.
   2026-09-10, three consecutive `extract-pages.yml` runs, spanning roughly 05:00–16:12 UTC
   (~11 hours), produced, out of 22,398 `llm_extractions` rows, 22,387 `failed`, 6 `claimed`
   (each either an active claim or one gone stale and not yet reclaimed — a single snapshot
-  query can't distinguish the two), and 5 `success` — a **99.95% failure rate** — because
-  both configured B2
+  query can't distinguish the two, and the 6 were still unresolved at export time, not
+  themselves failures), and 5 `success` — **22,387 of 22,398 rows (99.95%) in `failed`
+  status at that snapshot** — because both configured B2
   accounts hit the exact error `AccessDenied: ... download bandwidth or transaction
   (Class B) cap exceeded` and it had not recovered across the entire window. That message
   names two distinct B2 quotas (a download-bandwidth allowance and a separate "Class B"

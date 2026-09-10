@@ -140,11 +140,13 @@ below), following the same per-entry schema as the existing extraction pipeline
 `quarter`. This workflow never writes to B2 at all — B2 is read-only from its point of view.
 
 The model runs **locally on the GitHub Actions runner** via [Ollama](https://ollama.com) — no
-external API, no API key, nothing sent off-runner except to B2. GitHub-hosted runners have no
-GPU, so this is CPU inference and will be slow per page; the job runs as a fixed matrix of 9
-parallel workers, each independently claiming and processing one page at a time from a shared
-backlog (`claim_next_page()` in `scripts/extract_with_llm.py` — see `ARCHITECTURE.md` for the
-atomic-claiming details). Each worker checks its own runtime budget every iteration and exits
+external API, no API key; inference itself stays on-runner, with only page images fetched
+from B2 and extraction results written to Supabase (Postgres) leaving the runner.
+GitHub-hosted runners have no GPU, so this is CPU inference and will be slow per page; the
+job runs as a fixed matrix of 9 parallel workers, each independently claiming and processing
+one page at a time from a shared backlog (`claim_next_page()` in
+`scripts/extract_with_llm.py` — see `ARCHITECTURE.md` for the atomic-claiming details). Each
+worker checks its own runtime budget every iteration and exits
 `42` (a job summary notice tells you to re-run the workflow) rather than trying to finish in
 one run if it's still going after ~5 hours.
 

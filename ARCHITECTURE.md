@@ -66,9 +66,19 @@ coordination strategies depending on the shape of the work:
 - **`process-pdfs.yml`**: a `list-remaining` job computes the full backlog once, up front,
   and chunks it round-robin into at most `MAX_PARALLEL_PDF_WORKERS` (10) slices — a static
   partition, not a live claim loop, because the unit of work (one PDF) is naturally
-  divisible in advance and doesn't need runtime contention-resolution. This also sidesteps
-  a real GitHub Actions platform limit (a job's matrix is capped at 256 combinations) that
-  a naive one-matrix-entry-per-PDF design would eventually have hit as the backlog grew.
+  divisible in advance and doesn't need runtime contention-resolution *within that run*.
+  This also sidesteps a real GitHub Actions platform limit (a job's matrix is capped at
+  256 combinations) that a naive one-matrix-entry-per-PDF design would eventually have hit
+  as the backlog grew. **This safety is scoped to a single run**, not to arbitrary
+  concurrency: the workflow has no `concurrency:` group and there is no atomic PDF-level
+  claim, so two manually-dispatched runs overlapping in time could both snapshot the same
+  not-yet-uploaded PDFs before either writes a page row, and duplicate the download/upload
+  work for the overlap window. That's wasteful, not corrupting — `process_pdf()`'s per-page
+  upsert is idempotent, so the final Postgres/B2 state is still correct — but it is a real
+  gap this design accepts rather than closes. `extract-pages.yml`'s live claim, by contrast,
+  is safe under *arbitrary* concurrency, including two separate workflow runs racing each
+  other, because the guarantee lives in the database transaction itself rather than in
+  a one-time, run-scoped snapshot.
 
 Postgres is doing the job a message queue would normally do, at zero additional
 infrastructure cost, because the coordination need (five-ish SQL predicates) doesn't justify
@@ -115,15 +125,25 @@ running a queue service.
 - **Free-tier caps become the actual operational bottleneck**, and they are *external* limits
   the pipeline cannot negotiate around by writing better code. This is not hypothetical: on
   2026-09-10, three consecutive `extract-pages.yml` runs (spanning 05:00–16:00 UTC, 17+
-  hours) produced 22,387 failed extraction attempts against only 5 successes — a **99.95%
-  failure rate** — because Backblaze B2's Class B (download bandwidth/transaction) cap was
-  exhausted on *both* configured accounts and had not recovered across the entire window.
-  The claiming and retry logic behaved exactly as designed throughout (no double-claims, no
-  hot-looping, clean backoff) — the bottleneck was entirely the external quota, and no amount
-  of application-level fixing moves that number until the cap itself is raised or resets.
-- **Runner limits shape the code, not just the ops.** GitHub Actions' 350-minute job timeout
-  is why both workflows carry internal runtime guards (`MAX_RUNTIME_SECONDS`, exit code 42 →
-  "resume needed, not a failure") instead of assuming a job can just run to completion.
+  hours) produced, out of 22,398 `llm_extractions` rows, 22,387 `failed`, 6 `claimed`
+  (in-flight), and 5 `success` — a **99.95% failure rate** — because both configured B2
+  accounts hit the exact error `AccessDenied: ... download bandwidth or transaction
+  (Class B) cap exceeded` and it had not recovered across the entire window. That message
+  names two distinct B2 quotas (a download-bandwidth allowance and a separate "Class B"
+  transaction-count cap) without saying which one actually tripped; telling them apart, and
+  therefore the correct remedy, needs a direct look at the Backblaze account's Caps & Alerts
+  dashboard, not just the error string. The claiming and retry logic behaved exactly as
+  designed throughout (no double-claims, no hot-looping, clean backoff) — the bottleneck was
+  entirely the external quota, and no amount of application-level fixing moves that number
+  until the actual cap in question is raised or resets.
+- **Runner limits shape the code, not just the ops — unevenly.** GitHub Actions' 350-minute
+  job timeout is why `extract-pages.yml`'s per-worker claim loop checks `MAX_RUNTIME_SECONDS`
+  every iteration and exits with code 42 ("resume needed, not a failure") before GitHub would
+  otherwise kill it. `process_pcloud.py` has the equivalent guard too, but currently only in
+  its legacy full-scan mode — the `PCLOUD_PDFS_JSON` slice loop that `process-pdfs.yml`'s
+  matrix jobs actually run has no internal runtime check, so a slice with an unlucky mix of
+  large PDFs can run until GitHub's hard timeout kills it mid-item, with no graceful
+  "resume" signal. Worth closing, not yet done.
 - **No persistent compute state.** Every matrix job starts from nothing; anything that needs
   to survive between jobs (or between runs) must be written to Postgres or B2 explicitly.
   This is why the whole design centers on "Postgres as source of truth for what's done" —
@@ -144,8 +164,11 @@ running a queue service.
 
 ## When to revisit
 
-- If the project ever has a budget line, the B2 Class B cap ceiling is the most likely forcing
-  function to reconsider paid storage tiers or a different provider.
+- If the project ever has a budget line, whichever B2 quota is actually behind the 2026-09-10
+  incident (download bandwidth or Class B transaction count — confirm via Caps & Alerts
+  before assuming) is the most likely forcing function to reconsider paid storage tiers or a
+  different provider; the two have different remedies, so pin down which one it is before
+  paying to fix it.
 - If GPU-accelerated inference becomes affordable or necessary for extraction quality, the
   "Ollama on a CPU runner" choice should be revisited — it was a cost decision, not a belief
   that CPU inference is the right long-term answer.

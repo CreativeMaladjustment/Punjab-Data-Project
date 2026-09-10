@@ -386,9 +386,10 @@ contention-resolution); Ollama runs self-hosted on the runner itself for LLM inf
 rather than a paid API. Full reasoning, alternatives considered, and tradeoffs in
 `ARCHITECTURE.md`.
 **Consequences:** Near-zero marginal infra cost and nothing to patch, at the cost of free
-external quotas becoming the real operational ceiling. Observed directly on 2026-09-10:
-Backblaze's B2 Class B (download) cap being exhausted on both configured accounts produced
-a 99.95% extraction failure rate (22,387 of 22,398 attempts) across 17+ hours and three
-separate runs — the claiming/retry logic itself worked correctly throughout; the external
-quota was the entire bottleneck. See `ARCHITECTURE.md` for the full incident and the
-"when to revisit" triggers.
+external quotas becoming the real operational ceiling. Observed directly on 2026-09-10: both
+configured B2 accounts hit `AccessDenied: ... download bandwidth or transaction (Class B) cap
+exceeded` (the message names two distinct quotas without saying which tripped), producing a
+99.95% extraction failure rate (22,387 failed / 6 claimed / 5 success of 22,398 rows) across
+17+ hours and three separate runs — the claiming/retry logic itself worked correctly
+throughout; the external quota was the entire bottleneck. See `ARCHITECTURE.md` for the full
+incident and the "when to revisit" triggers.

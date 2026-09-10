@@ -35,7 +35,7 @@ shared coordination point** between otherwise-stateless, ephemeral jobs.
 | Source volumes | pCloud (public share link) | Already where the scans lived; no migration needed; free tier serves public downloads. |
 | Compute | GitHub Actions (`ubuntu-latest` runners) | Free minutes on a public repo; ephemeral — nothing to patch, nothing idling between runs; `strategy.matrix` gives horizontal parallelism for free. |
 | Object storage | Backblaze B2 (two accounts, round-robin assigned) | Cheapest S3-compatible storage available; two accounts split load and give a fallback path (`upload_with_fallback` in `process_pcloud.py`) if one account errors. |
-| Database | Supabase-hosted Postgres | Free-tier managed Postgres; single source of truth for upload state and extraction results (`pages.image_uploaded_at`, `llm_extractions.status`) — see `supabase/migrations/`. PDF-stage render/upload failures aren't persisted as a status anywhere; a failed page just stays absent from `pages`, with the failure itself only visible in that run's Actions log. |
+| Database | Supabase-hosted Postgres | Free-tier managed Postgres; single source of truth for upload state and extraction results (`pages.image_uploaded_at`, `llm_extractions.status`) — see `supabase/migrations/`. PDF-stage render/upload failures aren't persisted as a status anywhere: an image failure just leaves the page absent from `pages` entirely, while (when `UPLOAD_PAGE_PDFS` is on) a page-PDF-only failure leaves an *existing* row with `page_pdf_uploaded_at` NULL — the failure itself, either way, is only visible in that run's Actions log. |
 | LLM inference | Ollama, self-hosted **on the runner itself** | GitHub-hosted runners have no GPU, so this is CPU inference — slow per page, but it costs nothing beyond runner-minutes. No API key, no per-token billing, no external vendor for the actual OCR/extraction work. |
 | Orchestration | None (deliberately) | No Celery, no SQS, no Redis, no K8s. Coordination between parallel jobs is a handful of SQL statements against Postgres (see below), not a service. |
 
@@ -56,10 +56,15 @@ coordination strategies depending on the shape of the work:
 
 - **`extract-pages.yml`**: a fixed matrix of 9 workers, each running an independent claim
   loop (`claim_next_page()` in `scripts/extract_with_llm.py`) against `llm_extractions`.
-  The claim query uses `FOR UPDATE ... SKIP LOCKED` plus a conditional
-  `ON CONFLICT DO UPDATE ... WHERE ...` so that two workers racing for the same page can
-  never both believe they claimed it — verified under genuine concurrent load (16 real
-  threads, separate connections, forced-overlap stress test) during development. A worker
+  The claim query filters and conflicts on `(page_id, model_tag)`, not on the page alone —
+  `FOR UPDATE ... SKIP LOCKED` plus a conditional `ON CONFLICT DO UPDATE ... WHERE ...` so
+  that two workers racing for the same `(page, model)` pair can never both believe they
+  claimed it, verified under genuine concurrent load (16 real threads, separate connections,
+  forced-overlap stress test) during development. This is deliberately *not* a
+  page-global lock: separate `model_tag` runs are intentionally allowed to process the same
+  page concurrently (e.g. a model bake-off), and the claim design exists to keep same-model
+  workers from duplicating each other, not to serialize different models against one page.
+  A worker
   that dies mid-page leaves a stale claim that any worker (including itself, next run)
   reclaims automatically once `CLAIM_TIMEOUT_SECONDS` (3h) has passed — no separate cleanup
   job, no dead-letter queue, just a `WHERE claimed_at < now() - interval` in the same query.
@@ -101,9 +106,13 @@ running a queue service.
   tradeoff is speed (CPU inference is slow) and model quality (only small, non-gated models
   fit), which the project accepted.
 - **A real task queue** (Celery/Redis, SQS, or similar) for coordinating parallel workers.
-  Rejected as disproportionate: the actual coordination need is "don't let two workers grab
-  the same row," which a `SELECT ... FOR UPDATE SKIP LOCKED` already solves without adding
-  a service to run, monitor, and pay for.
+  Rejected as disproportionate for `extract-pages.yml`'s page-level contention, where the
+  actual need is "don't let two workers grab the same `(page, model)` row," which a
+  `SELECT ... FOR UPDATE SKIP LOCKED` already solves without adding a service to run,
+  monitor, and pay for. This isn't a claim that a queue would be pointless everywhere in the
+  pipeline: `process-pdfs.yml` has no equivalent mechanism and explicitly accepts cross-run
+  duplication instead (see above) — a real task queue is one way that gap *could* be closed,
+  just not one this project judged worth the operational cost for it.
 - **Kubernetes / autoscaling compute.** Never seriously considered — wildly disproportionate
   to the scale (a few thousand jobs total, not a continuously-running service) and adds
   exactly the operational burden this whole approach exists to avoid.
@@ -123,9 +132,11 @@ running a queue service.
   project can run the identical pipeline from a clean checkout.
 - **Demonstrated horizontal scaling** at the scale this project needs it: 9 parallel
   extraction workers, up to 10 parallel PDF-processing workers. The extraction claim loop
-  is verified to prevent double-processing under *arbitrary* concurrency (including across
-  separate runs); the PDF-processing chunking prevents double-processing *within a single
-  run* only — see the accepted cross-run duplication gap above.
+  is verified to prevent double-processing of the same `(page, model)` pair under *arbitrary*
+  concurrency (including across separate runs) — it does not, and isn't meant to, prevent
+  different-model runs from processing the same page concurrently, since that's an
+  intentional feature, not a race; the PDF-processing chunking prevents double-processing
+  *within a single run* only — see the accepted cross-run duplication gap above.
 
 ### What it costs
 

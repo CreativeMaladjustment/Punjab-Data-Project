@@ -46,6 +46,13 @@ jobs:
       - name: Run pCloud to B2 pipeline
         id: run
         env:
+          # Without this, Python fully buffers stdout when it isn't a TTY
+          # (as here) -- print() output sits in memory until the buffer
+          # fills or the process exits cleanly, so a long run or one that
+          # gets cancelled mid-way can show *zero* log output even though
+          # DB writes (a separate, immediate network call per PDF) went
+          # through the whole time.
+          PYTHONUNBUFFERED: "1"
           PCLOUD_CODE: ${{ vars.PCLOUD_CODE }}
           UPLOAD_PAGE_PDFS: ${{ inputs.upload_page_pdfs }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}

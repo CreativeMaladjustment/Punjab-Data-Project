@@ -96,6 +96,23 @@ jobs:
           curl -fsSL https://ollama.com/install.sh -o install-ollama.sh
           sh install-ollama.sh
 
+      - name: Cache Ollama model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # ~ resolves to whatever $HOME "ollama serve" below will use (this
+          # step runs as the same user, on the same runner) -- avoids
+          # hardcoding a path that only holds for the separate
+          # systemd-service install this workflow doesn't use. Restored
+          # *before* the server starts: it runs backgrounded and stays alive
+          # through every later step, so extracting into ~/.ollama while it's
+          # already serving requests against that same directory risks
+          # contention/partial state. Keyed per model since each pull is
+          # several GB; "ollama pull" only re-fetches a manifest and skips
+          # any blob already on disk with a matching digest, so a cache hit
+          # turns that step into a fast no-op instead of a multi-GB download.
+          path: ~/.ollama
+          key: ollama-model-${{ matrix.model }}
+
       - name: Start Ollama server
         run: |
           nohup ollama serve > ollama.log 2>&1 &
@@ -104,20 +121,6 @@ jobs:
             sleep 2
           done
           echo "Ollama server did not come up in time"; cat ollama.log; exit 1
-
-      - name: Cache Ollama model
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          # ~ resolves to whatever $HOME the "ollama serve" process above is
-          # actually using (this step runs as the same user, on the same
-          # runner) -- avoids hardcoding a path that only holds for the
-          # separate systemd-service install this workflow doesn't use.
-          # Keyed per model since each pull is several GB; "ollama pull"
-          # only re-fetches a manifest and skips any blob already on disk
-          # with a matching digest, so a cache hit turns the next step into
-          # a fast no-op instead of a multi-GB download.
-          path: ~/.ollama
-          key: ollama-model-${{ matrix.model }}
 
       - name: Pull model
         run: ollama pull "${{ matrix.model }}"

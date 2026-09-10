@@ -73,9 +73,14 @@ coordination strategies depending on the shape of the work:
   concurrency: the workflow has no `concurrency:` group and there is no atomic PDF-level
   claim, so two manually-dispatched runs overlapping in time could both snapshot the same
   not-yet-uploaded PDFs before either writes a page row, and duplicate the download/upload
-  work for the overlap window. That's wasteful, not corrupting — `process_pdf()`'s per-page
-  upsert is idempotent, so the final Postgres/B2 state is still correct — but it is a real
-  gap this design accepts rather than closes. `extract-pages.yml`'s live claim, by contrast,
+  work for the overlap window. `process_pdf()`'s per-page upsert keeps the final Postgres
+  row coherent (`ON CONFLICT DO UPDATE` means whichever write lands last wins cleanly), but
+  it does **not** make the B2 side idempotent: `upload_with_fallback()` tries the assigned
+  account first, then falls back to any other configured account on error, so two racing
+  runs can genuinely succeed on *different* accounts for the same page — leaving one
+  physical object in B2 that no `pages` row ever points to, an orphan invisible to anything
+  that only audits Postgres. Wasteful and untracked, not corrupting — but a real gap this
+  design accepts rather than closes. `extract-pages.yml`'s live claim, by contrast,
   is safe under *arbitrary* concurrency, including two separate workflow runs racing each
   other, because the guarantee lives in the database transaction itself rather than in
   a one-time, run-scoped snapshot.
@@ -117,16 +122,20 @@ running a queue service.
 - **Reproducible and forkable**: anyone with their own pCloud link, B2 buckets, and a Supabase
   project can run the identical pipeline from a clean checkout.
 - **Demonstrated horizontal scaling** at the scale this project needs it: 9 parallel
-  extraction workers, up to 10 parallel PDF-processing workers, coordinated correctly under
-  real concurrent load with no double-processing.
+  extraction workers, up to 10 parallel PDF-processing workers. The extraction claim loop
+  is verified safe against no double-processing under *arbitrary* concurrency (including
+  across separate runs); the PDF-processing chunking is safe against double-processing
+  *within a single run* only — see the accepted cross-run duplication gap above.
 
 ### What it costs
 
 - **Free-tier caps become the actual operational bottleneck**, and they are *external* limits
   the pipeline cannot negotiate around by writing better code. This is not hypothetical: on
-  2026-09-10, three consecutive `extract-pages.yml` runs (spanning 05:00–16:00 UTC, 17+
-  hours) produced, out of 22,398 `llm_extractions` rows, 22,387 `failed`, 6 `claimed`
-  (in-flight), and 5 `success` — a **99.95% failure rate** — because both configured B2
+  2026-09-10, three consecutive `extract-pages.yml` runs, spanning roughly 05:00–16:12 UTC
+  (~11 hours), produced, out of 22,398 `llm_extractions` rows, 22,387 `failed`, 6 `claimed`
+  (each either an active claim or one gone stale and not yet reclaimed — a single snapshot
+  query can't distinguish the two), and 5 `success` — a **99.95% failure rate** — because
+  both configured B2
   accounts hit the exact error `AccessDenied: ... download bandwidth or transaction
   (Class B) cap exceeded` and it had not recovered across the entire window. That message
   names two distinct B2 quotas (a download-bandwidth allowance and a separate "Class B"
@@ -136,10 +145,13 @@ running a queue service.
   designed throughout (no double-claims, no hot-looping, clean backoff) — the bottleneck was
   entirely the external quota, and no amount of application-level fixing moves that number
   until the actual cap in question is raised or resets.
-- **Runner limits shape the code, not just the ops — unevenly.** GitHub Actions' 350-minute
-  job timeout is why `extract-pages.yml`'s per-worker claim loop checks `MAX_RUNTIME_SECONDS`
-  every iteration and exits with code 42 ("resume needed, not a failure") before GitHub would
-  otherwise kill it. `process_pcloud.py` has the equivalent guard too, but currently only in
+- **Runner limits shape the code, not just the ops — unevenly.** Both workflows set
+  `timeout-minutes: 350` (a repo choice, kept under GitHub Actions' own platform ceiling for
+  a job — not itself a platform-inherent number, so it'll drift if that setting ever
+  changes). That configured limit is why `extract-pages.yml`'s per-worker claim loop checks
+  `MAX_RUNTIME_SECONDS` every iteration and exits with code 42 ("resume needed, not a
+  failure") before the timeout would otherwise kill it mid-run. `process_pcloud.py` has the
+  equivalent guard too, but currently only in
   its legacy full-scan mode — the `PCLOUD_PDFS_JSON` slice loop that `process-pdfs.yml`'s
   matrix jobs actually run has no internal runtime check, so a slice with an unlucky mix of
   large PDFs can run until GitHub's hard timeout kills it mid-item, with no graceful

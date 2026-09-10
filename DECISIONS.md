@@ -390,6 +390,6 @@ external quotas becoming the real operational ceiling. Observed directly on 2026
 configured B2 accounts hit `AccessDenied: ... download bandwidth or transaction (Class B) cap
 exceeded` (the message names two distinct quotas without saying which tripped), producing a
 99.95% extraction failure rate (22,387 failed / 6 claimed / 5 success of 22,398 rows) across
-17+ hours and three separate runs — the claiming/retry logic itself worked correctly
+~11 hours and three separate runs — the claiming/retry logic itself worked correctly
 throughout; the external quota was the entire bottleneck. See `ARCHITECTURE.md` for the full
 incident and the "when to revisit" triggers.

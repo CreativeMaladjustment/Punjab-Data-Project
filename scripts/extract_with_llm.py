@@ -23,7 +23,7 @@ random page and mark it 'claimed' in llm_extractions (see
 supabase/migrations/20260910040000_claim_pages_for_extraction.sql),
 processes it, then claims the next one. Multiple instances of this script
 can run concurrently against the same model (see .github/workflows/
-extract-pages.yml's `workers` matrix) without ever claiming the same page:
+extract-pages.yml's `worker` matrix) without ever claiming the same page:
 claim_next_page() locks candidate rows with FOR UPDATE SKIP LOCKED, so a
 row already under consideration by one worker simply isn't visible as a
 candidate to another. A worker that dies mid-page leaves its claim behind;
@@ -156,8 +156,9 @@ CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours; a worker that dies mid-page leav
 CLAIM_MAX_ATTEMPTS = 5  # see the "lost the race" note in claim_next_page()
 
 # candidate CTE narrows to one page: uploaded, and either never attempted
-# under model_tag, or claimed/failed but stale (claimed_at is set on both a
-# fresh claim and a failure, so it doubles as "last touched" either way).
+# under model_tag, or claimed/failed but stale. claimed_at is set once, when
+# a page is claimed, and left untouched by a failure -- so it still reads
+# as "last touched" for a failed row, just from the claim that led to it.
 # A fresh failure is deliberately NOT immediately reclaimable -- without the
 # same staleness gate a permanently-failing page (e.g. a corrupt image) would
 # get claimed, fail, and be claimed right back in the same tight loop for as

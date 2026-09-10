@@ -10,6 +10,17 @@
 alter table llm_extractions
     add column claimed_at timestamptz;
 
+-- Rows from before this migration (in practice, only 'failed' ones -- the
+-- 'claimed' status didn't exist yet) come out of the ADD COLUMN above with
+-- claimed_at NULL. claim_next_page()'s staleness gate is `claimed_at < now()
+-- - ...`, which is never true against NULL, so without this backfill every
+-- pre-existing failure would become permanently unclaimable instead of
+-- eligible for retry. created_at is the closest stand-in for "last
+-- touched" available on rows that predate real claim tracking.
+update llm_extractions
+    set claimed_at = created_at
+    where status = 'failed' and claimed_at is null;
+
 alter table llm_extractions
     drop constraint llm_extractions_status_check;
 

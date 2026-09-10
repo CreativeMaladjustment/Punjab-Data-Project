@@ -82,6 +82,19 @@ B2_ACCOUNTS = load_b2_accounts()
 
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; runner guard, exit 42 to hand off to a fresh run
 RUNTIME_GUARD_EXIT_CODE = 42
+
+# A dense page (a full multi-column table with many entries) can take an
+# 8B CPU-only vision model well past 10 minutes; 600s was cutting those off
+# before Ollama ever responded. Still well inside MAX_RUNTIME_SECONDS's
+# budget for a single page.
+#
+# Split into separate connect/read values rather than one shared timeout:
+# wait_for_ollama() already confirms OLLAMA_HOST is up before any of this
+# runs, but if the server dies mid-run, a single 1800s timeout would let
+# requests hang that long just trying to connect, not only while waiting
+# on a slow model response.
+OLLAMA_CONNECT_TIMEOUT_SECONDS = 10
+OLLAMA_READ_TIMEOUT_SECONDS = 1800
 START_TIME = time.time()
 
 SCHEMA_PATH = pathlib.Path(__file__).resolve().parent.parent / "pipeline" / "schema.md"
@@ -208,6 +221,21 @@ ENTRY_FIELD_NAMES = {
 }
 
 
+def _looks_like_entry_list(value):
+    """True if value is a non-empty list where every element is a dict
+    containing at least one known schema entry field -- i.e. a real list
+    of catalogue entries, as opposed to (for example) a `flags` list whose
+    elements have keys like "field"/"issue", none of which are schema
+    entry fields. Only meaningful for a non-empty list: an empty list's
+    contents can't tell you anything, so _coerce_to_entry_list decides
+    that case by the list's key name instead (see its comments)."""
+    return (
+        isinstance(value, list)
+        and len(value) > 0
+        and all(isinstance(e, dict) and (e.keys() & ENTRY_FIELD_NAMES) for e in value)
+    )
+
+
 def _coerce_to_entry_list(parsed):
     """Some local models wrap the requested JSON array in a dict, or emit a
     single entry object instead of a one-entry array, even when told to
@@ -215,17 +243,42 @@ def _coerce_to_entry_list(parsed):
     the actual list in these common shapes rather than failing the whole
     page over the model not nesting things exactly as asked:
 
-      - a single entry emitted flat -> [parsed], recognized by at least one
-        key being a known schema entry field (see ENTRY_FIELD_NAMES;
-        without this an unrelated dict, e.g. an error payload, would pass
-        as a bogus "entry" just because it has no dict values) and no
-        dict-valued keys at all -- the schema has no dict-valued fields,
-        so one present means something is genuinely off, not a real entry.
-        Deliberately *not* conditioned on how many list-valued keys it has
-        or what they're named: `flags` is the schema's one array field,
-        but a real entry hallucinating some other list field alongside
-        known fields (e.g. {"title": "x", "tags": [...]}) is still a
-        single entry, not an envelope to unwrap into just that list.
+      - a dict with exactly one list-valued key and no dict-valued keys,
+        where that list either (a) is non-empty and its elements each look
+        like entry dicts (see _looks_like_entry_list), or (b) is empty and
+        its key isn't itself a known schema field -> unwrap to that list,
+        e.g. {"printed_page": 1, "entries": [{...one real entry...}]}
+        unwraps to the entry inside, *not* the whole wrapper as one bogus
+        entry -- observed for real: minicpm-v4.5 hoisting a page-level
+        `printed_page` alongside the actual `entries` array trips the
+        "known schema key present" signal below if checked first. Any
+        other top-level key that's also a known schema field (like that
+        `printed_page`) is backfilled onto each entry that doesn't already
+        have it, so page-level metadata the model chose to hoist isn't
+        lost -- schema.md defines printed_page/quarter etc. per entry, so
+        applying the wrapper's value to every entry on the page is exactly
+        the intended shape, just written once instead of repeated.
+        The empty-list case is its own branch because content can't
+        disambiguate an empty list -- {"printed_page": 12, "entries": []}
+        (a legitimate zero-entries page, explicitly allowed by the system
+        prompt) must still unwrap to [], while {"title": "x", "flags": []}
+        (a single entry with nothing flagged) must not: checking the key's
+        *name* against ENTRY_FIELD_NAMES tells them apart where the
+        (necessarily vacuous) contents check can't.
+      - otherwise, a single entry emitted flat -> [parsed], recognized by
+        at least one key being a known schema entry field (see
+        ENTRY_FIELD_NAMES; without this an unrelated dict, e.g. an error
+        payload, would pass as a bogus "entry" just because it has no
+        dict values) and no dict-valued keys at all -- the schema has no
+        dict-valued fields, so one present means something is genuinely
+        off, not a real entry. Deliberately *not* conditioned on how many
+        list-valued keys it has or what they're named otherwise: `flags`
+        is the schema's one array field, but a real entry hallucinating
+        some other list field alongside known fields (e.g. {"title": "x",
+        "tags": [...]}) is still a single entry, not an envelope --
+        _looks_like_entry_list already rules out matching on `flags`
+        itself here, since flag objects (`{"field": ..., "issue": ...}`)
+        aren't entry-shaped.
       - otherwise (no known schema keys at all), a dict with exactly one
         list-valued key and no dict-valued keys -- e.g. {"entries": [...]},
         or {"entries": [...], "count": 3} -- is an envelope -> unwrap to
@@ -248,18 +301,34 @@ def _coerce_to_entry_list(parsed):
     elif not isinstance(parsed, dict):
         raise ValueError(f"expected a JSON array, got {type(parsed).__name__}")
     else:
-        known_keys = parsed.keys() & ENTRY_FIELD_NAMES
+        list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
         has_dict_value = any(isinstance(v, dict) for v in parsed.values())
 
-        if known_keys and not has_dict_value:
-            result = [parsed]
-        elif not known_keys and not has_dict_value:
-            list_items = [(k, v) for k, v in parsed.items() if isinstance(v, list)]
-            if len(list_items) != 1:
-                raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
-            result = list_items[0][1]
+        is_entries_envelope = False
+        if len(list_items) == 1 and not has_dict_value:
+            sole_key, sole_value = list_items[0]
+            if len(sole_value) == 0:
+                is_entries_envelope = sole_key not in ENTRY_FIELD_NAMES
+            else:
+                is_entries_envelope = _looks_like_entry_list(sole_value)
+
+        if is_entries_envelope:
+            list_key, entries = list_items[0]
+            backfill = {k: v for k, v in parsed.items() if k != list_key and k in ENTRY_FIELD_NAMES}
+            for entry in entries:
+                for k, v in backfill.items():
+                    entry.setdefault(k, v)
+            result = entries
         else:
-            raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
+            known_keys = parsed.keys() & ENTRY_FIELD_NAMES
+            if known_keys and not has_dict_value:
+                result = [parsed]
+            elif not known_keys and not has_dict_value:
+                if len(list_items) != 1:
+                    raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
+                result = list_items[0][1]
+            else:
+                raise ValueError(f"expected a JSON array, got dict with keys {sorted(parsed.keys())}")
 
     bad_types = sorted({type(e).__name__ for e in result if not isinstance(e, dict)})
     if bad_types:
@@ -280,7 +349,7 @@ def extract_page(image_bytes, context=""):
             "stream": False,
             "format": "json",
         },
-        timeout=600,
+        timeout=(OLLAMA_CONNECT_TIMEOUT_SECONDS, OLLAMA_READ_TIMEOUT_SECONDS),
     )
     resp.raise_for_status()
     text = resp.json()["response"].strip()

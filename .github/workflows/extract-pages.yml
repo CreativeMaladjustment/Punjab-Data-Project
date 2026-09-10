@@ -49,6 +49,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload
+    env:
+      # Routed through an env var rather than interpolating ${{ inputs.model }}
+      # directly into run: scripts below (Semgrep: yaml.github-actions.security.
+      # run-shell-injection) -- inputs.model is a fixed `type: choice` today, but
+      # this is the correct pattern regardless of whether that stays true.
+      OLLAMA_MODEL_INPUT: ${{ inputs.model }}
     steps:
       - name: Free runner disk space
         run: |
@@ -101,7 +107,7 @@ jobs:
           echo "Ollama server did not come up in time"; cat ollama.log; exit 1
 
       - name: Pull model
-        run: ollama pull "${{ inputs.model }}"
+        run: ollama pull "$OLLAMA_MODEL_INPUT"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -144,11 +150,11 @@ jobs:
       - name: Flag runtime guard trip for manual resume
         if: steps.run.outputs.exit_code == '42'
         run: |
-          echo "### ⏱️ Runtime guard tripped for \`${{ inputs.model }}\` — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ⏱️ Runtime guard tripped for \`$OLLAMA_MODEL_INPUT\` — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "The extraction stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Action needed:** re-run this workflow with the same model (\`${{ inputs.model }}\`) to continue." >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** re-run this workflow with the same model (\`$OLLAMA_MODEL_INPUT\`) to continue." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail job on unexpected script error
         if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42'

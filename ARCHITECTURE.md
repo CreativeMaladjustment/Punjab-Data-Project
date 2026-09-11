@@ -132,32 +132,6 @@ Postgres is doing the job a message queue would normally do, at zero additional
 infrastructure cost, because the coordination need (five-ish SQL predicates) doesn't justify
 running a queue service.
 
-## Alternatives considered
-
-- **A dedicated VM or server.** Rejected: fixed cost whether or not it's doing anything, and
-  this workload is bursty (manually triggered, runs for hours, then idle for days) — paying
-  for 24/7 uptime for an intermittent job is the wrong shape. Also means someone has to patch
-  and monitor it; nobody is staffed to do that here.
-- **A paid hosted LLM API** (rather than local Ollama on the runner) for this pipeline's
-  extraction. Rejected on cost: tens of thousands of vision-LLM calls at API pricing is real
-  money for a no-budget project, versus free CPU-minutes already available from GitHub
-  Actions. The tradeoff is speed (CPU inference is slow) and model quality (only small,
-  non-gated models fit), which the project accepted. This is scoped to this pipeline, not a
-  blanket rejection of hosted APIs project-wide — `pipeline/extract_api.py` already uses
-  Anthropic's Batch API for its own, much smaller, manually-run extraction path (see Scope
-  above), where the cost math and operational shape are different.
-- **A real task queue** (Celery/Redis, SQS, or similar) for coordinating parallel workers.
-  Rejected as disproportionate for `extract-pages.yml`'s page-level contention, where the
-  actual need is "don't let two workers grab the same `(page, model)` row," which a
-  `SELECT ... FOR UPDATE SKIP LOCKED` already solves without adding a service to run,
-  monitor, and pay for. This isn't a claim that a queue would be pointless everywhere in the
-  pipeline: `process-pdfs.yml` has no equivalent mechanism and explicitly accepts cross-run
-  duplication instead (see above) — a real task queue is one way that gap *could* be closed,
-  just not one this project judged worth the operational cost for it.
-- **Kubernetes / autoscaling compute.** Never seriously considered — wildly disproportionate
-  to the scale (a few thousand jobs total, not a continuously-running service) and adds
-  exactly the operational burden this whole approach exists to avoid.
-
 ## Consequences
 
 ### What this buys

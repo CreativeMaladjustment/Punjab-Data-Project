@@ -96,12 +96,14 @@ B2_ACCOUNTS = load_b2_accounts()
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; runner guard, exit 42 to hand off to a fresh run
 RUNTIME_GUARD_EXIT_CODE = 42
 
-# TEMPORARY smoke-test limiter (2026-09-11): every Ollama /api/generate call
-# started failing with 400 across all 9 workers. Caps each worker to a
-# handful of pages while we diagnose from the logged response body, instead
-# of burning the whole backlog on a call that's currently broken. 0 (or
-# unset) means unlimited -- remove MAX_PAGES_PER_WORKER from
-# extract-pages.yml's env once a run comes back clean.
+# Started as a temporary smoke-test cap (2026-09-11) while diagnosing a 400
+# every Ollama /api/generate call was throwing across all 9 workers; kept on
+# afterwards as a standing per-worker safety ceiling (extract-pages.yml sets
+# it well above what one worker will realistically reach in a run -- see the
+# comment there) rather than removed, so one worker can't loop through an
+# unboundedly huge backlog. 0 (or unset) means unlimited -- the default here
+# matters for local/manual runs that don't set the env var; extract-pages.yml
+# always sets an explicit value.
 MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
 
 # A dense page (a full multi-column table with many entries) can take an
@@ -222,6 +224,33 @@ MAX_ATTEMPTS_PER_PAGE = 2  # total tries allowed per (page, model_tag) -- one
 # `inserted` would silently vanish (zero rows) on a lost race, which would
 # be indistinguishable from a genuinely empty candidate pick.
 #
+MAX_B2_FAILURES_PER_WORKER = int(os.environ.get("MAX_B2_FAILURES_PER_WORKER", "10"))
+if MAX_B2_FAILURES_PER_WORKER < 0:
+    raise ValueError(
+        "MAX_B2_FAILURES_PER_WORKER must be >= 0 (0 disables the breaker), "
+        f"got {MAX_B2_FAILURES_PER_WORKER}"
+    )
+# 0 disables the breaker entirely (same convention as MAX_PAGES_PER_WORKER
+# above) -- main()'s check is `if MAX_B2_FAILURES_PER_WORKER and b2_failures
+# >= MAX_B2_FAILURES_PER_WORKER`, not a bare `>=`, specifically so 0 can't
+# trip it after the very first page: b2_failures starts at 0, so an
+# unguarded `0 >= 0` would fire immediately, on any page, B2 failure or not.
+#
+# If this worker can't fetch a page's image from B2 this many times in one
+# run, stop claiming further pages instead of grinding through the rest of
+# the backlog against a B2 that's probably broken for everyone right now --
+# bad credentials, a bucket problem, or a quota/outage like the one in
+# DECISIONS.md D-021 -- rather than a run of unlucky individual files. This
+# is a within-run circuit breaker, separate from MAX_ATTEMPTS_PER_PAGE: it
+# doesn't change what's retryable across runs (a page counted here is still
+# just a transient failure, reclaimable next run exactly as before), it
+# only stops *this* worker from burning its whole runtime budget
+# re-downloading against a B2 that isn't going to start working mid-run.
+# Deliberately scoped to the B2 fetch specifically (see process_page()'s
+# b2_download_failure tagging) -- an LLM/content failure never counts
+# toward this, and the loop keeps moving to the next page for those
+# exactly as before; only a genuine failure to download counts.
+
 # The failed-row condition below only applies MAX_ATTEMPTS_PER_PAGE to a
 # row whose last failure was content_failure -- a transient one (B2/
 # network, non-ok Ollama HTTP, a bad insert) must keep retrying regardless
@@ -747,8 +776,13 @@ def db_save_extraction_failure(conn, page_id, model, model_tag, error_message, r
 
 def process_page(conn, clients, claim):
     """Extract one already-claimed page and record success or failure.
-    claim: the dict returned by claim_next_page(). Returns True on
-    success, False if it needs a retry."""
+    claim: the dict returned by claim_next_page(). Returns
+    (success, b2_download_failure): success is True on success, False if
+    it needs a retry; b2_download_failure is True only when this specific
+    failure happened while fetching the page's image from B2 -- see
+    MAX_B2_FAILURES_PER_WORKER, which counts exactly this and nothing
+    else (not an LLM/content failure, not an unconfigured-account guard,
+    not a bad DB insert)."""
     page_id = claim["page_id"]
     page_no = claim["page_no"]
     account = claim["account"]
@@ -770,7 +804,16 @@ def process_page(conn, clients, claim):
                 f"page {folder}/{stem} page_no={page_no} is recorded in account "
                 f"{account!r}, but that account isn't configured in this run's secrets"
             )
-        image_bytes = b2_get_bytes(client, bucket, image_key)
+        try:
+            image_bytes = b2_get_bytes(client, bucket, image_key)
+        except Exception as exc:
+            # Tagged here, at the one call site that actually fetches the
+            # image, rather than inferred later from the exception's type --
+            # so MAX_B2_FAILURES_PER_WORKER counts exactly "couldn't
+            # download this page's image from B2", not anything else that
+            # happens to also raise an Exception subclass.
+            exc.b2_download_failure = True
+            raise
         entries, raw_text = extract_page(image_bytes, context=context)
         for entry in entries:
             entry.setdefault("source_folder", folder)
@@ -781,7 +824,7 @@ def process_page(conn, clients, claim):
         print(f"    saving {len(entries)} entries for {context}: {entries_json[:500]!r}")
         db_save_extraction_success(conn, page_id, OLLAMA_MODEL, MODEL_TAG, entries, raw_text)
         print(f"done: {context}")
-        return True
+        return True, False
     except Exception as exc:
         # Classified from the exception itself, before raw_text below might
         # fall back to a pre-existing local value from an *earlier*,
@@ -789,6 +832,7 @@ def process_page(conn, clients, claim):
         # reflect only whether *this* exception is the model-produced-bad-
         # output kind, not whatever raw_text happens to end up holding.
         content_failure = is_content_failure(exc)
+        b2_download_failure = getattr(exc, "b2_download_failure", False)
         # extract_page() attaches raw_text to exceptions it raises itself
         # (bad JSON/shape) -- prefer that when present. Otherwise, fall
         # back to the local raw_text above rather than clobbering it with
@@ -803,7 +847,7 @@ def process_page(conn, clients, claim):
         db_save_extraction_failure(
             conn, page_id, OLLAMA_MODEL, MODEL_TAG, str(exc), raw_text, content_failure
         )
-        return False
+        return False, b2_download_failure
 
 
 def count_capped_failures(conn, model_tag):
@@ -836,6 +880,8 @@ def main():
     any_incomplete = False
     limited = False
     contended = False
+    b2_capped = False
+    b2_failures = 0
     while True:
         if elapsed() > MAX_RUNTIME_SECONDS:
             print(
@@ -858,17 +904,44 @@ def main():
             )
             contended = True
             break
-        if not process_page(conn, clients, claim):
+        ok, b2_download_failure = process_page(conn, clients, claim)
+        if not ok:
             any_incomplete = True
-        processed += 1
+            # A genuine LLM/content failure never touches b2_failures -- the
+            # loop just moves on to the next page exactly as before. Only a
+            # run of actual B2 download failures can trip this breaker.
+            if b2_download_failure:
+                b2_failures += 1
+        processed += 1  # counts every page process_page() was called on,
+        # same as every other stop path below -- incremented before the
+        # b2_capped break too, so "processed N page(s)" always reflects
+        # what actually got attempted, including the page that tripped it.
         print(f"count of pages processed so far: {processed}")
+        if MAX_B2_FAILURES_PER_WORKER and b2_failures >= MAX_B2_FAILURES_PER_WORKER:
+            # The `MAX_B2_FAILURES_PER_WORKER and` guard is load-bearing, not
+            # redundant: without it, MAX_B2_FAILURES_PER_WORKER=0 (meant to
+            # disable the breaker) would instead make `0 >= 0` true right
+            # after this very first page -- success or failure, B2 or not --
+            # since b2_failures starts at 0. Deliberately not gated by
+            # MAX_PAGES_PER_WORKER's cap -- a broken B2 is worth noticing
+            # regardless of how many pages a worker is allowed to reach.
+            print(
+                f"{b2_failures} B2 download failures this run; stopping before "
+                "claiming another page -- this many failures to fetch images "
+                "likely means B2 itself is broken right now (bad credentials, a "
+                "bucket problem, or a quota/outage like DECISIONS.md D-021), not "
+                "a run of unlucky individual files"
+            )
+            b2_capped = True
+            break
 
     print(f"processed {processed} page(s) total; stopped for the reason logged above")
 
     # Printed before any sys.exit(1) below -- a run with any_incomplete set
     # is exactly when knowing *why* the loop stopped (hit the limiter,
-    # contended, or genuinely exhausted) matters most; exiting non-zero
-    # first would silently drop that context from the log.
+    # contended, hit the B2 circuit breaker, or genuinely exhausted)
+    # matters most; exiting non-zero first would silently drop that
+    # context from the log.
     if limited:
         # MAX_PAGES_PER_WORKER stopped this worker before it ever asked
         # whether more pages exist -- don't claim to know either way.
@@ -878,6 +951,12 @@ def main():
         )
     elif contended:
         print("stopped on claim contention; backlog status unknown, not confirmed exhausted")
+    elif b2_capped:
+        print(
+            f"stopped after {b2_failures} B2 download failures (MAX_B2_FAILURES_PER_WORKER="
+            f"{MAX_B2_FAILURES_PER_WORKER}); whether more pages remain is unknown -- "
+            "confirm B2 access is actually working before re-running"
+        )
     else:
         capped = count_capped_failures(conn, MODEL_TAG)
         if capped:

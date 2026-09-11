@@ -57,6 +57,14 @@ jobs:
       # run-shell-injection) -- inputs.model is a fixed `type: choice` today, but
       # this is the correct pattern regardless of whether that stays true.
       OLLAMA_MODEL_INPUT: ${{ inputs.model }}
+      # Pinned (rather than always installing whatever install.sh calls
+      # "latest") so the cache below actually means something -- a cache key
+      # can't usefully track a moving target, and an un-pinned install would
+      # either never hit the cache or silently freeze on whatever version
+      # happened to be latest the first time it was cached. Bump by hand
+      # when a newer Ollama version is wanted; check https://github.com/
+      # ollama/ollama/releases for the current one.
+      OLLAMA_VERSION: "0.34.0"
     steps:
       - name: Free runner disk space
         run: |
@@ -72,15 +80,77 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Cache Ollama binary
+        id: cache-ollama-bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Staged under $HOME, NOT directly at /usr/local/bin or
+          # /usr/local/lib/ollama (where install.sh actually puts them --
+          # confirmed against install.sh itself, github.com/ollama/ollama,
+          # scripts/install.sh @ v0.34.0, and where they need to end up to
+          # run). actions/cache's restore step runs as the plain runner
+          # user, not root, and can't write into those root-owned
+          # directories -- install.sh only can because every one of its
+          # writes there is prefixed with $SUDO. Restoring straight into
+          # /usr/local from this cache would silently fail (or leave a
+          # partial, broken install) instead of erroring loudly. The "Restore
+          # .../Populate ..." steps below bridge that with an explicit sudo
+          # copy on each side, in and out of this staging directory.
+          path: ~/.cache/ollama-bin
+          key: ollama-bin-${{ env.OLLAMA_VERSION }}
+
+      - name: Restore Ollama binary from cache
+        if: steps.cache-ollama-bin.outputs.cache-hit == 'true'
+        run: |
+          sudo mkdir -p /usr/local/lib/ollama
+          sudo cp ~/.cache/ollama-bin/ollama /usr/local/bin/ollama
+          sudo chmod 755 /usr/local/bin/ollama
+          sudo cp -r ~/.cache/ollama-bin/lib/. /usr/local/lib/ollama/
+          command -v ollama
+
       - name: Install Ollama
+        if: steps.cache-ollama-bin.outputs.cache-hit != 'true'
         # Downloaded then executed as separate steps (not curl | sh) to avoid
         # streaming an unreviewed script straight into a shell. This doesn't
         # remove the underlying trust-Ollama's-installer tradeoff — Ollama
         # doesn't publish a simple checksum/signature for this script — just
         # the literal piping pattern.
+        #
+        # Retried with backoff (5 attempts, 2/4/8/16s between): run
+        # 34601420598's worker 1 failed outright on `curl: (22) The requested
+        # URL returned error: 500` fetching install.sh -- a transient error
+        # from ollama.com's own installer host, unrelated to anything in this
+        # repo, that killed the whole job before extraction ever started.
+        # Retrying both the download and the install together, since either
+        # one can be the thing that glitched. Only runs on a cache miss
+        # (first run for OLLAMA_VERSION, or after a 7-day-unused eviction) --
+        # OLLAMA_VERSION is already in this step's environment via the job's
+        # env: block above, so install.sh downloads that pinned version
+        # rather than latest.
         run: |
-          curl -fsSL https://ollama.com/install.sh -o install-ollama.sh
-          sh install-ollama.sh
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL https://ollama.com/install.sh -o install-ollama.sh && sh install-ollama.sh; then
+              exit 0
+            fi
+            echo "Ollama install attempt $attempt failed"
+            if [ "$attempt" -lt 5 ]; then
+              sleep $((2 ** attempt))
+            fi
+          done
+          echo "Ollama install failed after 5 attempts"
+          exit 1
+
+      - name: Populate Ollama binary cache
+        if: steps.cache-ollama-bin.outputs.cache-hit != 'true'
+        # Copies out of /usr/local into the staging directory actions/cache
+        # actually saves from (see "Cache Ollama binary" above). No sudo
+        # needed on this side: install.sh's own `install -m755` leaves these
+        # world-readable, just not world-writable, and reading is all a
+        # plain copy needs.
+        run: |
+          mkdir -p ~/.cache/ollama-bin/lib
+          cp /usr/local/bin/ollama ~/.cache/ollama-bin/ollama
+          cp -r /usr/local/lib/ollama/. ~/.cache/ollama-bin/lib/
 
       - name: Cache Ollama model
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -132,12 +202,18 @@ jobs:
           # through the whole time.
           PYTHONUNBUFFERED: "1"
           OLLAMA_MODEL: ${{ inputs.model }}
-          # TEMPORARY (2026-09-11): every Ollama call started failing with
-          # 400 across all workers. Caps each worker to 2 pages while we
-          # confirm the fix from the now-logged response body, instead of
-          # spending the whole backlog on a call that might still be broken.
-          # Remove this line once a run comes back clean.
-          MAX_PAGES_PER_WORKER: "2"
+          # Was a temporary smoke-test cap (2) while confirming the num_ctx
+          # fix for the 400s every Ollama call started throwing on
+          # 2026-09-11 -- two full runs since (34601420598, 34617429251)
+          # came back with real model output and no repeat of that failure,
+          # so this is now a standing per-worker safety ceiling rather than
+          # a smoke-test value: at a few minutes per page, 2000 pages is far
+          # more than MAX_RUNTIME_SECONDS (5h) could get through in one run
+          # anyway (the runtime guard -- exit 42, resumed by the next run --
+          # will bind first), so this is insurance against one worker
+          # somehow looping through an unexpectedly huge backlog, not an
+          # active limiter on real runs.
+          MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
           B2_KEY_ID: ${{ secrets.B2_KEY_ID }}

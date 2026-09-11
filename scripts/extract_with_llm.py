@@ -96,6 +96,14 @@ B2_ACCOUNTS = load_b2_accounts()
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; runner guard, exit 42 to hand off to a fresh run
 RUNTIME_GUARD_EXIT_CODE = 42
 
+# TEMPORARY smoke-test limiter (2026-09-11): every Ollama /api/generate call
+# started failing with 400 across all 9 workers. Caps each worker to a
+# handful of pages while we diagnose from the logged response body, instead
+# of burning the whole backlog on a call that's currently broken. 0 (or
+# unset) means unlimited -- remove MAX_PAGES_PER_WORKER from
+# extract-pages.yml's env once a run comes back clean.
+MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
+
 # A dense page (a full multi-column table with many entries) can take an
 # 8B CPU-only vision model well past 10 minutes; 600s was cutting those off
 # before Ollama ever responded. Still well inside MAX_RUNTIME_SECONDS's
@@ -437,7 +445,14 @@ def extract_page(image_bytes, context=""):
         },
         timeout=(OLLAMA_CONNECT_TIMEOUT_SECONDS, OLLAMA_READ_TIMEOUT_SECONDS),
     )
-    resp.raise_for_status()
+    if not resp.ok:
+        # resp.raise_for_status() only gives the status line ("400 Client
+        # Error: Bad Request for url: ..."), not Ollama's actual reason --
+        # include the response body so a rejected request is diagnosable
+        # from this error_message alone, without re-fetching Actions logs.
+        raise RuntimeError(
+            f"Ollama /api/generate returned {resp.status_code}: {resp.text[:2000]}"
+        )
     text = resp.json()["response"].strip()
     text = re.sub(r"^```(json)?|```$", "", text, flags=re.M).strip()
     print(
@@ -615,6 +630,8 @@ def main():
     clients = {aid: b2_client(acct) for aid, acct in B2_ACCOUNTS.items()}
 
     print(f"model: {OLLAMA_MODEL} (tag: {MODEL_TAG})")
+    if MAX_PAGES_PER_WORKER:
+        print(f"MAX_PAGES_PER_WORKER set: stopping after {MAX_PAGES_PER_WORKER} page(s)")
     processed = 0
     any_incomplete = False
     while True:
@@ -624,6 +641,9 @@ def main():
                 "stopping before claiming another page"
             )
             sys.exit(RUNTIME_GUARD_EXIT_CODE)
+        if MAX_PAGES_PER_WORKER and processed >= MAX_PAGES_PER_WORKER:
+            print(f"MAX_PAGES_PER_WORKER limit ({MAX_PAGES_PER_WORKER}) reached; stopping")
+            break
 
         claim = claim_next_page(conn, OLLAMA_MODEL, MODEL_TAG, CLAIM_TIMEOUT_SECONDS)
         if claim is None:
@@ -631,8 +651,9 @@ def main():
         if not process_page(conn, clients, claim):
             any_incomplete = True
         processed += 1
+        print(f"count of pages processed so far: {processed}")
 
-    print(f"processed {processed} page(s); no more claimable pages for this worker")
+    print(f"processed {processed} page(s) total; stopped for the reason logged above")
 
     if any_incomplete:
         print("one or more pages failed extraction; exiting non-zero so this is visible")

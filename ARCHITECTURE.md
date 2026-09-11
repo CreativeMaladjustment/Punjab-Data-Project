@@ -22,6 +22,16 @@ That constraint is the actual design driver. Every choice below follows from "wh
 project run entirely on free or near-free managed services, coordinated by nothing more than
 what's already checked into the repo."
 
+None of what follows is a critique of running things locally, or of how this project's tooling
+worked before this pipeline existed. Local, human-driven tooling is simpler to write and to
+iterate on, and it stays the right tool for smaller, human-in-the-loop work — see
+`pipeline/extract_api.py`'s local SQLite output, which is local by design because that fits its
+job better, not because it's an earlier or lesser version of anything. Cloud-native was chosen
+*for this specific pipeline* because of the constraints above, plus one more: this project may
+grow to include contributors working from different machines, at different times, and cloud-hosted
+state (rather than anything living only on one person's laptop) is what makes that kind of
+distributed collaboration possible at all, not just cheaper.
+
 **Scope:** this ADR covers the pCloud → B2 → Postgres pipeline (`process-pdfs.yml`,
 `extract-pages.yml`, `scripts/process_pcloud.py`, `scripts/extract_with_llm.py`) — the path
 that scales to the full ~tens-of-thousands-of-pages backlog. It does not cover
@@ -52,10 +62,18 @@ shared coordination point** between otherwise-stateless, ephemeral jobs.
 ### The pipeline *is* the CI/CD system, not a thing CI/CD deploys
 
 `process-pdfs.yml` and `extract-pages.yml` are `workflow_dispatch`-triggered — manually run,
-not push-triggered — because they **are** the production data pipeline, invoked as needed,
-not a test suite that gates a deploy. There is no separate "deploy" step: the workflow YAML
-in the repo *is* the infrastructure, and a `git push` to it changes production behavior on the
-next run. This is deliberate: it means the entire compute and orchestration definition is
+not push-triggered — for two reasons, and the security one is the main one. This is a public
+repo, and these workflows run with real secrets (B2 keys, the Supabase DB URL) attached;
+`workflow_dispatch` means a run only starts when someone with write access to the repo
+explicitly clicks "run", rather than automatically off any push or PR — which matters
+specifically because in a public repo almost anyone can open a PR, and a run triggered
+automatically off that PR's code would expose those secrets to whatever the PR's own code
+told the runner to do. Today that "someone with write access" is a single person — the owner
+of the tokens involved — so only they can approve a run that could touch those secrets. The
+second reason is that they **are** the production data pipeline, invoked as needed, not a test
+suite that gates a deploy. There is no separate "deploy" step: the workflow YAML in the repo
+*is* the infrastructure, and a `git push` to it changes production behavior on the next run.
+This is deliberate: it means the entire compute and orchestration definition is
 version-controlled, reviewable, and reproducible by anyone who forks the repo and supplies
 their own credentials — there is no server whose state can drift from what's in git.
 
@@ -153,6 +171,14 @@ running a queue service.
   same way, with the same history.
 - **Reproducible and forkable**: anyone with their own pCloud link, B2 buckets, and a Supabase
   project can run the identical pipeline from a clean checkout.
+- **Not bottlenecked on any one contributor's machine.** Because durable state lives in
+  Postgres/B2/pCloud rather than on one person's laptop, work isn't gated on being at a
+  specific computer: anyone with the right credentials can trigger a run, inspect progress via
+  Postgres, or pick up a stalled job from wherever they are. That matters for a project that
+  may grow to include collaborators working from different places and on different schedules —
+  it's a real advantage of going cloud-native for *this* pipeline, not a statement that local
+  development is worse; local tooling remains the right call for plenty of this project's other
+  work (see the note in Context above).
 - **Demonstrated horizontal scaling** at the scale this project needs it: 9 parallel
   extraction workers, up to 10 parallel PDF-processing workers. The extraction claim loop
   is verified to prevent two workers from simultaneously claiming the same `(page, model)`
@@ -227,3 +253,16 @@ running a queue service.
   that CPU inference is the right long-term answer.
 - If the pipeline needs to run unattended for long stretches without a person watching Actions
   logs, the "no monitoring" gap becomes the priority, not compute or storage choice.
+
+## Front-end hosting (planned, not yet built)
+
+Outside this ADR's original scope (see Scope above — this document covers the pCloud → B2 →
+Postgres pipeline, not anything client-facing), but worth recording here as the current
+direction: whatever front end eventually serves this data is likely to be hosted on **Vercel**,
+on its free tier, rather than GitHub Pages. The reasoning follows the same B2-access-control
+shape as the rest of this document — Vercel's serverless functions can mint short-lived,
+narrowly-scoped download tokens against B2 per request, at whatever granularity a given page
+needs, which a static host like GitHub Pages has no equivalent mechanism for (it can only serve
+whatever's baked into the deployed files). Nothing here is built yet, so this is intent, not an
+accepted decision the way the rest of this document is — it should get its own proper ADR entry
+(or fold into this one) once the front end actually exists.

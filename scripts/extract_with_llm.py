@@ -223,6 +223,17 @@ MAX_ATTEMPTS_PER_PAGE = 2  # total tries allowed per (page, model_tag) -- one
 # be indistinguishable from a genuinely empty candidate pick.
 #
 MAX_B2_FAILURES_PER_WORKER = int(os.environ.get("MAX_B2_FAILURES_PER_WORKER", "10"))
+if MAX_B2_FAILURES_PER_WORKER < 0:
+    raise ValueError(
+        "MAX_B2_FAILURES_PER_WORKER must be >= 0 (0 disables the breaker), "
+        f"got {MAX_B2_FAILURES_PER_WORKER}"
+    )
+# 0 disables the breaker entirely (same convention as MAX_PAGES_PER_WORKER
+# above) -- main()'s check is `if MAX_B2_FAILURES_PER_WORKER and b2_failures
+# >= MAX_B2_FAILURES_PER_WORKER`, not a bare `>=`, specifically so 0 can't
+# trip it after the very first page: b2_failures starts at 0, so an
+# unguarded `0 >= 0` would fire immediately, on any page, B2 failure or not.
+#
 # If this worker can't fetch a page's image from B2 this many times in one
 # run, stop claiming further pages instead of grinding through the rest of
 # the backlog against a B2 that's probably broken for everyone right now --
@@ -904,8 +915,13 @@ def main():
         # b2_capped break too, so "processed N page(s)" always reflects
         # what actually got attempted, including the page that tripped it.
         print(f"count of pages processed so far: {processed}")
-        if b2_failures >= MAX_B2_FAILURES_PER_WORKER:
-            # Deliberately not gated by MAX_PAGES_PER_WORKER's limiter -- a
+        if MAX_B2_FAILURES_PER_WORKER and b2_failures >= MAX_B2_FAILURES_PER_WORKER:
+            # The `MAX_B2_FAILURES_PER_WORKER and` guard is load-bearing, not
+            # redundant: without it, MAX_B2_FAILURES_PER_WORKER=0 (meant to
+            # disable the breaker) would instead make `0 >= 0` true right
+            # after this very first page -- success or failure, B2 or not --
+            # since b2_failures starts at 0. Deliberately not gated by
+            # MAX_PAGES_PER_WORKER's limiter -- a
             # broken B2 is worth noticing even during a capped smoke-test
             # run.
             print(

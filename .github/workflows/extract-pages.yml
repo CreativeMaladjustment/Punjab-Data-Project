@@ -84,22 +84,29 @@ jobs:
         id: cache-ollama-bin
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          # Confirmed against install.sh itself (github.com/ollama/ollama,
-          # scripts/install.sh @ v0.34.0): on this runner's PATH ordering,
-          # BINDIR resolves to /usr/local/bin, so OLLAMA_INSTALL_DIR is
-          # /usr/local -- the downloaded archive is extracted straight
-          # there, landing the binary at /usr/local/bin/ollama and the
-          # runtime libs at /usr/local/lib/ollama with no separate symlink
-          # step needed. install.sh's own systemd-service/ollama-user setup
-          # (everything after "Everything from this point onwards is
-          # optional" in that script) isn't captured by this cache and
-          # isn't re-run on a cache hit -- fine here, since this workflow
-          # never uses the systemd service, only `ollama serve` via nohup
-          # further down.
-          path: |
-            /usr/local/bin/ollama
-            /usr/local/lib/ollama
+          # Staged under $HOME, NOT directly at /usr/local/bin or
+          # /usr/local/lib/ollama (where install.sh actually puts them --
+          # confirmed against install.sh itself, github.com/ollama/ollama,
+          # scripts/install.sh @ v0.34.0, and where they need to end up to
+          # run). actions/cache's restore step runs as the plain runner
+          # user, not root, and can't write into those root-owned
+          # directories -- install.sh only can because every one of its
+          # writes there is prefixed with $SUDO. Restoring straight into
+          # /usr/local from this cache would silently fail (or leave a
+          # partial, broken install) instead of erroring loudly. The "Restore
+          # .../Populate ..." steps below bridge that with an explicit sudo
+          # copy on each side, in and out of this staging directory.
+          path: ~/.cache/ollama-bin
           key: ollama-bin-${{ env.OLLAMA_VERSION }}
+
+      - name: Restore Ollama binary from cache
+        if: steps.cache-ollama-bin.outputs.cache-hit == 'true'
+        run: |
+          sudo mkdir -p /usr/local/lib/ollama
+          sudo cp ~/.cache/ollama-bin/ollama /usr/local/bin/ollama
+          sudo chmod 755 /usr/local/bin/ollama
+          sudo cp -r ~/.cache/ollama-bin/lib/. /usr/local/lib/ollama/
+          command -v ollama
 
       - name: Install Ollama
         if: steps.cache-ollama-bin.outputs.cache-hit != 'true'
@@ -132,6 +139,18 @@ jobs:
           done
           echo "Ollama install failed after 5 attempts"
           exit 1
+
+      - name: Populate Ollama binary cache
+        if: steps.cache-ollama-bin.outputs.cache-hit != 'true'
+        # Copies out of /usr/local into the staging directory actions/cache
+        # actually saves from (see "Cache Ollama binary" above). No sudo
+        # needed on this side: install.sh's own `install -m755` leaves these
+        # world-readable, just not world-writable, and reading is all a
+        # plain copy needs.
+        run: |
+          mkdir -p ~/.cache/ollama-bin/lib
+          cp /usr/local/bin/ollama ~/.cache/ollama-bin/ollama
+          cp -r /usr/local/lib/ollama/. ~/.cache/ollama-bin/lib/
 
       - name: Cache Ollama model
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

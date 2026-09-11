@@ -57,6 +57,14 @@ jobs:
       # run-shell-injection) -- inputs.model is a fixed `type: choice` today, but
       # this is the correct pattern regardless of whether that stays true.
       OLLAMA_MODEL_INPUT: ${{ inputs.model }}
+      # Pinned (rather than always installing whatever install.sh calls
+      # "latest") so the cache below actually means something -- a cache key
+      # can't usefully track a moving target, and an un-pinned install would
+      # either never hit the cache or silently freeze on whatever version
+      # happened to be latest the first time it was cached. Bump by hand
+      # when a newer Ollama version is wanted; check https://github.com/
+      # ollama/ollama/releases for the current one.
+      OLLAMA_VERSION: "0.34.0"
     steps:
       - name: Free runner disk space
         run: |
@@ -72,7 +80,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Cache Ollama binary
+        id: cache-ollama-bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # Confirmed against install.sh itself (github.com/ollama/ollama,
+          # scripts/install.sh @ v0.34.0): on this runner's PATH ordering,
+          # BINDIR resolves to /usr/local/bin, so OLLAMA_INSTALL_DIR is
+          # /usr/local -- the downloaded archive is extracted straight
+          # there, landing the binary at /usr/local/bin/ollama and the
+          # runtime libs at /usr/local/lib/ollama with no separate symlink
+          # step needed. install.sh's own systemd-service/ollama-user setup
+          # (everything after "Everything from this point onwards is
+          # optional" in that script) isn't captured by this cache and
+          # isn't re-run on a cache hit -- fine here, since this workflow
+          # never uses the systemd service, only `ollama serve` via nohup
+          # further down.
+          path: |
+            /usr/local/bin/ollama
+            /usr/local/lib/ollama
+          key: ollama-bin-${{ env.OLLAMA_VERSION }}
+
       - name: Install Ollama
+        if: steps.cache-ollama-bin.outputs.cache-hit != 'true'
         # Downloaded then executed as separate steps (not curl | sh) to avoid
         # streaming an unreviewed script straight into a shell. This doesn't
         # remove the underlying trust-Ollama's-installer tradeoff — Ollama
@@ -85,7 +115,11 @@ jobs:
         # from ollama.com's own installer host, unrelated to anything in this
         # repo, that killed the whole job before extraction ever started.
         # Retrying both the download and the install together, since either
-        # one can be the thing that glitched.
+        # one can be the thing that glitched. Only runs on a cache miss
+        # (first run for OLLAMA_VERSION, or after a 7-day-unused eviction) --
+        # OLLAMA_VERSION is already in this step's environment via the job's
+        # env: block above, so install.sh downloads that pinned version
+        # rather than latest.
         run: |
           for attempt in 1 2 3 4 5; do
             if curl -fsSL https://ollama.com/install.sh -o install-ollama.sh && sh install-ollama.sh; then

@@ -42,7 +42,7 @@ shared coordination point** between otherwise-stateless, ephemeral jobs.
 
 | Concern | Service | Why |
 |---|---|---|
-| Source volumes | pCloud (public share link) | Already where the scans lived; no migration needed; free tier serves public downloads. |
+| Source volumes | pCloud (public share link) | Already where the scans lived — storage the project pays for regardless of this pipeline (a sunk cost, not chosen for a free tier); no migration needed, and serving the pipeline's downloads of those source PDFs from the existing public share link adds no incremental cost. |
 | Compute | GitHub Actions (`ubuntu-latest` runners) | Free minutes on a public repo; ephemeral — nothing to patch, nothing idling between runs; `strategy.matrix` gives horizontal parallelism for free. |
 | Object storage | Backblaze B2 (two accounts, round-robin assigned) | Cheapest S3-compatible storage available; two accounts split load and give a fallback path (`upload_with_fallback` in `process_pcloud.py`) if one account errors. |
 | Database | Supabase-hosted Postgres | Free-tier managed Postgres; single source of truth for upload state and extraction results (`pages.image_uploaded_at`, `llm_extractions.status`) — see `supabase/migrations/`. PDF-stage render/upload failures aren't persisted as a status anywhere: an image failure just leaves the page absent from `pages` entirely, while (when `UPLOAD_PAGE_PDFS` is on) a page-PDF-only failure leaves an *existing* row with `page_pdf_uploaded_at` NULL — the failure itself, either way, is only visible in that run's Actions log. |

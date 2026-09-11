@@ -78,9 +78,26 @@ jobs:
         # remove the underlying trust-Ollama's-installer tradeoff — Ollama
         # doesn't publish a simple checksum/signature for this script — just
         # the literal piping pattern.
+        #
+        # Retried with backoff (5 attempts, 2/4/8/16s between): run
+        # 34601420598's worker 1 failed outright on `curl: (22) The requested
+        # URL returned error: 500` fetching install.sh -- a transient error
+        # from ollama.com's own installer host, unrelated to anything in this
+        # repo, that killed the whole job before extraction ever started.
+        # Retrying both the download and the install together, since either
+        # one can be the thing that glitched.
         run: |
-          curl -fsSL https://ollama.com/install.sh -o install-ollama.sh
-          sh install-ollama.sh
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL https://ollama.com/install.sh -o install-ollama.sh && sh install-ollama.sh; then
+              exit 0
+            fi
+            echo "Ollama install attempt $attempt failed"
+            if [ "$attempt" -lt 5 ]; then
+              sleep $((2 ** attempt))
+            fi
+          done
+          echo "Ollama install failed after 5 attempts"
+          exit 1
 
       - name: Cache Ollama model
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

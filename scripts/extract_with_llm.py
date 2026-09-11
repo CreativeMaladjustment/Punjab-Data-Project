@@ -96,12 +96,14 @@ B2_ACCOUNTS = load_b2_accounts()
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; runner guard, exit 42 to hand off to a fresh run
 RUNTIME_GUARD_EXIT_CODE = 42
 
-# TEMPORARY smoke-test limiter (2026-09-11): every Ollama /api/generate call
-# started failing with 400 across all 9 workers. Caps each worker to a
-# handful of pages while we diagnose from the logged response body, instead
-# of burning the whole backlog on a call that's currently broken. 0 (or
-# unset) means unlimited -- remove MAX_PAGES_PER_WORKER from
-# extract-pages.yml's env once a run comes back clean.
+# Started as a temporary smoke-test cap (2026-09-11) while diagnosing a 400
+# every Ollama /api/generate call was throwing across all 9 workers; kept on
+# afterwards as a standing per-worker safety ceiling (extract-pages.yml sets
+# it well above what one worker will realistically reach in a run -- see the
+# comment there) rather than removed, so one worker can't loop through an
+# unboundedly huge backlog. 0 (or unset) means unlimited -- the default here
+# matters for local/manual runs that don't set the env var; extract-pages.yml
+# always sets an explicit value.
 MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
 
 # A dense page (a full multi-column table with many entries) can take an
@@ -921,9 +923,8 @@ def main():
             # disable the breaker) would instead make `0 >= 0` true right
             # after this very first page -- success or failure, B2 or not --
             # since b2_failures starts at 0. Deliberately not gated by
-            # MAX_PAGES_PER_WORKER's limiter -- a
-            # broken B2 is worth noticing even during a capped smoke-test
-            # run.
+            # MAX_PAGES_PER_WORKER's cap -- a broken B2 is worth noticing
+            # regardless of how many pages a worker is allowed to reach.
             print(
                 f"{b2_failures} B2 download failures this run; stopping before "
                 "claiming another page -- this many failures to fetch images "

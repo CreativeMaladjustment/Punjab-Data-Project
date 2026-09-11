@@ -202,12 +202,18 @@ jobs:
           # through the whole time.
           PYTHONUNBUFFERED: "1"
           OLLAMA_MODEL: ${{ inputs.model }}
-          # TEMPORARY (2026-09-11): every Ollama call started failing with
-          # 400 across all workers. Caps each worker to 2 pages while we
-          # confirm the fix from the now-logged response body, instead of
-          # spending the whole backlog on a call that might still be broken.
-          # Remove this line once a run comes back clean.
-          MAX_PAGES_PER_WORKER: "2"
+          # Was a temporary smoke-test cap (2) while confirming the num_ctx
+          # fix for the 400s every Ollama call started throwing on
+          # 2026-09-11 -- two full runs since (34601420598, 34617429251)
+          # came back with real model output and no repeat of that failure,
+          # so this is now a standing per-worker safety ceiling rather than
+          # a smoke-test value: at a few minutes per page, 2000 pages is far
+          # more than MAX_RUNTIME_SECONDS (5h) could get through in one run
+          # anyway (the runtime guard -- exit 42, resumed by the next run --
+          # will bind first), so this is insurance against one worker
+          # somehow looping through an unexpectedly huge backlog, not an
+          # active limiter on real runs.
+          MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
           B2_KEY_ID: ${{ secrets.B2_KEY_ID }}

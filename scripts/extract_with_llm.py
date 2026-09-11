@@ -171,20 +171,31 @@ CLAIM_MAX_ATTEMPTS = 5  # see the "lost the race" note in claim_next_page()
 
 MAX_ATTEMPTS_PER_PAGE = 2  # total tries allowed per (page, model_tag) -- one
 # retry after an initial *content* failure -- before claim_next_page() stops
-# reclaiming it. A page that fails the same way every time (a bad JSON
-# shape the model keeps producing) was otherwise reclaimed forever, every
-# CLAIM_TIMEOUT_SECONDS. Once a row hits this cap it stays visible
-# (status='failed' and attempt_count >= MAX_ATTEMPTS_PER_PAGE) for manual
-# review or a different model, instead of burning worker time on a page
-# that keeps failing the same way.
+# reclaiming it. A page whose content fails the same way every time (a bad
+# JSON shape the model keeps producing) was otherwise reclaimed forever,
+# every CLAIM_TIMEOUT_SECONDS, burning worker time on a page that was never
+# going to succeed with this model. Once a row hits this cap it stays
+# visible (status='failed' AND content_failure AND attempt_count >=
+# MAX_ATTEMPTS_PER_PAGE) for manual review or a different model, instead of
+# burning worker time on a page that keeps failing the same way.
 #
-# Scoped to status='failed' only -- see CLAIM_NEXT_PAGE_SQL. A stale
-# 'claimed' row (a worker that died before ever recording an outcome) never
-# got a real attempt at extraction, so it must stay reclaimable regardless
-# of attempt_count; capping it too would let a worker crash on a page's
-# final permitted try leave that row stuck at status='claimed' forever --
-# looking perpetually "in progress" while actually abandoned, and visible
-# nowhere for review.
+# Scoped to content failures only (content_failure = true -- see
+# is_content_failure() and CLAIM_NEXT_PAGE_SQL). process_page() calls
+# db_save_extraction_failure() for every kind of failure alike: a
+# transient one (a B2/network error, a non-ok Ollama HTTP response, a bad
+# catalogue_entries insert) is not the model producing bad output, and
+# capping it the same way would be actively harmful -- exactly the
+# multi-hour B2 quota outage this project hit on 2026-09-10 (DECISIONS.md
+# D-021) would, under an undiscriminating cap, have permanently excluded
+# every page it touched even after B2 recovered. Transient failures keep
+# retrying indefinitely, exactly like before this cap existed.
+#
+# Also exempt: a stale 'claimed' row (a worker that died before ever
+# recording *any* outcome, content or transient) never got a real attempt
+# at extraction, so it must stay reclaimable regardless of attempt_count;
+# capping it too would let a worker crash on a page's final permitted try
+# leave that row stuck at status='claimed' forever -- looking perpetually
+# "in progress" while actually abandoned, and visible nowhere for review.
 
 # candidate CTE narrows to one page: uploaded, and either never attempted
 # under model_tag, or claimed/failed but stale. claimed_at is set once, when
@@ -208,22 +219,19 @@ MAX_ATTEMPTS_PER_PAGE = 2  # total tries allowed per (page, model_tag) -- one
 #
 # The final SELECT has no FROM clause, so it always returns exactly one row
 # regardless of whether `inserted` produced a row -- an inner join on
-# `inserted` would silently vanish (zero rows) on a lost race, which is
-# exactly the ambiguity pending_exists exists to resolve.
+# `inserted` would silently vanish (zero rows) on a lost race, which would
+# be indistinguishable from a genuinely empty candidate pick.
 #
-# pending_exists is a plain, lock-free EXISTS check, deliberately separate
-# from `candidate` (which takes FOR UPDATE ... SKIP LOCKED and reflects only
-# what *this* attempt's random pick happened to see): a page currently
-# claimed by another worker, or one temporarily skipped because its `pages`
-# row is momentarily locked, both make `candidate` come back empty without
-# meaning the backlog is exhausted -- pending_exists still finds them, so
-# claim_next_page() can tell "genuinely nothing left" apart from "nothing
-# grabbable by *this* call right now". Deliberately excludes a 'failed' row
-# once it's past MAX_ATTEMPTS_PER_PAGE -- otherwise a single permanently
-# capped-out page would make this true forever and claim_next_page() would
-# never report exhaustion again, even once every other page has resolved.
-# A stale 'claimed' row has no attempt_count condition here, matching
-# `candidate` and `inserted` below -- see MAX_ATTEMPTS_PER_PAGE's comment.
+# The failed-row condition below only applies MAX_ATTEMPTS_PER_PAGE to a
+# row whose last failure was content_failure -- a transient one (B2/
+# network, non-ok Ollama HTTP, a bad insert) must keep retrying regardless
+# of attempt_count, exactly like before this cap existed (see
+# MAX_ATTEMPTS_PER_PAGE's comment). attempt_count itself only increments
+# when reclaiming a stale row whose *last* recorded outcome was a content
+# failure -- not for a stale 'claimed' row (never got a real outcome) and
+# not for a stale transient failure (not the kind this cap counts) -- so a
+# run of crashes or transient errors never eats into the two real content
+# attempts the cap promises.
 CLAIM_NEXT_PAGE_SQL = """
     WITH candidate AS (
         SELECT p.id
@@ -237,7 +245,7 @@ CLAIM_NEXT_PAGE_SQL = """
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second')
             OR (le.status = 'failed'
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
-                AND le.attempt_count < %(max_attempts)s)
+                AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
         ORDER BY random()
         LIMIT 1
@@ -250,30 +258,54 @@ CLAIM_NEXT_PAGE_SQL = """
         ON CONFLICT (page_id, model_tag) DO UPDATE SET
             status = 'claimed', claimed_at = now(), error_message = NULL,
             raw_response = NULL, raw_text = NULL,
-            attempt_count = llm_extractions.attempt_count + 1
+            attempt_count = CASE
+                WHEN llm_extractions.status = 'failed' AND llm_extractions.content_failure
+                    THEN llm_extractions.attempt_count + 1
+                ELSE llm_extractions.attempt_count
+            END
         WHERE (
             (llm_extractions.status = 'claimed'
              AND llm_extractions.claimed_at < now() - %(claim_timeout)s * interval '1 second')
             OR (llm_extractions.status = 'failed'
                 AND llm_extractions.claimed_at < now() - %(claim_timeout)s * interval '1 second'
-                AND llm_extractions.attempt_count < %(max_attempts)s)
+                AND (NOT llm_extractions.content_failure OR llm_extractions.attempt_count < %(max_attempts)s))
         )
         RETURNING page_id
     )
-    SELECT
-        (SELECT page_id FROM inserted) AS page_id,
-        EXISTS (
-            SELECT 1
-            FROM pages p2
-            LEFT JOIN llm_extractions le2
-                ON le2.page_id = p2.id AND le2.model_tag = %(model_tag)s
-            WHERE p2.image_uploaded_at IS NOT NULL
-              AND (
-                le2.id IS NULL
-                OR le2.status = 'claimed'
-                OR (le2.status = 'failed' AND le2.attempt_count < %(max_attempts)s)
-              )
-        ) AS pending_exists
+    SELECT (SELECT page_id FROM inserted) AS page_id
+"""
+
+# A separate, lock-free EXISTS check -- deliberately not folded into
+# CLAIM_NEXT_PAGE_SQL above (a previous version did, and ran it on every
+# attempt including a successful claim's, for no benefit: it's only ever
+# needed once, after every attempt has failed to claim anything). Also
+# deliberately separate from `candidate` there (which takes FOR UPDATE ...
+# SKIP LOCKED and reflects only what one attempt's random pick happened to
+# see): a page currently claimed by another worker, or one temporarily
+# skipped because its `pages` row is momentarily locked, both make
+# `candidate` come back empty without meaning the backlog is exhausted --
+# this still finds them, so claim_next_page() can tell "genuinely nothing
+# left" apart from "nothing grabbable by *this* call right now".
+# Deliberately excludes a content-failed row once it's past
+# MAX_ATTEMPTS_PER_PAGE -- otherwise a single permanently capped-out page
+# would make this true forever and claim_next_page() would never report
+# exhaustion again, even once every other page has resolved. A transient
+# failure or a stale 'claimed' row has no attempt_count condition here,
+# matching CLAIM_NEXT_PAGE_SQL.
+PENDING_EXISTS_SQL = """
+    SELECT EXISTS (
+        SELECT 1
+        FROM pages p
+        LEFT JOIN llm_extractions le
+            ON le.page_id = p.id AND le.model_tag = %(model_tag)s
+        WHERE p.image_uploaded_at IS NOT NULL
+          AND (
+            le.id IS NULL
+            OR le.status = 'claimed'
+            OR (le.status = 'failed'
+                AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
+          )
+    )
 """
 
 
@@ -287,9 +319,9 @@ CLAIM_CONTENDED = object()  # sentinel: every attempt found a candidate but
 def claim_next_page(conn, model, model_tag, claim_timeout_seconds):
     """Atomically claim one page still needing extraction under model_tag.
     Returns {"page_id", "page_no", "account", "bucket", "image_key",
-    "folder", "stem"}; None if pending_exists confirmed there was truly
-    nothing left; or CLAIM_CONTENDED if pending_exists says otherwise (see
-    below) -- callers must treat CLAIM_CONTENDED as "unknown, not
+    "folder", "stem"}; None if a PENDING_EXISTS_SQL check confirmed there
+    was truly nothing left; or CLAIM_CONTENDED if that check says otherwise
+    (see below) -- callers must treat CLAIM_CONTENDED as "unknown, not
     exhausted", not as equivalent to None.
 
     A single attempt can come back empty even when pages *are* still
@@ -299,34 +331,39 @@ def claim_next_page(conn, model, model_tag, claim_timeout_seconds):
     worker's concurrent claim wins the race for the one candidate it did
     pick (see the module-level SQL comment), this attempt's write affects
     zero rows too -- indistinguishable, from the affected-row count alone,
-    from "nothing left at all". pending_exists (see CLAIM_NEXT_PAGE_SQL) is
-    a separate, lock-free existence check that isn't fooled by either case:
-    it resolves the ambiguity by asking directly whether any not-yet-
-    resolved row exists, regardless of what this attempt's random pick
-    happened to find. Retrying a few times (each picks a fresh random
-    candidate) resolves things in practice for a single call when the
-    contention is just a lost race; only genuine exhaustion -- confirmed by
-    pending_exists, not just an empty pick -- survives every attempt. A
-    worker that gives up after CLAIM_MAX_ATTEMPTS real races in a row just
-    exits a little early -- a later run mops up whatever's left, never a
-    double-claim or a permanently skipped page.
+    from "nothing left at all". PENDING_EXISTS_SQL is a separate, lock-free
+    existence check that isn't fooled by either case: it resolves the
+    ambiguity by asking directly whether any not-yet-resolved row exists,
+    regardless of what this attempt's random pick happened to find. Only
+    run once every CLAIM_MAX_ATTEMPTS claim attempt has failed -- there's
+    no reason to pay for it on the (overwhelmingly common) path where an
+    early attempt just succeeds. Retrying the claim itself a few times
+    (each picks a fresh random candidate) resolves things in practice for
+    a single call when the contention is just a lost race; only genuine
+    exhaustion -- confirmed by the existence check, not just an empty pick
+    -- survives every attempt. A worker that gives up after
+    CLAIM_MAX_ATTEMPTS real races in a row just exits a little early -- a
+    later run mops up whatever's left, never a double-claim or a
+    permanently skipped page.
     """
+    params = {
+        "model_tag": model_tag,
+        "claim_timeout": claim_timeout_seconds,
+        "model": model,
+        "max_attempts": MAX_ATTEMPTS_PER_PAGE,
+    }
     for _ in range(CLAIM_MAX_ATTEMPTS):
         with conn.cursor() as cur:
-            cur.execute(
-                CLAIM_NEXT_PAGE_SQL,
-                {
-                    "model_tag": model_tag,
-                    "claim_timeout": claim_timeout_seconds,
-                    "model": model,
-                    "max_attempts": MAX_ATTEMPTS_PER_PAGE,
-                },
-            )
-            page_id, pending_exists = cur.fetchone()
+            cur.execute(CLAIM_NEXT_PAGE_SQL, params)
+            (page_id,) = cur.fetchone()
         conn.commit()  # releases the row lock candidate took, whether or not it matched
         if page_id is not None:
             break
     else:
+        with conn.cursor() as cur:
+            cur.execute(PENDING_EXISTS_SQL, params)
+            (pending_exists,) = cur.fetchone()
+        conn.commit()
         return CLAIM_CONTENDED if pending_exists else None
 
     with conn.cursor() as cur:
@@ -674,7 +711,22 @@ def db_save_extraction_success(conn, page_id, model, model_tag, entries, raw_tex
     conn.commit()
 
 
-def db_save_extraction_failure(conn, page_id, model, model_tag, error_message, raw_text):
+def is_content_failure(exc):
+    """True if this failure means the model responded but its output was
+    unusable (bad JSON/shape) -- deterministic, will very likely fail the
+    same way again with this model, so it's the kind MAX_ATTEMPTS_PER_PAGE
+    is meant to bound. False for anything upstream of getting a response
+    (a B2/network error, a non-ok Ollama HTTP status, an unconfigured
+    account) or downstream of it (a bad catalogue_entries insert) -- those
+    are transient/infra and must keep retrying indefinitely, exactly like
+    before this cap existed. extract_page() only attaches raw_text to
+    exceptions it raises itself, after successfully parsing a response
+    body -- i.e. content/shape failures specifically -- so its presence is
+    exactly this distinction."""
+    return getattr(exc, "raw_text", None) is not None
+
+
+def db_save_extraction_failure(conn, page_id, model, model_tag, error_message, raw_text, content_failure):
     # If db_save_extraction_success() raised partway through (e.g. a bad
     # catalogue_entries insert), the connection is left in an aborted
     # transaction; rolling back first (a no-op if there's nothing to undo)
@@ -682,12 +734,13 @@ def db_save_extraction_failure(conn, page_id, model, model_tag, error_message, r
     conn.rollback()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO llm_extractions (page_id, model, model_tag, status, error_message, raw_text) "
-            "VALUES (%s, %s, %s, 'failed', %s, %s) "
+            "INSERT INTO llm_extractions "
+            "(page_id, model, model_tag, status, error_message, raw_text, content_failure) "
+            "VALUES (%s, %s, %s, 'failed', %s, %s, %s) "
             "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
             "status = 'failed', error_message = EXCLUDED.error_message, "
-            "raw_text = EXCLUDED.raw_text",
-            (page_id, model, model_tag, error_message, raw_text),
+            "raw_text = EXCLUDED.raw_text, content_failure = EXCLUDED.content_failure",
+            (page_id, model, model_tag, error_message, raw_text, content_failure),
         )
     conn.commit()
 
@@ -730,6 +783,12 @@ def process_page(conn, clients, claim):
         print(f"done: {context}")
         return True
     except Exception as exc:
+        # Classified from the exception itself, before raw_text below might
+        # fall back to a pre-existing local value from an *earlier*,
+        # already-successful extract_page() call -- content_failure must
+        # reflect only whether *this* exception is the model-produced-bad-
+        # output kind, not whatever raw_text happens to end up holding.
+        content_failure = is_content_failure(exc)
         # extract_page() attaches raw_text to exceptions it raises itself
         # (bad JSON/shape) -- prefer that when present. Otherwise, fall
         # back to the local raw_text above rather than clobbering it with
@@ -741,21 +800,25 @@ def process_page(conn, clients, claim):
         # thrown away just because something later in the pipeline failed.
         raw_text = getattr(exc, "raw_text", raw_text)
         print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")
-        db_save_extraction_failure(conn, page_id, OLLAMA_MODEL, MODEL_TAG, str(exc), raw_text)
+        db_save_extraction_failure(
+            conn, page_id, OLLAMA_MODEL, MODEL_TAG, str(exc), raw_text, content_failure
+        )
         return False
 
 
 def count_capped_failures(conn, model_tag):
     """How many pages under model_tag are permanently done retrying --
-    status='failed' and attempt_count at or past MAX_ATTEMPTS_PER_PAGE, so
-    claim_next_page() will never reclaim them again. Queried once at the
-    end of a run so a genuinely-exhausted backlog that still has pages
-    stuck at the cap gets reported as needing review, not silently folded
-    into "all pages processed"."""
+    status='failed', content_failure (not a transient error -- see
+    is_content_failure()), and attempt_count at or past
+    MAX_ATTEMPTS_PER_PAGE, so claim_next_page() will never reclaim them
+    again. Queried once at the end of a run so a genuinely-exhausted
+    backlog that still has pages stuck at the cap gets reported as needing
+    review, not silently folded into "all pages processed"."""
     with conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM llm_extractions "
-            "WHERE model_tag = %s AND status = 'failed' AND attempt_count >= %s",
+            "WHERE model_tag = %s AND status = 'failed' AND content_failure "
+            "AND attempt_count >= %s",
             (model_tag, MAX_ATTEMPTS_PER_PAGE),
         )
         return cur.fetchone()[0]
@@ -819,9 +882,10 @@ def main():
         capped = count_capped_failures(conn, MODEL_TAG)
         if capped:
             print(
-                f"claimable backlog exhausted, but {capped} page(s) permanently failed after "
-                f"{MAX_ATTEMPTS_PER_PAGE} attempts and need manual review or a different model "
-                f"(status='failed' AND attempt_count >= {MAX_ATTEMPTS_PER_PAGE})"
+                f"claimable backlog exhausted, but {capped} page(s) had content the model "
+                f"couldn't produce a usable response for after {MAX_ATTEMPTS_PER_PAGE} attempts "
+                f"and need manual review or a different model (status='failed' AND "
+                f"content_failure AND attempt_count >= {MAX_ATTEMPTS_PER_PAGE})"
             )
         else:
             print("all pages processed")

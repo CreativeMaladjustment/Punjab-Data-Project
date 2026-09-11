@@ -169,6 +169,15 @@ CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours; a worker that dies mid-page leav
 
 CLAIM_MAX_ATTEMPTS = 5  # see the "lost the race" note in claim_next_page()
 
+MAX_ATTEMPTS_PER_PAGE = 2  # total tries allowed per (page, model_tag) -- one
+# retry after an initial failure -- before claim_next_page() stops
+# reclaiming it. A page that fails the same way every time (a bad JSON
+# shape the model keeps producing) was otherwise reclaimed forever, every
+# CLAIM_TIMEOUT_SECONDS. Once a row hits this cap it stays visible
+# (status='failed' and attempt_count >= MAX_ATTEMPTS_PER_PAGE) for manual
+# review or a different model, instead of burning worker time on a page
+# that keeps failing the same way.
+
 # candidate CTE narrows to one page: uploaded, and either never attempted
 # under model_tag, or claimed/failed but stale. claimed_at is set once, when
 # a page is claimed, and left untouched by a failure -- so it still reads
@@ -188,6 +197,17 @@ CLAIM_MAX_ATTEMPTS = 5  # see the "lost the race" note in claim_next_page()
 # that: it only re-claims a conflicting row that's still claim/fail-stale,
 # so the loser of a real race updates zero rows and RETURNING gives it
 # nothing back, instead of clobbering the winner.
+#
+# candidate is referenced twice below (once to attempt the claim, once to
+# report whether a candidate existed at all) -- Postgres materializes a CTE
+# referenced more than once by default, so the FOR UPDATE SKIP LOCKED
+# selection and lock happen exactly once, not once per reference.
+#
+# The final SELECT has no FROM clause, so it always returns exactly one row
+# regardless of whether `inserted` produced a row -- an inner join on
+# `inserted` would silently vanish (zero rows) on a lost race, which is
+# exactly the "indistinguishable from no candidate at all" ambiguity
+# claim_next_page() needs candidate_found to resolve.
 CLAIM_NEXT_PAGE_SQL = """
     WITH candidate AS (
         SELECT p.id
@@ -198,52 +218,81 @@ CLAIM_NEXT_PAGE_SQL = """
           AND (
             le.id IS NULL
             OR (le.status IN ('claimed', 'failed')
-                AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second')
+                AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
+                AND le.attempt_count < %(max_attempts)s)
           )
         ORDER BY random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
+    ),
+    inserted AS (
+        INSERT INTO llm_extractions (page_id, model, model_tag, status, claimed_at, attempt_count)
+        SELECT candidate.id, %(model)s, %(model_tag)s, 'claimed', now(), 1
+        FROM candidate
+        ON CONFLICT (page_id, model_tag) DO UPDATE SET
+            status = 'claimed', claimed_at = now(), error_message = NULL,
+            raw_response = NULL, raw_text = NULL,
+            attempt_count = llm_extractions.attempt_count + 1
+        WHERE llm_extractions.status IN ('claimed', 'failed')
+          AND llm_extractions.claimed_at < now() - %(claim_timeout)s * interval '1 second'
+          AND llm_extractions.attempt_count < %(max_attempts)s
+        RETURNING page_id
     )
-    INSERT INTO llm_extractions (page_id, model, model_tag, status, claimed_at)
-    SELECT candidate.id, %(model)s, %(model_tag)s, 'claimed', now()
-    FROM candidate
-    ON CONFLICT (page_id, model_tag) DO UPDATE SET
-        status = 'claimed', claimed_at = now(), error_message = NULL, raw_response = NULL
-    WHERE llm_extractions.status IN ('claimed', 'failed')
-      AND llm_extractions.claimed_at < now() - %(claim_timeout)s * interval '1 second'
-    RETURNING page_id
+    SELECT
+        (SELECT count(*) FROM candidate) > 0 AS candidate_found,
+        (SELECT page_id FROM inserted) AS page_id
 """
+
+
+CLAIM_CONTENDED = object()  # sentinel: every attempt found a candidate but
+# lost the race for it -- distinct from None (every attempt confirmed there
+# was truly no candidate). Other workers, or a later run, may still find
+# pages even though this call didn't -- callers must not treat this the
+# same as genuine exhaustion.
 
 
 def claim_next_page(conn, model, model_tag, claim_timeout_seconds):
     """Atomically claim one page still needing extraction under model_tag.
     Returns {"page_id", "page_no", "account", "bucket", "image_key",
-    "folder", "stem"}, or None if nothing is claimable right now.
+    "folder", "stem"}; None if every attempt confirmed there was truly no
+    candidate; or CLAIM_CONTENDED if every attempt found a candidate but
+    lost the race for it (see below) -- callers must treat CLAIM_CONTENDED
+    as "unknown, not exhausted", not as equivalent to None.
 
     A single attempt can come back empty even when pages *are* still
     available: it narrows to exactly one candidate up front, and if another
     worker's concurrent claim wins the race for that specific page (see the
     module-level SQL comment), this attempt's write affects zero rows --
-    indistinguishable, from one query alone, from "nothing left at all".
-    Retrying a few times (each picks a fresh random candidate) resolves
-    that ambiguity in practice; only genuine exhaustion survives every
+    indistinguishable, from the affected-row count alone, from "nothing left
+    at all". candidate_found (see CLAIM_NEXT_PAGE_SQL) resolves that: it's
+    true whenever this attempt's candidate CTE found a row, regardless of
+    whether the insert/reclaim actually won the race for it. Retrying a few
+    times (each picks a fresh random candidate) resolves the ambiguity in
+    practice for a single call; only genuine exhaustion survives every
     attempt. A worker that gives up after CLAIM_MAX_ATTEMPTS real races in
     a row just exits a little early -- a later run mops up whatever's left,
     never a double-claim or a permanently skipped page.
     """
+    saw_candidate = False
     for _ in range(CLAIM_MAX_ATTEMPTS):
         with conn.cursor() as cur:
             cur.execute(
                 CLAIM_NEXT_PAGE_SQL,
-                {"model_tag": model_tag, "claim_timeout": claim_timeout_seconds, "model": model},
+                {
+                    "model_tag": model_tag,
+                    "claim_timeout": claim_timeout_seconds,
+                    "model": model,
+                    "max_attempts": MAX_ATTEMPTS_PER_PAGE,
+                },
             )
-            row = cur.fetchone()
+            candidate_found, page_id = cur.fetchone()
         conn.commit()  # releases the row lock candidate took, whether or not it matched
-        if row is not None:
+        if page_id is not None:
             break
+        if candidate_found:
+            saw_candidate = True
     else:
-        return None
-    page_id = row[0]
+        return CLAIM_CONTENDED if saw_candidate else None
 
     with conn.cursor() as cur:
         cur.execute(
@@ -467,14 +516,23 @@ def extract_page(image_bytes, context=""):
         raise RuntimeError(
             f"Ollama /api/generate returned {resp.status_code}: {resp.text[:2000]}"
         )
-    text = resp.json()["response"].strip()
+    raw_text = resp.json()["response"]
+    text = raw_text.strip()
     text = re.sub(r"^```(json)?|```$", "", text, flags=re.M).strip()
     print(
         f"    ollama response for {context} in {time.time() - started:.1f}s "
         f"({len(text)} chars): {text[:300]!r}"
     )
-    parsed = json.loads(text)  # fail loudly; the page can be retried next run
-    return _coerce_to_entry_list(parsed)
+    try:
+        parsed = json.loads(text)  # fail loudly; the page can be retried next run
+        entries = _coerce_to_entry_list(parsed)
+    except Exception as exc:
+        # Attach raw_text so process_page() can still persist what the model
+        # actually said even though extraction failed -- letting this raise
+        # unadorned would lose it, since the caller only sees the exception.
+        exc.raw_text = raw_text
+        raise
+    return entries, raw_text
 
 
 def _text(entry, key):
@@ -563,16 +621,16 @@ INSERT_ENTRY_SQL = """
 """
 
 
-def db_save_extraction_success(conn, page_id, model, model_tag, entries):
+def db_save_extraction_success(conn, page_id, model, model_tag, entries, raw_text):
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO llm_extractions (page_id, model, model_tag, status, raw_response) "
-            "VALUES (%s, %s, %s, 'success', %s) "
+            "INSERT INTO llm_extractions (page_id, model, model_tag, status, raw_response, raw_text) "
+            "VALUES (%s, %s, %s, 'success', %s, %s) "
             "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
             "status = 'success', raw_response = EXCLUDED.raw_response, "
-            "error_message = NULL "
+            "raw_text = EXCLUDED.raw_text, error_message = NULL "
             "RETURNING id",
-            (page_id, model, model_tag, Json(entries)),
+            (page_id, model, model_tag, Json(entries), raw_text),
         )
         extraction_id = cur.fetchone()[0]
         cur.execute("DELETE FROM catalogue_entries WHERE extraction_id = %s", (extraction_id,))
@@ -581,7 +639,7 @@ def db_save_extraction_success(conn, page_id, model, model_tag, entries):
     conn.commit()
 
 
-def db_save_extraction_failure(conn, page_id, model, model_tag, error_message):
+def db_save_extraction_failure(conn, page_id, model, model_tag, error_message, raw_text):
     # If db_save_extraction_success() raised partway through (e.g. a bad
     # catalogue_entries insert), the connection is left in an aborted
     # transaction; rolling back first (a no-op if there's nothing to undo)
@@ -589,11 +647,12 @@ def db_save_extraction_failure(conn, page_id, model, model_tag, error_message):
     conn.rollback()
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO llm_extractions (page_id, model, model_tag, status, error_message) "
-            "VALUES (%s, %s, %s, 'failed', %s) "
+            "INSERT INTO llm_extractions (page_id, model, model_tag, status, error_message, raw_text) "
+            "VALUES (%s, %s, %s, 'failed', %s, %s) "
             "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
-            "status = 'failed', error_message = EXCLUDED.error_message",
-            (page_id, model, model_tag, error_message),
+            "status = 'failed', error_message = EXCLUDED.error_message, "
+            "raw_text = EXCLUDED.raw_text",
+            (page_id, model, model_tag, error_message, raw_text),
         )
     conn.commit()
 
@@ -621,7 +680,7 @@ def process_page(conn, clients, claim):
                 f"{account!r}, but that account isn't configured in this run's secrets"
             )
         image_bytes = b2_get_bytes(client, bucket, image_key)
-        entries = extract_page(image_bytes, context=context)
+        entries, raw_text = extract_page(image_bytes, context=context)
         for entry in entries:
             entry.setdefault("source_folder", folder)
             entry.setdefault("source_pdf", stem)
@@ -629,12 +688,18 @@ def process_page(conn, clients, claim):
             flag_if_printed_page_missing(entry)
         entries_json = json.dumps(entries)
         print(f"    saving {len(entries)} entries for {context}: {entries_json[:500]!r}")
-        db_save_extraction_success(conn, page_id, OLLAMA_MODEL, MODEL_TAG, entries)
+        db_save_extraction_success(conn, page_id, OLLAMA_MODEL, MODEL_TAG, entries, raw_text)
         print(f"done: {context}")
         return True
     except Exception as exc:
+        # extract_page() attaches raw_text to exceptions raised after it got
+        # a response from Ollama (bad JSON/shape) so it's still persisted
+        # even though extraction failed; exceptions raised before that (a
+        # non-ok HTTP response, a B2/network error, an unconfigured
+        # account) have no model output to attach, so this is None there.
+        raw_text = getattr(exc, "raw_text", None)
         print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")
-        db_save_extraction_failure(conn, page_id, OLLAMA_MODEL, MODEL_TAG, str(exc))
+        db_save_extraction_failure(conn, page_id, OLLAMA_MODEL, MODEL_TAG, str(exc), raw_text)
         return False
 
 
@@ -649,6 +714,7 @@ def main():
     processed = 0
     any_incomplete = False
     limited = False
+    contended = False
     while True:
         if elapsed() > MAX_RUNTIME_SECONDS:
             print(
@@ -664,6 +730,13 @@ def main():
         claim = claim_next_page(conn, OLLAMA_MODEL, MODEL_TAG, CLAIM_TIMEOUT_SECONDS)
         if claim is None:
             break
+        if claim is CLAIM_CONTENDED:
+            print(
+                "gave up after repeated claim contention, not confirmed exhaustion; "
+                "other workers or a later run may still find pages"
+            )
+            contended = True
+            break
         if not process_page(conn, clients, claim):
             any_incomplete = True
         processed += 1
@@ -676,10 +749,14 @@ def main():
         sys.exit(1)
 
     if limited:
-        # Don't claim the backlog is done when MAX_PAGES_PER_WORKER is what
-        # actually stopped this worker -- there may be plenty of claimable
-        # pages left that this run never got to.
-        print(f"limited run: stopped at MAX_PAGES_PER_WORKER ({MAX_PAGES_PER_WORKER}), not exhaustion")
+        # MAX_PAGES_PER_WORKER stopped this worker before it ever asked
+        # whether more pages exist -- don't claim to know either way.
+        print(
+            f"limited run: stopped at MAX_PAGES_PER_WORKER ({MAX_PAGES_PER_WORKER}); "
+            "whether more pages remain is unknown"
+        )
+    elif contended:
+        print("stopped on claim contention; backlog status unknown, not confirmed exhausted")
     else:
         print("all pages processed")
 

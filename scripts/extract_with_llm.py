@@ -116,6 +116,12 @@ MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
 # on a slow model response.
 OLLAMA_CONNECT_TIMEOUT_SECONDS = 10
 OLLAMA_READ_TIMEOUT_SECONDS = 1800
+
+# glm-ocr's Ollama default (4096) is too small for system prompt + schema +
+# image tokens (observed 5140-5178 for a typical page); 8192 is double the
+# default, comfortable headroom on a CPU runner without meaningfully
+# increasing memory/compute cost at these request sizes.
+OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
 START_TIME = time.time()
 
 SCHEMA_PATH = pathlib.Path(__file__).resolve().parent.parent / "pipeline" / "schema.md"
@@ -442,6 +448,14 @@ def extract_page(image_bytes, context=""):
             "images": [b64],
             "stream": False,
             "format": "json",
+            # glm-ocr's default context window (4096) is smaller than
+            # system prompt + schema + image tokens for a typical page
+            # (observed 5140-5178 tokens on run 34595756362, confirmed via
+            # Ollama's own "exceeds the available context size" error once
+            # the response body started getting logged) -- override it
+            # explicitly rather than relying on the model's default, which
+            # can also change out from under us on a fresh `ollama pull`.
+            "options": {"num_ctx": OLLAMA_NUM_CTX},
         },
         timeout=(OLLAMA_CONNECT_TIMEOUT_SECONDS, OLLAMA_READ_TIMEOUT_SECONDS),
     )
@@ -634,6 +648,7 @@ def main():
         print(f"MAX_PAGES_PER_WORKER set: stopping after {MAX_PAGES_PER_WORKER} page(s)")
     processed = 0
     any_incomplete = False
+    limited = False
     while True:
         if elapsed() > MAX_RUNTIME_SECONDS:
             print(
@@ -643,6 +658,7 @@ def main():
             sys.exit(RUNTIME_GUARD_EXIT_CODE)
         if MAX_PAGES_PER_WORKER and processed >= MAX_PAGES_PER_WORKER:
             print(f"MAX_PAGES_PER_WORKER limit ({MAX_PAGES_PER_WORKER}) reached; stopping")
+            limited = True
             break
 
         claim = claim_next_page(conn, OLLAMA_MODEL, MODEL_TAG, CLAIM_TIMEOUT_SECONDS)
@@ -659,7 +675,13 @@ def main():
         print("one or more pages failed extraction; exiting non-zero so this is visible")
         sys.exit(1)
 
-    print("all pages processed")
+    if limited:
+        # Don't claim the backlog is done when MAX_PAGES_PER_WORKER is what
+        # actually stopped this worker -- there may be plenty of claimable
+        # pages left that this run never got to.
+        print(f"limited run: stopped at MAX_PAGES_PER_WORKER ({MAX_PAGES_PER_WORKER}), not exhaustion")
+    else:
+        print("all pages processed")
 
 
 if __name__ == "__main__":

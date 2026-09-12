@@ -1,0 +1,42 @@
+# Read-only reporting workflow: how much of the extraction backlog is left
+# to work on, broken down by model. Answers "how many images haven't been
+# processed yet", "how many have failed (and which failures are worth
+# looking at vs. will just retry on their own)", and "how many have real
+# text back from the model" without anyone needing to read through
+# extract-pages.yml's logs or write one-off SQL against Supabase.
+#
+# Safe to run any time, including while extract-pages.yml workers are
+# actively claiming pages -- scripts/extraction_status.py only ever reads
+# from Postgres, never writes to it, and doesn't touch B2 or Ollama at all.
+name: Extraction status report
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    environment: b2-upload  # where SUPABASE_DB_URL lives; no B2 secrets are
+    # actually used here -- see the module docstring in extraction_status.py.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Report extraction status
+        env:
+          PYTHONUNBUFFERED: "1"
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: python scripts/extraction_status.py

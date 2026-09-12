@@ -143,9 +143,9 @@ def render_markdown(total_images, by_model):
     lines.append(
         "| model | remaining | never attempted | claimed (active) | claimed (stale) "
         "| failed: retryable | failed: transient | failed: capped (needs review) "
-        "| success (entries) | success (blank) | catalogue entries |"
+        "| success (entries) | success (blank) | has model text | catalogue entries |"
     )
-    lines.append("|---" * 11 + "|")
+    lines.append("|---" * 12 + "|")
     for row in by_model:
         lines.append(
             f"| {row['model_tag']} | **{row['remaining']}** | {row['never_attempted']} "
@@ -153,6 +153,7 @@ def render_markdown(total_images, by_model):
             f"| {row['failed_content_retryable']} | {row['failed_transient']} "
             f"| {row['failed_content_capped']} "
             f"| {row['success_with_entries']} | {row['success_empty']} "
+            f"| {row['has_raw_text']} "
             f"| {row['catalogue_entries']} |"
         )
     lines.append("")
@@ -170,6 +171,12 @@ def render_markdown(total_images, by_model):
     lines.append(
         "- **success (blank)** pages are legitimate zero-entry results (covers, "
         "blank pages, indexes) -- not failures."
+    )
+    lines.append(
+        "- **has model text** counts every row with a real response from the "
+        "model (`raw_text is not null`), success or failure alike -- a content "
+        "failure still has text (that's exactly what made it a content failure "
+        "rather than a transient one), so this is always >= success + capped."
     )
 
     for row in by_model:

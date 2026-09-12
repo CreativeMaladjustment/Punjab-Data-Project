@@ -19,6 +19,7 @@ Keep them in sync if either changes there.
 import json
 import os
 import sys
+import time
 
 import psycopg2
 
@@ -26,6 +27,17 @@ SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
 CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60  # see extract_with_llm.py's CLAIM_TIMEOUT_SECONDS
 MAX_ATTEMPTS_PER_PAGE = 2  # see extract_with_llm.py's MAX_ATTEMPTS_PER_PAGE
+
+DB_CONNECT_MAX_ATTEMPTS = 5  # retried with backoff (2/4/8/16s): Supabase's
+# pooler in session mode has a small fixed client-slot count (observed
+# pool_size=15 in run 34671737840/job 103494248894), and this report is
+# meant to be safe to run *while* extract-pages.yml's 9-worker matrix is
+# actively holding connections open -- exactly the situation that can
+# transiently exhaust those slots and fail a fresh connect with
+# "FATAL: (EMAXCONNSESSION) max clients reached in session mode" even
+# though nothing is actually wrong. A few retries gives a slot time to
+# free up instead of failing the whole report over what's normal
+# contention, not a real outage.
 
 # One row per model_tag that has ever been attempted, via conditional
 # aggregation (COUNT ... FILTER) rather than one query per bucket -- a
@@ -89,7 +101,18 @@ TOP_CAPPED_FAILURE_REASONS_SQL = """
 
 
 def db_connect():
-    return psycopg2.connect(SUPABASE_DB_URL)
+    for attempt in range(1, DB_CONNECT_MAX_ATTEMPTS + 1):
+        try:
+            return psycopg2.connect(SUPABASE_DB_URL)
+        except psycopg2.OperationalError as exc:
+            if attempt == DB_CONNECT_MAX_ATTEMPTS:
+                raise
+            print(
+                f"DB connect attempt {attempt}/{DB_CONNECT_MAX_ATTEMPTS} failed "
+                f"({exc}); retrying",
+                file=sys.stderr,
+            )
+            time.sleep(2**attempt)
 
 
 def fetch_report(conn):

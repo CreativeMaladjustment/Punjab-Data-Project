@@ -39,6 +39,7 @@ Requires an Ollama server already running and reachable at OLLAMA_HOST (see
 .github/workflows/extract-pages.yml) with OLLAMA_MODEL already pulled.
 """
 import base64
+import contextlib
 import json
 import os
 import pathlib
@@ -161,8 +162,46 @@ def b2_get_bytes(client, bucket, key):
     return client.get_object(Bucket=bucket, Key=key)["Body"].read()
 
 
+DB_CONNECT_MAX_ATTEMPTS = 5  # retried with backoff (2/4/8/16s): connecting can
+# transiently fail under pool pressure -- Supabase's session-mode pooler has a
+# small fixed client-slot count, and with each page now opening a fresh
+# connection only for its brief claim/save moments (see claim_next_page(),
+# db_save_extraction_success(), db_save_extraction_failure() below) rather
+# than holding one open for the page's entire multi-minute Ollama call, a
+# transient "pool momentarily full" on connect is expected occasionally
+# under concurrent runs, not a real outage worth failing the whole worker
+# over immediately.
+
+
 def db_connect():
-    return psycopg2.connect(SUPABASE_DB_URL)
+    for attempt in range(1, DB_CONNECT_MAX_ATTEMPTS + 1):
+        try:
+            return psycopg2.connect(SUPABASE_DB_URL)
+        except psycopg2.OperationalError as exc:
+            if attempt == DB_CONNECT_MAX_ATTEMPTS:
+                raise
+            print(
+                f"DB connect attempt {attempt}/{DB_CONNECT_MAX_ATTEMPTS} failed "
+                f"({exc}); retrying",
+                file=sys.stderr,
+            )
+            time.sleep(2**attempt)
+
+
+@contextlib.contextmanager
+def db_connection():
+    """Open a connection for exactly the duration of one `with` block, then
+    close it -- not just commit/rollback, which `with conn:` alone would do
+    while leaving the socket open. Used for every DB touchpoint (claiming,
+    saving a result, counting capped failures) so a worker only ever holds
+    a pooler slot for the brief moment it's actually running a query, not
+    for the page's entire multi-minute Ollama call in between -- see
+    process_page(), which does that call with no open connection at all."""
+    conn = db_connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60  # 3 hours; a worker that dies mid-page leaves
@@ -345,13 +384,18 @@ CLAIM_CONTENDED = object()  # sentinel: every attempt found a candidate but
 # same as genuine exhaustion.
 
 
-def claim_next_page(conn, model, model_tag, claim_timeout_seconds):
+def claim_next_page(model, model_tag, claim_timeout_seconds):
     """Atomically claim one page still needing extraction under model_tag.
     Returns {"page_id", "page_no", "account", "bucket", "image_key",
     "folder", "stem"}; None if a PENDING_EXISTS_SQL check confirmed there
     was truly nothing left; or CLAIM_CONTENDED if that check says otherwise
     (see below) -- callers must treat CLAIM_CONTENDED as "unknown, not
     exhausted", not as equivalent to None.
+
+    Opens its own connection for just this call (see db_connection()) --
+    the whole thing (up to CLAIM_MAX_ATTEMPTS claim attempts, plus one
+    page-detail lookup) is fast, nowhere near process_page()'s
+    multi-minute Ollama call that happens after this returns.
 
     A single attempt can come back empty even when pages *are* still
     available: it narrows to exactly one random candidate up front under
@@ -381,29 +425,30 @@ def claim_next_page(conn, model, model_tag, claim_timeout_seconds):
         "model": model,
         "max_attempts": MAX_ATTEMPTS_PER_PAGE,
     }
-    for _ in range(CLAIM_MAX_ATTEMPTS):
-        with conn.cursor() as cur:
-            cur.execute(CLAIM_NEXT_PAGE_SQL, params)
-            (page_id,) = cur.fetchone()
-        conn.commit()  # releases the row lock candidate took, whether or not it matched
-        if page_id is not None:
-            break
-    else:
-        with conn.cursor() as cur:
-            cur.execute(PENDING_EXISTS_SQL, params)
-            (pending_exists,) = cur.fetchone()
-        conn.commit()
-        return CLAIM_CONTENDED if pending_exists else None
+    with db_connection() as conn:
+        for _ in range(CLAIM_MAX_ATTEMPTS):
+            with conn.cursor() as cur:
+                cur.execute(CLAIM_NEXT_PAGE_SQL, params)
+                (page_id,) = cur.fetchone()
+            conn.commit()  # releases the row lock candidate took, whether or not it matched
+            if page_id is not None:
+                break
+        else:
+            with conn.cursor() as cur:
+                cur.execute(PENDING_EXISTS_SQL, params)
+                (pending_exists,) = cur.fetchone()
+            conn.commit()
+            return CLAIM_CONTENDED if pending_exists else None
 
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT p.page_no, p.b2_account, p.b2_bucket, p.image_key, pf.folder, pf.name "
-            "FROM pages p JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid "
-            "WHERE p.id = %s",
-            (page_id,),
-        )
-        page_no, account, bucket, image_key, folder, name = cur.fetchone()
-    conn.rollback()  # read-only; drop the implicit transaction
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT p.page_no, p.b2_account, p.b2_bucket, p.image_key, pf.folder, pf.name "
+                "FROM pages p JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid "
+                "WHERE p.id = %s",
+                (page_id,),
+            )
+            page_no, account, bucket, image_key, folder, name = cur.fetchone()
+        conn.rollback()  # read-only; drop the implicit transaction
 
     return {
         "page_id": page_id,
@@ -722,8 +767,12 @@ INSERT_ENTRY_SQL = """
 """
 
 
-def db_save_extraction_success(conn, page_id, model, model_tag, entries, raw_text):
-    with conn.cursor() as cur:
+def db_save_extraction_success(page_id, model, model_tag, entries, raw_text):
+    # Its own connection, opened just for this call (see db_connection()) --
+    # by the time this runs, extract_page()'s multi-minute Ollama call has
+    # already finished, so nothing here needs a connection held open any
+    # longer than this one write actually takes.
+    with db_connection() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO llm_extractions (page_id, model, model_tag, status, raw_response, raw_text) "
             "VALUES (%s, %s, %s, 'success', %s, %s) "
@@ -737,7 +786,7 @@ def db_save_extraction_success(conn, page_id, model, model_tag, entries, raw_tex
         cur.execute("DELETE FROM catalogue_entries WHERE extraction_id = %s", (extraction_id,))
         for idx, entry in enumerate(entries):
             cur.execute(INSERT_ENTRY_SQL, build_entry_row(extraction_id, idx, entry))
-    conn.commit()
+        conn.commit()
 
 
 def is_content_failure(exc):
@@ -755,13 +804,15 @@ def is_content_failure(exc):
     return getattr(exc, "raw_text", None) is not None
 
 
-def db_save_extraction_failure(conn, page_id, model, model_tag, error_message, raw_text, content_failure):
-    # If db_save_extraction_success() raised partway through (e.g. a bad
-    # catalogue_entries insert), the connection is left in an aborted
-    # transaction; rolling back first (a no-op if there's nothing to undo)
-    # keeps this write from failing too and taking down the whole run.
-    conn.rollback()
-    with conn.cursor() as cur:
+def db_save_extraction_failure(page_id, model, model_tag, error_message, raw_text, content_failure):
+    # Its own connection, opened just for this call (see db_connection()).
+    # Previously this reused a long-lived connection shared with
+    # db_save_extraction_success(), so a rollback was needed here first in
+    # case that call had left the connection mid-aborted-transaction (e.g.
+    # a bad catalogue_entries insert); now every call gets a brand-new
+    # connection that was never touched by anything else, so there's
+    # nothing to roll back.
+    with db_connection() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO llm_extractions "
             "(page_id, model, model_tag, status, error_message, raw_text, content_failure) "
@@ -771,10 +822,10 @@ def db_save_extraction_failure(conn, page_id, model, model_tag, error_message, r
             "raw_text = EXCLUDED.raw_text, content_failure = EXCLUDED.content_failure",
             (page_id, model, model_tag, error_message, raw_text, content_failure),
         )
-    conn.commit()
+        conn.commit()
 
 
-def process_page(conn, clients, claim):
+def process_page(clients, claim):
     """Extract one already-claimed page and record success or failure.
     claim: the dict returned by claim_next_page(). Returns
     (success, b2_download_failure): success is True on success, False if
@@ -782,7 +833,12 @@ def process_page(conn, clients, claim):
     failure happened while fetching the page's image from B2 -- see
     MAX_B2_FAILURES_PER_WORKER, which counts exactly this and nothing
     else (not an LLM/content failure, not an unconfigured-account guard,
-    not a bad DB insert)."""
+    not a bad DB insert).
+
+    Holds no database connection at all during extract_page()'s call to
+    Ollama (the slow part, often 5+ minutes) -- db_save_extraction_success()
+    and db_save_extraction_failure() each open their own short-lived
+    connection only once there's an actual result to write."""
     page_id = claim["page_id"]
     page_no = claim["page_no"]
     account = claim["account"]
@@ -822,7 +878,7 @@ def process_page(conn, clients, claim):
             flag_if_printed_page_missing(entry)
         entries_json = json.dumps(entries)
         print(f"    saving {len(entries)} entries for {context}: {entries_json[:500]!r}")
-        db_save_extraction_success(conn, page_id, OLLAMA_MODEL, MODEL_TAG, entries, raw_text)
+        db_save_extraction_success(page_id, OLLAMA_MODEL, MODEL_TAG, entries, raw_text)
         print(f"done: {context}")
         return True, False
     except Exception as exc:
@@ -845,12 +901,12 @@ def process_page(conn, clients, claim):
         raw_text = getattr(exc, "raw_text", raw_text)
         print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")
         db_save_extraction_failure(
-            conn, page_id, OLLAMA_MODEL, MODEL_TAG, str(exc), raw_text, content_failure
+            page_id, OLLAMA_MODEL, MODEL_TAG, str(exc), raw_text, content_failure
         )
         return False, b2_download_failure
 
 
-def count_capped_failures(conn, model_tag):
+def count_capped_failures(model_tag):
     """How many pages under model_tag are permanently done retrying --
     status='failed', content_failure (not a transient error -- see
     is_content_failure()), and attempt_count at or past
@@ -858,7 +914,7 @@ def count_capped_failures(conn, model_tag):
     again. Queried once at the end of a run so a genuinely-exhausted
     backlog that still has pages stuck at the cap gets reported as needing
     review, not silently folded into "all pages processed"."""
-    with conn.cursor() as cur:
+    with db_connection() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT count(*) FROM llm_extractions "
             "WHERE model_tag = %s AND status = 'failed' AND content_failure "
@@ -870,7 +926,6 @@ def count_capped_failures(conn, model_tag):
 
 def main():
     wait_for_ollama()
-    conn = db_connect()
     clients = {aid: b2_client(acct) for aid, acct in B2_ACCOUNTS.items()}
 
     print(f"model: {OLLAMA_MODEL} (tag: {MODEL_TAG})")
@@ -894,7 +949,7 @@ def main():
             limited = True
             break
 
-        claim = claim_next_page(conn, OLLAMA_MODEL, MODEL_TAG, CLAIM_TIMEOUT_SECONDS)
+        claim = claim_next_page(OLLAMA_MODEL, MODEL_TAG, CLAIM_TIMEOUT_SECONDS)
         if claim is None:
             break
         if claim is CLAIM_CONTENDED:
@@ -904,7 +959,7 @@ def main():
             )
             contended = True
             break
-        ok, b2_download_failure = process_page(conn, clients, claim)
+        ok, b2_download_failure = process_page(clients, claim)
         if not ok:
             any_incomplete = True
             # A genuine LLM/content failure never touches b2_failures -- the
@@ -958,7 +1013,7 @@ def main():
             "confirm B2 access is actually working before re-running"
         )
     else:
-        capped = count_capped_failures(conn, MODEL_TAG)
+        capped = count_capped_failures(MODEL_TAG)
         if capped:
             print(
                 f"claimable backlog exhausted, but {capped} page(s) had content the model "

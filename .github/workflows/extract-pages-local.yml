@@ -1,0 +1,149 @@
+# Same job as extract-pages.yml (see that file's header for the full
+# pipeline description), but for a single self-hosted runner instead of
+# GitHub-hosted ubuntu-latest matrix workers.
+#
+# Why this exists as a separate file rather than a runner-type input on
+# extract-pages.yml: a self-hosted runner is a real, persistent machine
+# (state -- Ollama install, pulled models, Python packages -- survives
+# between runs, unlike an ephemeral GitHub-hosted VM), so several of that
+# workflow's steps don't apply here and would be actively wrong to keep:
+#   - "Free runner disk space" deletes Linux hosted-toolcache paths that
+#     don't exist on your machine, and running `sudo rm -rf` steps against
+#     someone's own laptop on every run is not something CI should do
+#     silently even when the paths happen to be absent.
+#   - Ollama binary install/cache: your machine already has (or will have)
+#     Ollama installed once, persistently. Re-installing or caching it here
+#     would be redundant at best.
+#   - Ollama model cache via actions/cache: `~/.ollama` already persists on
+#     local disk between runs, so there's nothing to restore -- `ollama
+#     pull` below is already a fast no-op once a model has been pulled once.
+#
+# Single worker, no matrix: this targets exactly one machine, so there's
+# nothing to fan out across. If you want more local throughput later, the
+# right move is another self-hosted runner (a second machine, or another
+# registration on the same one with a distinct label) plus a small matrix
+# here, not raising this to N without more runners behind it.
+#
+# Security note: this workflow must stay workflow_dispatch-only. A
+# self-hosted runner executes whatever the workflow tells it to directly on
+# your machine -- never add a `pull_request` (or any fork-reachable)
+# trigger to a workflow that targets a self-hosted runner, since that would
+# let anyone who can open a PR run arbitrary code on your laptop.
+name: Extract catalogue entries with a local LLM (self-hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Ollama vision model to run"
+        type: choice
+        default: glm-ocr
+        options:
+          - minicpm-v4.6
+          - qwen3-vl:2b
+          - qwen3-vl:4b
+          - gemma4:e2b
+          - glm-ocr
+          - minicpm-v4.5
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    # TODO: once the runner is registered, narrow this to its actual label
+    # (e.g. [self-hosted, macbook-air-m5]) so it doesn't also match any
+    # other self-hosted runner added to this repo later. "self-hosted" alone
+    # matches any self-hosted runner registered here.
+    runs-on: self-hosted
+    timeout-minutes: 350
+    environment: b2-upload
+    env:
+      # Same rationale as extract-pages.yml: routed through an env var
+      # rather than interpolating ${{ inputs.model }} directly into run:
+      # scripts below (Semgrep: yaml.github-actions.security.run-shell-injection).
+      OLLAMA_MODEL_INPUT: ${{ inputs.model }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Verify Ollama is installed
+        # Intentionally does not auto-install: unlike a throwaway
+        # GitHub-hosted VM, this is your own machine, and a workflow
+        # silently installing system software on it on every run is not
+        # something to do without you doing it yourself once, deliberately
+        # (e.g. `brew install ollama` or https://ollama.com/download).
+        run: |
+          if ! command -v ollama >/dev/null 2>&1; then
+            echo "Ollama not found on PATH. Install it yourself first (e.g. 'brew install ollama' or https://ollama.com/download), then re-run this workflow."
+            exit 1
+          fi
+          ollama --version
+
+      - name: Start Ollama server
+        run: |
+          if curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; then
+            echo "Ollama server already running -- reusing it"
+            exit 0
+          fi
+          nohup ollama serve > ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:11434/api/tags > /dev/null && exit 0
+            sleep 2
+          done
+          echo "Ollama server did not come up in time"; cat ollama.log; exit 1
+
+      - name: Pull model
+        run: ollama pull "$OLLAMA_MODEL_INPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run extraction
+        id: run
+        env:
+          # Without this, Python fully buffers stdout when it isn't a TTY
+          # (as here) -- print() output sits in memory until the buffer
+          # fills or the process exits cleanly, so a long run or one that
+          # gets cancelled mid-way can show *zero* log output even though
+          # DB writes (a separate, immediate network call per page) went
+          # through the whole time.
+          PYTHONUNBUFFERED: "1"
+          OLLAMA_MODEL: ${{ inputs.model }}
+          MAX_PAGES_PER_WORKER: "2000"
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          # Second account's secrets are optional (only account 1 above is
+          # required) — the scripts detect whether they're fully set.
+          B2_ENDPOINT_2: ${{ secrets.B2_ENDPOINT_2 }}
+          B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+          B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+          B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+        run: |
+          set +e
+          python scripts/extract_with_llm.py
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Flag runtime guard trip for manual resume
+        if: steps.run.outputs.exit_code == '42'
+        run: |
+          echo "### ⏱️ Runtime guard tripped for \`$OLLAMA_MODEL_INPUT\` (local runner) — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The extraction stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off -- pages this worker claimed but didn't finish become claimable again once their claim goes stale (see CLAIM_TIMEOUT_SECONDS)." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** re-run this workflow with the same model (\`$OLLAMA_MODEL_INPUT\`) to continue." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail job on unexpected script error
+        if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42'
+        run: exit 1

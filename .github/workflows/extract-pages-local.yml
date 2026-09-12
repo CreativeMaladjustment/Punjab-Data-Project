@@ -97,15 +97,31 @@ jobs:
       - name: Pull model
         run: ollama pull "$OLLAMA_MODEL_INPUT"
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: "3.x"
-          cache: pip
-          cache-dependency-path: scripts/requirements.txt
+      - name: Verify Python 3 is installed
+        # Not actions/setup-python: its tool-cache download step creates
+        # $RUNNER_TOOL_CACHE (defaulting to /Users/runner/hostedtoolcache,
+        # a GitHub-hosted-macOS-runner-only path/user), which self-hosted
+        # runners don't set -- confirmed on this runner as `mkdir:
+        # /Users/runner: Permission denied` under its real user. Same
+        # rationale as the Ollama check above: verify what's already on
+        # this persistent machine instead of asking CI to manage it.
+        run: |
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "python3 not found on PATH. Install it yourself first (e.g. 'brew install python3'), then re-run this workflow."
+            exit 1
+          fi
+          python3 --version
 
       - name: Install Python dependencies
-        run: pip install -r scripts/requirements.txt
+        # A venv, not a bare `pip install`: this machine is persistent and
+        # shared across every future run of this workflow (and anything
+        # else you do on it), so a global install would both pollute your
+        # system Python across unrelated work and hit newer Homebrew
+        # Python's "externally-managed-environment" pip refusal. Re-running
+        # against an already-up-to-date .venv is a fast no-op.
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r scripts/requirements.txt
 
       - name: Run extraction
         id: run
@@ -132,7 +148,7 @@ jobs:
           B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
         run: |
           set +e
-          python scripts/extract_with_llm.py
+          .venv/bin/python scripts/extract_with_llm.py
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
 

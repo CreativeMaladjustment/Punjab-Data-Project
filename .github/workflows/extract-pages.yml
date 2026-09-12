@@ -42,12 +42,14 @@ jobs:
   extract:
     strategy:
       fail-fast: false
-      # 9 parallel workers -- each independently claims and processes pages
+      # 42 parallel workers -- each independently claims and processes pages
       # (see scripts/extract_with_llm.py's claim_next_page()), so this fans
-      # a big backlog out across 9 runners without any of them stepping on
+      # a big backlog out across 42 runners without any of them stepping on
       # each other's pages.
       matrix:
-        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+                  19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
+                  34, 35, 36, 37, 38, 39, 40, 41, 42]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload

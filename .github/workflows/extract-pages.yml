@@ -42,14 +42,19 @@ jobs:
   extract:
     strategy:
       fail-fast: false
-      # 42 parallel workers -- each independently claims and processes pages
+      # 18 parallel workers -- each independently claims and processes pages
       # (see scripts/extract_with_llm.py's claim_next_page()), so this fans
-      # a big backlog out across 42 runners without any of them stepping on
+      # a big backlog out across 18 runners without any of them stepping on
       # each other's pages.
+      #
+      # GitHub-hosted ubuntu-latest runners share a single account-wide
+      # concurrency cap of 20 jobs on the free tier -- a matrix bigger than
+      # that just queues the excess (confirmed on run 34689840573: a 42-way
+      # matrix ran 20 jobs and queued the other 22). 18 leaves headroom for
+      # another workflow (e.g. process-pdfs.yml) to have a job or two in
+      # flight at the same time without queuing either one.
       matrix:
-        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
-                  19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33,
-                  34, 35, 36, 37, 38, 39, 40, 41, 42]
+        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload

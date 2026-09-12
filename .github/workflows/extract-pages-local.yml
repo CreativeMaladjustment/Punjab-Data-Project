@@ -51,10 +51,11 @@ permissions:
 
 jobs:
   extract:
-    # TODO: once the runner is registered, narrow this to its actual label
-    # (e.g. [self-hosted, macbook-air-m5]) so it doesn't also match any
-    # other self-hosted runner added to this repo later. "self-hosted" alone
-    # matches any self-hosted runner registered here.
+    # Matches any self-hosted runner registered to this repo -- fine while
+    # there's exactly one. If a second self-hosted runner is ever added,
+    # narrow this to a distinguishing label (set at registration time, e.g.
+    # `--labels macbook-air-m5`) so this workflow doesn't accidentally land
+    # on the wrong machine.
     runs-on: self-hosted
     timeout-minutes: 350
     environment: b2-upload

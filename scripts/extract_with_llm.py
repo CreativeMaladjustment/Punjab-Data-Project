@@ -631,6 +631,70 @@ def _coerce_to_entry_list(parsed):
     return result
 
 
+FULL_PAGE_OCR_PROMPT = """Transcribe every word of text visible on this page \
+image, exactly as printed, verbatim, preserving line breaks and reading \
+order top to bottom. Include running headers, page numbers, and any text \
+outside the catalogue entries -- not just the entries themselves. Output \
+plain text only: no JSON, no commentary, no markdown formatting."""
+
+
+def ocr_full_page(image_bytes, context=""):
+    """Independent of extract_page(): a verbatim transcription of everything
+    on the page, not just the catalogue entries the schema-constrained
+    prompt asks for. Deliberately a separate Ollama call rather than folded
+    into extract_page()'s prompt/response -- that prompt and its parsing
+    (_coerce_to_entry_list and friends) are already tuned against real
+    model quirks (see their docstrings); asking one call to do both jobs at
+    once risks degrading the structured-extraction quality this pipeline
+    already depends on. Costs one extra model call per page; process_page()
+    treats its outcome as fully independent of extract_page()'s -- see
+    there for why."""
+    b64 = base64.b64encode(image_bytes).decode()
+    started = time.time()
+    resp = requests.post(
+        f"{OLLAMA_HOST}/api/generate",
+        json={
+            "model": OLLAMA_MODEL,
+            "prompt": FULL_PAGE_OCR_PROMPT,
+            "images": [b64],
+            "stream": False,
+            "options": {"num_ctx": OLLAMA_NUM_CTX},
+        },
+        timeout=(OLLAMA_CONNECT_TIMEOUT_SECONDS, OLLAMA_READ_TIMEOUT_SECONDS),
+    )
+    if not resp.ok:
+        raise RuntimeError(
+            f"Ollama /api/generate (full-page OCR) returned {resp.status_code}: {resp.text[:2000]}"
+        )
+    raw_text = resp.json()["response"]
+    print(f"    full-page OCR for {context} in {time.time() - started:.1f}s ({len(raw_text)} chars)")
+    return raw_text
+
+
+def db_save_page_ocr_text(page_id, model, model_tag, raw_text):
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO page_ocr_text (page_id, model, model_tag, status, raw_text) "
+            "VALUES (%s, %s, %s, 'success', %s) "
+            "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
+            "status = 'success', raw_text = EXCLUDED.raw_text, error_message = NULL",
+            (page_id, model, model_tag, raw_text),
+        )
+        conn.commit()
+
+
+def db_save_page_ocr_failure(page_id, model, model_tag, error_message):
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO page_ocr_text (page_id, model, model_tag, status, error_message) "
+            "VALUES (%s, %s, %s, 'failed', %s) "
+            "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
+            "status = 'failed', error_message = EXCLUDED.error_message",
+            (page_id, model, model_tag, error_message),
+        )
+        conn.commit()
+
+
 def extract_page(image_bytes, context=""):
     b64 = base64.b64encode(image_bytes).decode()
     started = time.time()
@@ -870,6 +934,17 @@ def process_page(clients, claim):
             # happens to also raise an Exception subclass.
             exc.b2_download_failure = True
             raise
+        # Full-page OCR: independent of the structured extraction below --
+        # best-effort, and deliberately not allowed to affect this page's
+        # success/failure/retry accounting (MAX_ATTEMPTS_PER_PAGE,
+        # content_failure, MAX_B2_FAILURES_PER_WORKER all stay scoped to
+        # extract_page()'s outcome only, exactly as before this existed).
+        try:
+            page_text = ocr_full_page(image_bytes, context=context)
+            db_save_page_ocr_text(page_id, OLLAMA_MODEL, MODEL_TAG, page_text)
+        except Exception as exc:
+            print(f"WARNING: full-page OCR failed for {context}: {exc}")
+            db_save_page_ocr_failure(page_id, OLLAMA_MODEL, MODEL_TAG, str(exc))
         entries, raw_text = extract_page(image_bytes, context=context)
         for entry in entries:
             entry.setdefault("source_folder", folder)

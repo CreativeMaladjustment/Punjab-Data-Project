@@ -85,10 +85,24 @@ each page as a 200 DPI WebP image for LLM vision input, and uploads it to a Back
 bucket (via B2's S3-compatible API) — the image is rendered directly from the source PDF, no
 intermediate per-page PDF needed. **Postgres (Supabase) is the resumability ledger**, not B2:
 every page's upload is recorded as a row in the `pages` table (see "Processing database"
-below), checked before anything is redone, so a run that hits the 5-hour GitHub Actions runner
-ceiling exits `42`, flags this in the run's job summary, and stops — a human re-runs the
-workflow (Actions → *Process pCloud PDFs to B2* → **Run workflow**) to pick up where it left
-off; nothing needs re-checking or re-configuring first.
+below), checked before anything is redone.
+
+The workflow runs as two jobs: `list-remaining` lists every PDF on pCloud, filters to the
+ones not yet fully uploaded per Postgres, and splits them round-robin into up to 10 slices;
+`process` fans out into a matrix over those slices, one GitHub Actions job per slice, running
+in parallel. Each `process` job works straight through its own slice with no internal
+runtime guard — it relies on the job's `timeout-minutes: 350` to stop it if a slice draws an
+unlucky mix of large PDFs, with no graceful mid-slice resume signal (see `ARCHITECTURE.md`).
+For a run that simply hit the timeout mid-slice, re-running the workflow (Actions → *Process
+pCloud PDFs to B2* → **Run workflow**) picks up whatever's still unfinished on the next
+`list-remaining` pass, with nothing to re-check or re-configure first. That's not true for a
+run that stopped with exit code 43 (every configured B2 account failing repeatedly — see
+"Second B2 account" below): re-running without first resolving the account/quota problem
+will just fail the same way again and burn more runner time. (`scripts/process_pcloud.py`'s
+original single-process, full-scan mode
+— list everything, loop sequentially, exit `42` after ~5 hours for a human to resume — still
+exists in the script for manual/local runs outside the workflow, but the production workflow
+no longer uses it.)
 
 A single-page PDF per page isn't currently used by anything downstream (only the WebP images
 feed the LLM extraction stage), so it's **not** split out or uploaded by default. Tick
@@ -130,22 +144,23 @@ below), following the same per-entry schema as the existing extraction pipeline
 `quarter`. This workflow never writes to B2 at all — B2 is read-only from its point of view.
 
 The model runs **locally on the GitHub Actions runner** via [Ollama](https://ollama.com) — no
-external API, no API key, nothing sent off-runner except to B2. GitHub-hosted runners have no
-GPU, so this is CPU inference and will be slow per page; the workflow uses the same
-runtime-guard-and-manual-resume pattern as `process-pdfs.yml` (exits `42` after ~5 hours, a job
-summary notice tells you to re-run it) rather than trying to finish in one run.
+external API, no API key; inference itself stays on-runner, with only page images fetched
+from B2 and extraction results written to Supabase (Postgres) leaving the runner.
+GitHub-hosted runners have no GPU, so this is CPU inference and will be slow per page; the
+job runs as a fixed matrix of 9 parallel workers, each independently claiming and processing
+one page at a time from a shared backlog (`claim_next_page()` in
+`scripts/extract_with_llm.py` — see `ARCHITECTURE.md` for the atomic-claiming details). Each
+worker checks its own runtime budget every iteration and exits
+`42` (a job summary notice tells you to re-run the workflow) rather than trying to finish in
+one run if it's still going after ~5 hours.
 
 `workflow_dispatch` takes a `model` choice — a shortlist of small (1B-8B), non-cloud-gated
 vision models pulled from Ollama's current vision listing (`minicpm-v4.6`, `qwen3-vl:2b`,
-`qwen3-vl:4b`, `gemma4:e2b`, `glm-ocr`, `minicpm-v4.5`), or `all` to fan them out as a parallel
-matrix so you can bake off quality/speed across models on the same page images. `glm-ocr` is
-included because it's purpose-built for document OCR — exactly this task. Default is
-**`minicpm-v4.5`** (8B): the largest model in this CPU-feasible set, and MiniCPM-V's line has a
-well-established OCR/document-understanding benchmark track record combined with being a full
-general-purpose model, so it should follow the 25-field schema more reliably than a narrower or
-smaller model — reasoned from published model positioning, not benchmarked against this
-project's actual pages, so treat an `all` bake-off as the real source of truth once you can
-eyeball output quality yourself.
+`qwen3-vl:4b`, `gemma4:e2b`, `glm-ocr`, `minicpm-v4.5`). `glm-ocr` is included because it's
+purpose-built for document OCR — exactly this task — and is the **default**. There's no
+longer an `all`-models bake-off option: run the workflow once per model you want to compare,
+and diff their output with a plain SQL query (see the `model_tag` namespacing below) once
+each has processed the same pages.
 Each model's output is namespaced by `model_tag` (the `model` value slugified — `:` and other
 non-alphanumeric characters replaced with `-`, e.g. `qwen3-vl:2b` becomes `qwen3-vl-2b`) via a
 unique `(page_id, model_tag)` constraint on `llm_extractions`, so different models' runs never

@@ -371,3 +371,26 @@ layer; (d) until then any published data dictionary carries the `replace()` idio
 formatting — `copies` serves verbatim and analytic duty in one column. Audit the other
 TEXT-typed numeric fields for the same shape. (b) README now carries both traps on the
 front page; a user of the open data cannot reach either from the schema alone.
+
+## D-021 (2026-09-10) — Pipeline infrastructure runs entirely on GitHub Actions + free-tier cloud services
+**Context:** The PDF-to-image-to-extraction pipeline (`scripts/process_pcloud.py`,
+`scripts/extract_with_llm.py`) needed a compute and coordination layer with no
+infrastructure budget and no ops staffing.
+**Decision:** No dedicated server. GitHub Actions runners are the entire compute layer
+(both pipeline stages are `workflow_dispatch` workflows — the CI/CD system *is* the
+production pipeline, not a thing it deploys); Backblaze B2 is object storage; Supabase
+Postgres is the single source of truth and doubles as the coordination mechanism for
+parallel workers (`FOR UPDATE SKIP LOCKED` + conditional upsert claiming, and a
+precomputed static work-chunking split, depending on whether the unit of work needs live
+contention-resolution); Ollama runs self-hosted on the runner itself for LLM inference
+rather than a paid API. Full reasoning, alternatives considered, and tradeoffs in
+`ARCHITECTURE.md`.
+**Consequences:** Near-zero marginal infra cost and nothing to patch, at the cost of free
+external quotas becoming the real operational ceiling. Observed directly on 2026-09-10: both
+configured B2 accounts hit `AccessDenied: ... download bandwidth or transaction (Class B) cap
+exceeded` (the message names two distinct quotas without saying which tripped), leaving
+22,387 of 22,398 rows (99.95%) sitting in `failed` status at export time (6 `claimed` were
+still unresolved, not themselves failures, and 5 had reached `success`) across ~11 hours and
+three separate runs — the claiming/retry logic itself worked correctly
+throughout; the external quota was the entire bottleneck. See `ARCHITECTURE.md` for the full
+incident and the "when to revisit" triggers.

@@ -1,0 +1,242 @@
+# Architecture Decision Record — Cloud-Native, CI/CD-as-Compute Pipeline
+
+**Status:** Accepted, in production use.
+**Date:** 2026-09-10 (written up retroactively; the underlying decisions were made incrementally
+from project start through PRs #13–#17).
+**Related:** `DECISIONS.md` D-021 (short cross-reference entry). This document covers
+infrastructure/engineering decisions; `DECISIONS.md` covers data and research-methodology
+decisions. Different questions, different audiences — kept separate rather than merged.
+
+---
+
+## Context
+
+The project needs to move ~tens of thousands of scanned register pages (bound PDF volumes,
+1867–1942) through three stages — render each page to an image, store it durably, and run a
+vision-LLM extraction pass over it into a structured schema (`pipeline/schema.md`) — at a
+scale and cadence that will run for months as more volumes are added, with **no dedicated
+server, no ops team, and no infrastructure budget**. This is an independent research project,
+not a funded lab with cloud credits.
+
+That constraint is the actual design driver. Every choice below follows from "what can this
+project run entirely on free or near-free managed services, coordinated by nothing more than
+what's already checked into the repo."
+
+None of what follows is a critique of running things locally, or of how this project's tooling
+worked before this pipeline existed. Local, human-driven tooling is simpler to write and to
+iterate on, and it stays the right tool for smaller, human-in-the-loop work — see
+`pipeline/extract_api.py`'s local SQLite output, which is local by design because that fits its
+job better, not because it's an earlier or lesser version of anything. Cloud-native was chosen
+*for this specific pipeline* because of the constraints above, plus one more: this project may
+grow to include contributors working from different machines, at different times, and cloud-hosted
+state (rather than anything living only on one person's laptop) is what makes that kind of
+distributed collaboration possible at all, not just cheaper.
+
+**Scope:** this ADR covers the pCloud → B2 → Postgres pipeline (`process-pdfs.yml`,
+`extract-pages.yml`, `scripts/process_pcloud.py`, `scripts/extract_with_llm.py`) — the path
+that scales to the full ~tens-of-thousands-of-pages backlog. It does not cover
+`pipeline/extract_api.py`, a separate, manually-run, manifest-scoped extraction path that
+calls Anthropic's Batch API directly (`ANTHROPIC_API_KEY`, no GitHub Actions, no B2, output to
+local SQLite) documented in `pipeline/README.md`; that path is a different, smaller-scale tool
+for specific quarters, not an alternative production pipeline, and the "no paid hosted LLM
+API" reasoning below applies to the GitHub Actions pipeline this document is about, not as a
+blanket claim about every extraction path in the repository.
+
+## Decision
+
+Build this pipeline on **GitHub Actions as the compute layer**, coordinating a handful of
+**free/cheap-tier managed cloud services** for everything stateful, with **Postgres as the only
+shared coordination point** between otherwise-stateless, ephemeral jobs.
+
+### Components
+
+| Concern | Service | Why |
+|---|---|---|
+| Source volumes | pCloud (public share link) | Already where the scans lived — storage the project pays for regardless of this pipeline (a sunk cost, not chosen for a free tier); no migration needed, and serving the pipeline's downloads of those source PDFs from the existing public share link adds no incremental cost. |
+| Compute | GitHub Actions (`ubuntu-latest` runners) | Free minutes on a public repo; ephemeral — nothing to patch, nothing idling between runs; `strategy.matrix` gives horizontal parallelism for free. |
+| Object storage | Backblaze B2 (two accounts, round-robin assigned) | Cheapest S3-compatible storage available; two accounts split load and give a fallback path (`upload_with_fallback` in `process_pcloud.py`) if one account errors. |
+| Database | Supabase-hosted Postgres | Free-tier managed Postgres; single source of truth for upload state and extraction results (`pages.image_uploaded_at`, `llm_extractions.status`) — see `supabase/migrations/`. PDF-stage render/upload failures aren't persisted as a status anywhere: an image failure just leaves the page absent from `pages` entirely, while (when `UPLOAD_PAGE_PDFS` is on) a page-PDF-only failure leaves an *existing* row with `page_pdf_uploaded_at` NULL — the failure itself, either way, is only visible in that run's Actions log. |
+| LLM inference | Ollama, self-hosted **on the runner itself** | GitHub-hosted runners have no GPU, so this is CPU inference — slow per page, but it costs nothing beyond runner-minutes. No API key, no per-token billing, no external vendor for the actual OCR/extraction work. |
+| Orchestration | None (deliberately) | No Celery, no SQS, no Redis, no K8s. Coordination between parallel jobs is a handful of SQL statements against Postgres (see below), not a service. |
+
+### The pipeline *is* the CI/CD system, not a thing CI/CD deploys
+
+`process-pdfs.yml` and `extract-pages.yml` are `workflow_dispatch`-triggered — manually run,
+not push-triggered — for two reasons, and the security one is the main one. This is a public
+repo, and these workflows run with real secrets (B2 keys, the Supabase DB URL) attached;
+`workflow_dispatch` means a run only starts when someone with write access to the repo
+explicitly clicks "run", rather than automatically off any push or PR — which matters
+specifically because in a public repo almost anyone can open a PR, and a run triggered
+automatically off that PR's code would expose those secrets to whatever the PR's own code
+told the runner to do. Today that "someone with write access" is a single person — the owner
+of the tokens involved — so only they can approve a run that could touch those secrets. The
+second reason is that they **are** the production data pipeline, invoked as needed, not a test
+suite that gates a deploy. There is no separate "deploy" step: the workflow YAML in the repo
+*is* the infrastructure, and a `git push` to it changes production behavior on the next run.
+This is deliberate: it means the entire compute and orchestration definition is
+version-controlled, reviewable, and reproducible by anyone who forks the repo and supplies
+their own credentials — there is no server whose state can drift from what's in git.
+
+### Parallelism without a queue service
+
+Both workflows fan work out across GitHub Actions matrix jobs, but the two use different
+coordination strategies depending on the shape of the work:
+
+- **`extract-pages.yml`**: a fixed matrix of 9 workers, each running an independent claim
+  loop (`claim_next_page()` in `scripts/extract_with_llm.py`) against `llm_extractions`.
+  The claim query filters and conflicts on `(page_id, model_tag)`, not on the page alone —
+  `FOR UPDATE ... SKIP LOCKED` plus a conditional `ON CONFLICT DO UPDATE ... WHERE ...` so
+  that two workers racing for the same `(page, model)` pair can never both believe they
+  claimed it, verified under genuine concurrent load (16 real threads, separate connections,
+  forced-overlap stress test) during development. This is deliberately *not* a
+  page-global lock: separate `model_tag` runs are intentionally allowed to process the same
+  page concurrently (e.g. a model bake-off), and the claim design exists to keep same-model
+  workers from duplicating each other, not to serialize different models against one page.
+  A worker
+  that dies mid-page leaves a stale claim that any worker (including itself, next run)
+  reclaims automatically once `CLAIM_TIMEOUT_SECONDS` (3h) has passed — no separate cleanup
+  job, no dead-letter queue, just a `WHERE claimed_at < now() - interval` in the same query.
+- **`process-pdfs.yml`**: a `list-remaining` job computes the full backlog once, up front,
+  and chunks it round-robin into at most `MAX_PARALLEL_PDF_WORKERS` (10) slices — a static
+  partition, not a live claim loop, because the unit of work (one PDF) is naturally
+  divisible in advance and doesn't need runtime contention-resolution *within that run*.
+  This also sidesteps a real GitHub Actions platform limit (a job's matrix is capped at
+  256 combinations) that a naive one-matrix-entry-per-PDF design would eventually have hit
+  as the backlog grew. **This safety is scoped to a single run**, not to arbitrary
+  concurrency: the workflow has no `concurrency:` group and there is no atomic PDF-level
+  claim, so two manually-dispatched runs overlapping in time could both snapshot the same
+  not-yet-uploaded PDFs before either writes a page row, and duplicate the download/upload
+  work for the overlap window. `process_pdf()`'s per-page upsert keeps the final Postgres
+  row coherent (`ON CONFLICT DO UPDATE` means whichever write lands last wins cleanly), but
+  it does **not** make the B2 side idempotent: `upload_with_fallback()` tries the assigned
+  account first, then falls back to any other configured account on error, so two racing
+  runs can genuinely succeed on *different* accounts for the same page — leaving one
+  physical object in B2 that no `pages` row ever points to, an orphan invisible to anything
+  that only audits Postgres. Wasteful and untracked, not corrupting — but a real gap this
+  design accepts rather than closes. `extract-pages.yml`'s live claim, by contrast,
+  is safe against two workers *simultaneously* believing they hold the same
+  `(page, model)` claim, including across two separate workflow runs racing each other,
+  because that guarantee lives in the database transaction itself (the conditional
+  `ON CONFLICT DO UPDATE ... WHERE`) rather than in a one-time, run-scoped snapshot. It is
+  not a guarantee against a *stale* claim: `db_save_extraction_success()` /
+  `db_save_extraction_failure()` write their result unconditionally on `(page_id,
+  model_tag)`, with no check that the claim they're writing against is still theirs — so a
+  worker that stalls past `CLAIM_TIMEOUT_SECONDS` (3h) without dying can have its page
+  reclaimed and reprocessed by another worker, and then still write its own late,
+  stale result over the newer one when it finally finishes. Rare in practice (a
+  worker has to survive well past the 3h timeout and still complete), but real, and
+  closing it would need a claim token or ownership check on the write path, not just the
+  claim itself.
+
+Postgres is doing the job a message queue would normally do, at zero additional
+infrastructure cost, because the coordination need (five-ish SQL predicates) doesn't justify
+running a queue service.
+
+## Consequences
+
+### What this buys
+
+- **Near-zero marginal infrastructure cost**, bounded by free-tier limits, for a project with
+  no budget line for infrastructure.
+- **Nothing to patch or monitor as a running service** — every compute unit is an ephemeral
+  GitHub Actions job that exists for the duration of one run.
+- **Infrastructure-as-code by construction**: the workflow YAML and the claiming SQL *are*
+  the orchestration layer, checked into the same repo as the application code, reviewed the
+  same way, with the same history.
+- **Reproducible and forkable**: anyone with their own pCloud link, B2 buckets, and a Supabase
+  project can run the identical pipeline from a clean checkout.
+- **Not bottlenecked on any one contributor's machine.** Because durable state lives in
+  Postgres/B2/pCloud rather than on one person's laptop, work isn't gated on being at a
+  specific computer: anyone with the right credentials can trigger a run, inspect progress via
+  Postgres, or pick up a stalled job from wherever they are. That matters for a project that
+  may grow to include collaborators working from different places and on different schedules —
+  it's a real advantage of going cloud-native for *this* pipeline, not a statement that local
+  development is worse; local tooling remains the right call for plenty of this project's other
+  work (see the note in Context above).
+- **Demonstrated horizontal scaling** at the scale this project needs it: 9 parallel
+  extraction workers, up to 10 parallel PDF-processing workers. The extraction claim loop
+  is verified to prevent two workers from simultaneously claiming the same `(page, model)`
+  pair, including across separate runs — it does not, and isn't meant to, prevent
+  different-model runs from processing the same page concurrently, since that's an
+  intentional feature, not a race, and it doesn't cover a worker that stalls past the claim
+  timeout and writes a late, stale result (see above); the PDF-processing chunking prevents
+  double-processing *within a single run* only — see the accepted cross-run duplication gap
+  above.
+
+### What it costs
+
+- **Free-tier caps become the actual operational bottleneck**, and they are *external* limits
+  the pipeline cannot negotiate around by writing better code. This is not hypothetical: on
+  2026-09-10, three consecutive `extract-pages.yml` runs, spanning roughly 05:00–16:12 UTC
+  (~11 hours), produced, out of 22,398 `llm_extractions` rows, 22,387 `failed`, 6 `claimed`
+  (each either an active claim or one gone stale and not yet reclaimed — a single snapshot
+  query can't distinguish the two, and the 6 were still unresolved at export time, not
+  themselves failures), and 5 `success` — **22,387 of 22,398 rows (99.95%) in `failed`
+  status at that snapshot** — because both configured B2
+  accounts hit the exact error `AccessDenied: ... download bandwidth or transaction
+  (Class B) cap exceeded` and it had not recovered across the entire window. That message
+  names two distinct B2 quotas (a download-bandwidth allowance and a separate "Class B"
+  transaction-count cap) without saying which one actually tripped; telling them apart, and
+  therefore the correct remedy, needs a direct look at the Backblaze account's Caps & Alerts
+  dashboard, not just the error string. The claiming and retry logic behaved exactly as
+  designed throughout (no double-claims, no hot-looping, clean backoff) — the bottleneck was
+  entirely the external quota, and no amount of application-level fixing moves that number
+  until the actual cap in question is raised or resets.
+- **Runner limits shape the code, not just the ops — unevenly.** Both workflows set
+  `timeout-minutes: 350` (a repo choice, kept under GitHub Actions' own platform ceiling for
+  a job — not itself a platform-inherent number, so it'll drift if that setting ever
+  changes). That configured limit is why `extract-pages.yml`'s per-worker claim loop checks
+  `MAX_RUNTIME_SECONDS` every iteration and exits with code 42 ("resume needed, not a
+  failure") before the timeout would otherwise kill it mid-run. `process_pcloud.py` has the
+  equivalent guard too, but currently only in
+  its legacy full-scan mode — the `PCLOUD_PDFS_JSON` slice loop that `process-pdfs.yml`'s
+  matrix jobs actually run has no internal runtime check, so a slice with an unlucky mix of
+  large PDFs can run until GitHub's hard timeout kills it mid-item, with no graceful
+  "resume" signal. Worth closing, not yet done.
+- **No persistent compute state.** Every matrix job starts from nothing; any
+  *application/source-of-truth* state that needs to survive between jobs or runs — what's
+  been uploaded, what's been extracted — must be written to Postgres or B2 explicitly. This
+  is why the whole design centers on Postgres as source of truth for what's done; it's not
+  optional, it's the only place that state can live. (Incidental build/dependency caches are
+  a separate thing and do survive elsewhere on purpose — `extract-pages.yml` caches the
+  pulled Ollama model under `~/.ollama` via `actions/cache`, and `setup-python` caches pip
+  packages — but losing either just costs a slower re-download next run, not correctness.)
+- **CPU-only LLM inference is slow.** No GPU on standard GitHub-hosted runners bounds
+  per-page throughput regardless of parallelism; this was an accepted tradeoff against the
+  cost of GPU compute or a paid API.
+- **Vendor sprawl as an operational surface.** Four external providers (GitHub, Supabase,
+  Backblaze, pCloud) plus Ollama's model registry, each with independent auth, quotas, and
+  failure modes. Diagnosing a stall means checking across all of them — the B2 incident above
+  took correlating GitHub Actions job logs with a direct Postgres query to pin down, because
+  neither GitHub's UI nor a cursory log read said "B2 quota" on its own; the actual root cause
+  was one specific error string repeated in the logs and only obvious once counted.
+- **No dedicated monitoring or alerting.** There is no dashboard; the state of a run is
+  whatever's in the GitHub Actions log or whatever a hand-written SQL query against
+  `llm_extractions`/`pages` says at the moment someone looks. This is adequate at current
+  scale and would need revisiting if the pipeline needed to run unattended for long stretches.
+
+## When to revisit
+
+- If the project ever has a budget line, whichever B2 quota is actually behind the 2026-09-10
+  incident (download bandwidth or Class B transaction count — confirm via Caps & Alerts
+  before assuming) is the most likely forcing function to reconsider paid storage tiers or a
+  different provider; the two have different remedies, so pin down which one it is before
+  paying to fix it.
+- If GPU-accelerated inference becomes affordable or necessary for extraction quality, the
+  "Ollama on a CPU runner" choice should be revisited — it was a cost decision, not a belief
+  that CPU inference is the right long-term answer.
+- If the pipeline needs to run unattended for long stretches without a person watching Actions
+  logs, the "no monitoring" gap becomes the priority, not compute or storage choice.
+
+## Front-end hosting (planned, not yet built)
+
+Outside this ADR's original scope (see Scope above — this document covers the pCloud → B2 →
+Postgres pipeline, not anything client-facing), but worth recording here as the current
+direction: whatever front end eventually serves this data is likely to be hosted on **Vercel**,
+on its free tier, rather than GitHub Pages. The reasoning follows the same B2-access-control
+shape as the rest of this document — Vercel's serverless functions can mint short-lived,
+narrowly-scoped download tokens against B2 per request, at whatever granularity a given page
+needs, which a static host like GitHub Pages has no equivalent mechanism for (it can only serve
+whatever's baked into the deployed files). Nothing here is built yet, so this is intent, not an
+accepted decision the way the rest of this document is — it should get its own proper ADR entry
+(or fold into this one) once the front end actually exists.

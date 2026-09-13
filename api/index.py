@@ -20,13 +20,33 @@ workers are running.
 No RLS is configured on these tables yet, so this deliberately never
 accepts a database credential from the browser and never queries Supabase
 via its REST/anon-key path -- only this server-side code, with the
-Transaction-pooler URL, ever touches the database. Put Vercel's own
-Deployment Protection in front of this route (Project Settings ->
-Deployment Protection) since anyone who can reach the URL can currently
-see everything this dashboard shows.
+Transaction-pooler URL, ever touches the database.
+
+Access is gated by a single shared password (see login()/login_required
+below) rather than Vercel Deployment Protection, so it can't rely on
+Vercel-account login. Two env vars are required for this:
+
+  DASHBOARD_PASSWORD  -- the string a visitor must type in at /login.
+                         Never sent back to the browser in any form; only
+                         compared against, server-side, in constant time.
+  SESSION_SECRET_KEY  -- an unrelated random secret Flask uses to sign the
+                         session cookie (via itsdangerous). The cookie it
+                         produces contains only the plaintext claim
+                         {"authenticated": true} plus a signature; the
+                         signature proves the claim wasn't forged without
+                         revealing this key (HMAC is one-way), and the key
+                         itself never appears in the cookie or in any
+                         client-side code. Generate it once with, e.g.,
+                         `python -c "import secrets; print(secrets.token_hex(32))"`
+                         -- it must stay the same across deployments/cold
+                         starts for logins to persist, so it has to come
+                         from an env var rather than being generated at
+                         import time.
 """
+import functools
 import os
 import sys
+from datetime import timedelta
 
 # Vercel's Python runtime imports this file directly by path (see
 # vc_init.py in its traceback), which does not add this file's own
@@ -38,8 +58,10 @@ import sys
 # the entry file is loaded.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import hmac
+
 import psycopg2
-from flask import Flask, render_template
+from flask import Flask, redirect, render_template, request, session, url_for
 
 from queries import fetch_dashboard_data
 
@@ -55,9 +77,73 @@ app = Flask(
     template_folder=os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"),
 )
 
+# app.secret_key is what Flask/itsdangerous signs the session cookie with.
+# Read (not generated) so it's stable across cold starts -- a randomly
+# generated key would invalidate every logged-in session the moment
+# Vercel spins up a fresh instance. Left None if unset rather than raising
+# here: Flask only raises (its own clear "no secret key was set" error)
+# once something actually tries to open/save a session, which keeps
+# /healthz working even if this is misconfigured.
+app.secret_key = os.environ.get("SESSION_SECRET_KEY")
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=True,  # Vercel is HTTPS-only; never send over plain HTTP
+    SESSION_COOKIE_SAMESITE="Lax",
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+)
+
 DB_CONNECT_MAX_ATTEMPTS = 3  # short retry, not the pipeline's 5 -- a
 # dashboard request should fail fast and let the user reload, not hold a
 # serverless invocation open for a long backoff.
+
+
+def _dashboard_password():
+    try:
+        return os.environ["DASHBOARD_PASSWORD"]
+    except KeyError:
+        raise RuntimeError(
+            "DASHBOARD_PASSWORD is not set for this deployment -- add it "
+            "in Vercel's project environment variables."
+        ) from None
+
+
+def login_required(view):
+    @functools.wraps(view)
+    def wrapped(*args, **kwargs):
+        if not session.get("authenticated"):
+            return redirect(url_for("login"))
+        return view(*args, **kwargs)
+
+    return wrapped
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    # Deliberately always redirects to a hardcoded endpoint on success
+    # rather than honoring a caller-supplied "return to this page"
+    # parameter: passing any request-controlled value to redirect() is an
+    # open redirect (an attacker's /login?next=https://evil.example link
+    # would send a visitor on to it right after they type their real
+    # password in), and there's currently only one page behind
+    # login_required anyway, so there's nothing real to return to.
+    error = None
+    if request.method == "POST":
+        submitted = request.form.get("password", "")
+        # compare_digest for constant-time comparison -- a plain `==`
+        # leaks how many leading characters matched via response timing.
+        if submitted and hmac.compare_digest(submitted, _dashboard_password()):
+            session.clear()
+            session["authenticated"] = True
+            session.permanent = True
+            return redirect(url_for("dashboard"))
+        error = "Incorrect password."
+    return render_template("login.html", error=error)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
 
 
 def db_connect():
@@ -93,6 +179,7 @@ def db_connect():
 
 
 @app.route("/")
+@login_required
 def dashboard():
     conn = db_connect()
     try:

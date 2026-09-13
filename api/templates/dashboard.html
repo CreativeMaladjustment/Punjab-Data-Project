@@ -17,10 +17,18 @@
   .failed { color: #a02020; }
   .muted { color: #666; }
   .group-header { background: #e5e5e5; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+  .header-row { display: flex; align-items: baseline; justify-content: space-between; }
+  .logout-form button { font: inherit; color: #666; background: none; border: none; padding: 0;
+                         text-decoration: underline; cursor: pointer; }
 </style>
 </head>
 <body>
-  <h1>Punjab Data Project — processing status</h1>
+  <div class="header-row">
+    <h1>Punjab Data Project — processing status</h1>
+    <form class="logout-form" method="post" action="{{ url_for('logout') }}">
+      <button type="submit">Sign out</button>
+    </form>
+  </div>
   <p class="subtitle">{{ total_pages }} page(s) uploaded and available to process, across all models.</p>
 
   <div class="section">

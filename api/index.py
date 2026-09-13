@@ -59,11 +59,30 @@ from datetime import timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import hmac
+import json
+import math
 
 import psycopg2
-from flask import Flask, redirect, render_template, request, session, url_for
+from flask import Flask, abort, redirect, render_template, request, session, url_for
 
-from queries import fetch_dashboard_data
+from b2 import load_b2_accounts, presigned_image_url
+from queries import (
+    CATALOGUE_ENTRY_BOOL_FIELDS,
+    CATALOGUE_ENTRY_FIELDS,
+    CATALOGUE_ENTRY_INT_FIELDS,
+    CATALOGUE_ENTRY_JSON_FIELDS,
+    fetch_dashboard_data,
+    fetch_qc_page,
+    fetch_table_page,
+    list_columns,
+    list_tables,
+    save_human_edit,
+    save_qc_verdict,
+)
+
+TABLE_PAGE_SIZES = (20, 50, 100)
+EXTRA_BLANK_EDIT_ROWS = 3  # empty rows offered in the QC edit form for adding
+# entries the model missed entirely, on top of however many already exist.
 
 # template_folder is given as an absolute path rather than left to Flask's
 # default __name__-based resolution: that default depends on this module
@@ -187,6 +206,241 @@ def dashboard():
     finally:
         conn.close()
     return render_template("dashboard.html", **data)
+
+
+def _table_or_404(conn, table_name):
+    tables = list_tables(conn)
+    table = next((t for t in tables if t["name"] == table_name), None)
+    if table is None:
+        abort(404)
+    columns = list_columns(conn, table_name)
+    return tables, table, columns
+
+
+@app.route("/tables")
+@login_required
+def tables_index():
+    conn = db_connect()
+    try:
+        tables = list_tables(conn)
+    finally:
+        conn.close()
+    return render_template("tables_list.html", tables=tables)
+
+
+@app.route("/tables/<table_name>")
+@login_required
+def table_view(table_name):
+    try:
+        per_page = int(request.args.get("per_page", 50))
+    except ValueError:
+        per_page = 50
+    if per_page not in TABLE_PAGE_SIZES:
+        per_page = 50
+
+    try:
+        page = int(request.args.get("page", 1))
+    except ValueError:
+        page = 1
+    page = max(page, 1)
+
+    conn = db_connect()
+    try:
+        tables, table, columns = _table_or_404(conn, table_name)
+
+        # Only columns that actually exist on this table are ever looked up
+        # in request.args -- a filter_<col>/sort for anything else is
+        # silently ignored rather than reaching fetch_table_page(), which is
+        # what keeps its psycopg2.sql.Identifier() calls safe despite
+        # table_name/columns ultimately coming from the URL.
+        filters = {}
+        for col in columns:
+            value = request.args.get(f"filter_{col}", "").strip()
+            if value:
+                filters[col] = value
+
+        sort_col = request.args.get("sort")
+        if sort_col not in columns:
+            sort_col = None
+        sort_dir = request.args.get("dir")
+        if sort_dir not in ("asc", "desc"):
+            sort_dir = "asc"
+
+        rows, total = fetch_table_page(conn, table_name, columns, filters, sort_col, sort_dir, page, per_page)
+    finally:
+        conn.close()
+
+    total_pages = max(math.ceil(total / per_page), 1)
+    # Filters only -- sort/dir/page/per_page are passed explicitly wherever
+    # a link is built, since Jinja's default globals don't include dict()
+    # to merge an override in inline.
+    link_params = {f"filter_{c}": v for c, v in filters.items()}
+
+    return render_template(
+        "table_view.html",
+        tables=tables,
+        table=table,
+        table_name=table_name,
+        columns=columns,
+        rows=rows,
+        filters=filters,
+        sort_col=sort_col,
+        sort_dir=sort_dir,
+        page=page,
+        per_page=per_page,
+        total=total,
+        total_pages=total_pages,
+        page_sizes=TABLE_PAGE_SIZES,
+        link_params=link_params,
+    )
+
+
+@app.route("/qc")
+@login_required
+def qc_index():
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT min(id) FROM pages")
+            (first_id,) = cur.fetchone()
+    finally:
+        conn.close()
+    if first_id is None:
+        abort(404)
+    return redirect(url_for("qc_page", page_id=first_id))
+
+
+@app.route("/qc/<int:page_id>")
+@login_required
+def qc_page(page_id):
+    model_tag = request.args.get("model_tag") or None
+    conn = db_connect()
+    try:
+        data = fetch_qc_page(conn, page_id, model_tag)
+    finally:
+        conn.close()
+    if data is None:
+        abort(404)
+
+    # Only checked here to decide whether to render the <img> tag at all --
+    # the tag itself points at /image/<page_id> (see qc_image() below), not
+    # at this URL directly, so the page's HTML never embeds a signed B2
+    # URL: every image load goes through the login-gated proxy and gets a
+    # freshly generated signature, rather than the one computed at the
+    # moment this page happened to render.
+    image_available = (
+        presigned_image_url(
+            load_b2_accounts(), data["page"]["b2_account"], data["page"]["b2_bucket"], data["page"]["image_key"]
+        )
+        is not None
+    )
+    # Continuing an existing correction re-opens exactly what's already
+    # saved for it; starting a fresh one seeds the form from whichever
+    # model's entries are currently selected, so a reviewer edits instead
+    # of retyping a whole page from scratch.
+    prefill_entries = data["human_entries"] or data["entries"]
+
+    return render_template(
+        "qc.html",
+        data=data,
+        image_available=image_available,
+        prefill_entries=prefill_entries,
+        catalogue_fields=CATALOGUE_ENTRY_FIELDS,
+        bool_fields=CATALOGUE_ENTRY_BOOL_FIELDS,
+        json_fields=CATALOGUE_ENTRY_JSON_FIELDS,
+        extra_blank_rows=EXTRA_BLANK_EDIT_ROWS,
+    )
+
+
+@app.route("/image/<int:page_id>")
+@login_required
+def qc_image(page_id):
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT b2_account, b2_bucket, image_key FROM pages WHERE id = %(page_id)s",
+                {"page_id": page_id},
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        abort(404)
+    b2_account, b2_bucket, image_key = row
+    url = presigned_image_url(load_b2_accounts(), b2_account, b2_bucket, image_key)
+    if url is None:
+        abort(502)
+    return redirect(url)
+
+
+@app.route("/qc/verdict", methods=["POST"])
+@login_required
+def qc_verdict():
+    extraction_id = request.form.get("extraction_id", type=int)
+    page_id = request.form.get("page_id", type=int)
+    verdict = request.form.get("verdict")
+    note = request.form.get("note", "").strip()
+    if extraction_id is None or page_id is None or verdict not in ("approved", "needs_reprocessing"):
+        abort(400)
+
+    conn = db_connect()
+    try:
+        save_qc_verdict(conn, extraction_id, verdict, note)
+    finally:
+        conn.close()
+    return redirect(url_for("qc_page", page_id=page_id, model_tag=request.form.get("model_tag") or None))
+
+
+@app.route("/qc/save_edit", methods=["POST"])
+@login_required
+def qc_save_edit():
+    page_id = request.form.get("page_id", type=int)
+    model_tag = request.form.get("model_tag") or None
+    total_rows = request.form.get("total_rows", type=int) or 0
+    if page_id is None:
+        abort(400)
+
+    entries = []
+    for i in range(total_rows):
+        prefix = f"row_{i}_"
+        if request.form.get(prefix + "delete"):
+            continue
+
+        entry = {}
+        has_content = False
+        for field in CATALOGUE_ENTRY_FIELDS:
+            if field in CATALOGUE_ENTRY_BOOL_FIELDS:
+                entry[field] = bool(request.form.get(prefix + field))
+                continue
+
+            raw = request.form.get(prefix + field, "").strip()
+            if raw == "":
+                entry[field] = None
+                continue
+            has_content = True
+            if field in CATALOGUE_ENTRY_INT_FIELDS:
+                try:
+                    entry[field] = int(raw)
+                except ValueError:
+                    entry[field] = None
+            elif field in CATALOGUE_ENTRY_JSON_FIELDS:
+                try:
+                    entry[field] = json.loads(raw)
+                except ValueError:
+                    entry[field] = None
+            else:
+                entry[field] = raw
+
+        if has_content:
+            entries.append(entry)
+
+    conn = db_connect()
+    try:
+        save_human_edit(conn, page_id, entries)
+    finally:
+        conn.close()
+    return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
 
 
 @app.route("/healthz")

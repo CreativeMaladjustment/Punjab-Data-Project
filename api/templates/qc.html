@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>QC review — Punjab Data Project</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  h2 { font-size: 1rem; margin: 0 0 0.5rem; }
+  .header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .header-links { display: flex; align-items: baseline; gap: 1rem; }
+  .header-links a { color: #333; }
+  .subtitle { color: #666; margin: 0.25rem 0 1rem; }
+  .nav-row { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  .nav-row .pager a, .nav-row .pager span { margin-right: 0.5rem; }
+  .tag-tabs a, .tag-tabs span { margin-right: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 3px; }
+  .tag-tabs a { color: #333; text-decoration: none; background: #eee; }
+  .tag-tabs .active { background: #1a1a1a; color: #fff; }
+  .layout { display: flex; gap: 1.5rem; align-items: flex-start; flex-wrap: wrap; }
+  .image-pane { flex: 1 1 22rem; max-width: 32rem; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); padding: 0.75rem; }
+  .image-pane img { width: 100%; height: auto; display: block; }
+  .results-pane { flex: 2 1 26rem; }
+  .card { background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); padding: 1rem; margin-bottom: 1rem; }
+  .muted { color: #999; }
+  .success { color: #1a7a3c; }
+  .failed { color: #a02020; }
+  table.entries { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  table.entries th, table.entries td { border-bottom: 1px solid #eee; padding: 0.3rem 0.5rem; text-align: left;
+    max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  table.entries th { background: #f0f0f0; }
+  pre.raw-text { max-height: 12rem; overflow: auto; background: #f7f7f7; padding: 0.5rem; font-size: 0.8rem;
+    white-space: pre-wrap; word-break: break-word; }
+  .verdict-form textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 0.4rem; margin-bottom: 0.5rem; }
+  .verdict-buttons button { font: inherit; padding: 0.4rem 0.9rem; margin-right: 0.5rem; cursor: pointer; }
+  .btn-approve { background: #1a7a3c; color: #fff; border: none; }
+  .btn-reprocess { background: #a02020; color: #fff; border: none; }
+  .review-history { font-size: 0.8rem; color: #555; }
+  .review-history li { margin-bottom: 0.25rem; }
+  .entry-editor { display: flex; flex-direction: column; gap: 0.75rem; }
+  fieldset.entry-card { border: 1px solid #ddd; padding: 0.75rem; }
+  fieldset.entry-card legend { font-size: 0.85rem; font-weight: 600; padding: 0 0.4rem; }
+  .delete-toggle { font-weight: normal; font-size: 0.8rem; color: #a02020; margin-left: 1rem; }
+  .entry-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: 0.5rem 1rem; }
+  .field { display: flex; flex-direction: column; font-size: 0.75rem; color: #555; }
+  .field input[type="text"], .field textarea { font: inherit; font-size: 0.85rem; color: #1a1a1a;
+    padding: 0.25rem; border: 1px solid #ccc; margin-top: 0.15rem; }
+  .field textarea { resize: vertical; }
+  .save-edit-btn { font: inherit; padding: 0.5rem 1.25rem; margin-top: 0.5rem; cursor: pointer; }
+</style>
+</head>
+<body>
+  <div class="header-row">
+    <h1>QC review</h1>
+    <div class="header-links">
+      <a href="{{ url_for('dashboard') }}">Dashboard</a>
+      <a href="{{ url_for('tables_index') }}">Browse tables</a>
+    </div>
+  </div>
+  <p class="subtitle">
+    {{ data.page.pcloud_folder }}/{{ data.page.pcloud_name }} — page {{ data.page.page_no }}
+    <span class="muted">(page id {{ data.page.id }})</span>
+  </p>
+
+  <div class="nav-row">
+    <span class="pager">
+      {% if data.prev_id %}<a href="{{ url_for('qc_page', page_id=data.prev_id) }}">&laquo; Prev page</a>{% else %}<span class="muted">&laquo; Prev page</span>{% endif %}
+      {% if data.next_id %}<a href="{{ url_for('qc_page', page_id=data.next_id) }}">Next page &raquo;</a>{% else %}<span class="muted">Next page &raquo;</span>{% endif %}
+    </span>
+    <span class="tag-tabs">
+      {% for tag in data.model_tags %}
+        {% if tag == data.selected_tag %}
+          <span class="active">{{ tag }}</span>
+        {% else %}
+          <a href="{{ url_for('qc_page', page_id=data.page.id, model_tag=tag) }}">{{ tag }}</a>
+        {% endif %}
+      {% else %}
+        <span class="muted">No extraction attempts yet for this page.</span>
+      {% endfor %}
+    </span>
+  </div>
+
+  <div class="layout">
+    <div class="image-pane">
+      {% if image_available %}
+        <img src="{{ url_for('qc_image', page_id=data.page.id) }}" alt="Page {{ data.page.page_no }} image">
+      {% else %}
+        <p class="muted">Image unavailable (B2 account "{{ data.page.b2_account }}" isn't configured for this deployment).</p>
+      {% endif %}
+    </div>
+
+    <div class="results-pane">
+      {% if data.extraction %}
+      <div class="card">
+        <h2>Model output — {{ data.selected_tag }}</h2>
+        <p>
+          Status:
+          {% if data.extraction.status == 'success' %}<span class="success">success</span>
+          {% elif data.extraction.status == 'failed' %}<span class="failed">failed{% if data.extraction.content_failure %} (content){% else %} (transient){% endif %}</span>
+          {% else %}{{ data.extraction.status }}{% endif %}
+          <span class="muted">· attempt {{ data.extraction.attempt_count }} · {{ data.extraction.created_at }}</span>
+        </p>
+        {% if data.extraction.error_message %}<p class="failed">{{ data.extraction.error_message }}</p>{% endif %}
+        {% if data.entries %}
+        <div style="overflow-x: auto;">
+          <table class="entries">
+            <thead><tr><th>#</th><th>title</th><th>author</th><th>date</th><th>printed_page</th><th>notes</th></tr></thead>
+            <tbody>
+              {% for e in data.entries %}
+              <tr>
+                <td>{{ e.entry_index }}</td>
+                <td>{{ e.title or '' }}</td>
+                <td>{{ e.author or '' }}</td>
+                <td>{{ e.date or '' }}</td>
+                <td>{{ e.printed_page if e.printed_page is not none else '' }}</td>
+                <td>{{ e.notes or '' }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="muted">No catalogue entries recorded for this extraction.</p>
+        {% endif %}
+      </div>
+
+      {% if data.reviews %}
+      <div class="card">
+        <h2>Review history</h2>
+        <ul class="review-history">
+          {% for r in data.reviews %}
+          <li>
+            <strong>{{ r.verdict }}</strong> — {{ r.created_at }}
+            {% if r.note %}<br>{{ r.note }}{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+
+      <div class="card">
+        <h2>Verdict</h2>
+        <form class="verdict-form" method="post" action="{{ url_for('qc_verdict') }}">
+          <input type="hidden" name="extraction_id" value="{{ data.extraction.id }}">
+          <input type="hidden" name="page_id" value="{{ data.page.id }}">
+          <input type="hidden" name="model_tag" value="{{ data.selected_tag }}">
+          <textarea name="note" rows="2" placeholder="Optional note…"></textarea>
+          <div class="verdict-buttons">
+            <button type="submit" name="verdict" value="approved" class="btn-approve">Looks right</button>
+            <button type="submit" name="verdict" value="needs_reprocessing" class="btn-reprocess">Needs reprocessing</button>
+          </div>
+          <p class="muted" style="font-size: 0.8rem; margin-top: 0.4rem;">
+            "Needs reprocessing" resets this extraction so the extraction worker picks the page back up and retries automatically on its next run.
+          </p>
+        </form>
+      </div>
+      {% else %}
+      <div class="card"><p class="muted">Nothing to review yet -- no extraction has been attempted for this page.</p></div>
+      {% endif %}
+
+      {% if data.ocr_rows %}
+      <div class="card">
+        <h2>Full-page OCR</h2>
+        {% for o in data.ocr_rows %}
+        <p><strong>{{ o.model_tag }}</strong> — {{ o.status }}</p>
+        {% if o.raw_text %}<pre class="raw-text">{{ o.raw_text }}</pre>{% endif %}
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Correction</h2>
+    {% if data.human_extraction %}
+    <p class="muted">Last edited {{ data.human_extraction.created_at }}. Editing below updates this same correction -- it never changes {{ data.selected_tag }}'s own recorded output above.</p>
+    {% else %}
+    <p class="muted">Editing below saves a separate "human-review" record for this page -- it never changes {{ data.selected_tag }}'s own recorded output above.</p>
+    {% endif %}
+    <form method="post" action="{{ url_for('qc_save_edit') }}">
+      <input type="hidden" name="page_id" value="{{ data.page.id }}">
+      <input type="hidden" name="model_tag" value="{{ data.selected_tag }}">
+      <input type="hidden" name="total_rows" value="{{ prefill_entries | length + extra_blank_rows }}">
+      <div class="entry-editor">
+        {% for i in range(prefill_entries | length + extra_blank_rows) %}
+        {% set entry = prefill_entries[i] if i < prefill_entries | length else {} %}
+        <fieldset class="entry-card">
+          <legend>
+            {% if i < prefill_entries | length %}Entry {{ i + 1 }}
+              <label class="delete-toggle"><input type="checkbox" name="row_{{ i }}_delete"> delete this entry</label>
+            {% else %}New entry{% endif %}
+          </legend>
+          <div class="entry-grid">
+            {% for field in catalogue_fields %}
+            <label class="field">
+              <span>{{ field }}</span>
+              {% if field in bool_fields %}
+                <input type="checkbox" name="row_{{ i }}_{{ field }}" {% if entry.get(field) %}checked{% endif %}>
+              {% elif field in json_fields %}
+                <textarea name="row_{{ i }}_{{ field }}" rows="2">{{ (entry.get(field) | tojson) if entry.get(field) is not none else '' }}</textarea>
+              {% else %}
+                <input type="text" name="row_{{ i }}_{{ field }}" value="{{ entry.get(field) if entry.get(field) is not none else '' }}">
+              {% endif %}
+            </label>
+            {% endfor %}
+          </div>
+        </fieldset>
+        {% endfor %}
+      </div>
+      <button type="submit" class="save-edit-btn">Save correction</button>
+    </form>
+  </div>
+</body>
+</html>

@@ -71,14 +71,13 @@ from queries import (
     CATALOGUE_ENTRY_FIELDS,
     CATALOGUE_ENTRY_INT_FIELDS,
     CATALOGUE_ENTRY_JSON_FIELDS,
+    apply_qc_verdict,
     fetch_dashboard_data,
     fetch_qc_page,
     fetch_table_page,
     list_columns,
     list_tables,
-    qc_verdict_target,
     save_human_edit,
-    save_qc_verdict,
 )
 
 TABLE_PAGE_SIZES = (20, 50, 100)
@@ -89,6 +88,10 @@ MAX_EDIT_ROWS = 500  # total_rows arrives as a hidden form field a caller
 # unbounded loop in qc_save_edit() and could tie up a serverless
 # invocation until it times out. Far more than any real page's worth of
 # catalogue entries plus blank rows.
+
+
+def _reject_json_constant(constant):
+    raise ValueError(f"non-standard JSON constant {constant!r} is not allowed")
 
 # template_folder is given as an absolute path rather than left to Flask's
 # default __name__-based resolution: that default depends on this module
@@ -397,7 +400,7 @@ def qc_verdict():
 
     conn = db_connect()
     try:
-        # qc_verdict_target() is also the source of the redirect's page_id
+        # apply_qc_verdict() is also the source of the redirect's page_id
         # and model_tag -- read back from the row itself, rather than
         # whatever the form happened to submit alongside it, both because
         # the form's copies were only ever for display (trusting them
@@ -408,25 +411,23 @@ def qc_verdict():
         # for next=, which was dropped outright rather than validated in
         # place) -- sourcing it from a DB row instead avoids relying on a
         # scanner-specific sanitizer it may not recognize.
-        target = qc_verdict_target(conn, extraction_id)
-        if target is None:
-            abort(404)
-        page_id, model_tag, status, actively_claimed = target
-        if actively_claimed:
-            # A worker could be mid-page on this right now; its own
-            # success/failure write would just overwrite whatever this
-            # verdict sets moments later, silently discarding the
-            # reviewer's "needs reprocessing" reset. There's also nothing
-            # meaningful to approve yet. Reject rather than race it.
-            abort(409)
-        if verdict == "approved" and status != "success":
-            # Only a completed, successful extraction has output worth
-            # signing off on -- a failed or (stale-)claimed row has
-            # nothing to approve.
-            abort(400)
-        save_qc_verdict(conn, extraction_id, verdict, note)
+        result, page_id, model_tag = apply_qc_verdict(conn, extraction_id, verdict, note)
     finally:
         conn.close()
+    if result == "not_found":
+        abort(404)
+    if result == "active_claim":
+        # A worker could be mid-page on this right now; its own
+        # success/failure write would just overwrite whatever this
+        # verdict sets moments later, silently discarding the reviewer's
+        # "needs reprocessing" reset. There's also nothing meaningful to
+        # approve yet. Reject rather than race it.
+        abort(409)
+    if result == "not_success":
+        # Only a completed, successful extraction has output worth
+        # signing off on -- a failed or (stale-)claimed row has nothing
+        # to approve.
+        abort(400)
     return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
 
 
@@ -475,7 +476,14 @@ def qc_save_edit():
                     abort(400, description=f"Entry {i + 1}: '{field}' must be a whole number, got {raw!r}.")
             elif field in CATALOGUE_ENTRY_JSON_FIELDS:
                 try:
-                    entry[field] = json.loads(raw)
+                    # parse_constant rejects Python's json module's
+                    # non-standard NaN/Infinity/-Infinity extension: those
+                    # parse successfully here but psycopg2.extras.Json
+                    # then serializes them as bare (invalid-JSON) tokens
+                    # Postgres's jsonb column rejects at write time -- a
+                    # 500 well after this 400 was supposed to have already
+                    # caught anything unparseable.
+                    entry[field] = json.loads(raw, parse_constant=_reject_json_constant)
                 except ValueError:
                     abort(400, description=f"Entry {i + 1}: '{field}' must be valid JSON, got {raw!r}.")
             else:

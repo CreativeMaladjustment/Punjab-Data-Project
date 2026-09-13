@@ -26,6 +26,13 @@ TOTAL_PAGES_SQL = """
 # Keep in sync if either changes.
 CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60
 
+# model/model_tag a human correction is stored under (see save_human_edit()
+# further down) -- defined up here too since the dashboard queries below
+# need to exclude it: a correction is not a model attempt, and without this
+# exclusion it would show up as its own "model" row on the processing
+# dashboard, with a fake 100%-success rate and its own entry count.
+HUMAN_MODEL_TAG = "human-review"
+
 # One row per model that has ever been run against extract_with_llm.py's
 # structured-entry extraction. status/content_failure mirror the same
 # columns claim_next_page() and process_page() write -- see
@@ -54,16 +61,20 @@ EXTRACTION_SUMMARY_SQL = """
             WHERE status = 'claimed' AND claimed_at < now() - %(claim_timeout)s * interval '1 second'
         ) AS claimed_stale
     FROM llm_extractions
+    WHERE model_tag <> %(human_tag)s
     GROUP BY model_tag
     ORDER BY model_tag
 """
 
 # Total catalogue_entries rows produced per model -- the actual extracted
-# table data, as opposed to how many *pages* succeeded above.
+# table data, as opposed to how many *pages* succeeded above. Excludes
+# HUMAN_MODEL_TAG for the same reason as EXTRACTION_SUMMARY_SQL above --
+# a human correction's entries aren't a model's output.
 ENTRIES_PER_MODEL_SQL = """
     SELECT le.model_tag, count(ce.id) AS total_entries
     FROM catalogue_entries ce
     JOIN llm_extractions le ON le.id = ce.extraction_id
+    WHERE le.model_tag <> %(human_tag)s
     GROUP BY le.model_tag
 """
 
@@ -91,11 +102,11 @@ def fetch_dashboard_data(conn):
         cur.execute(TOTAL_PAGES_SQL)
         (total_pages,) = cur.fetchone()
 
-        cur.execute(EXTRACTION_SUMMARY_SQL, {"claim_timeout": CLAIM_TIMEOUT_SECONDS})
+        cur.execute(EXTRACTION_SUMMARY_SQL, {"claim_timeout": CLAIM_TIMEOUT_SECONDS, "human_tag": HUMAN_MODEL_TAG})
         extraction_cols = [d.name for d in cur.description]
         extraction_rows = [dict(zip(extraction_cols, row)) for row in cur.fetchall()]
 
-        cur.execute(ENTRIES_PER_MODEL_SQL)
+        cur.execute(ENTRIES_PER_MODEL_SQL, {"human_tag": HUMAN_MODEL_TAG})
         entries_by_model = dict(cur.fetchall())
 
         cur.execute(OCR_SUMMARY_SQL)
@@ -215,11 +226,23 @@ def fetch_table_page(conn, table_name, columns, filters, sort_col, sort_dir, pag
         params[key] = f"%{value}%"
     where_sql = psycopg2.sql.SQL(" AND ").join(where_parts) if where_parts else psycopg2.sql.SQL("true")
 
-    order_sql = psycopg2.sql.SQL("")
     if sort_col:
         order_sql = psycopg2.sql.SQL("ORDER BY {} {}").format(
             psycopg2.sql.Identifier(sort_col),
             psycopg2.sql.SQL("DESC" if sort_dir == "desc" else "ASC"),
+        )
+    else:
+        # No explicit sort requested doesn't mean "don't care about order"
+        # -- LIMIT/OFFSET with no ORDER BY at all lets Postgres return rows
+        # in whatever order a given query plan happens to produce, which
+        # isn't guaranteed stable between the page-1 and page-2 requests
+        # that make up one browsing session, and can duplicate or skip
+        # rows across pages as a result. Order by every column as a full-
+        # row tiebreak rather than assuming a primary key column name --
+        # this schema doesn't use one consistently (pcloud_files uses
+        # pcloud_fileid, not id).
+        order_sql = psycopg2.sql.SQL("ORDER BY {}").format(
+            psycopg2.sql.SQL(", ").join(psycopg2.sql.Identifier(c) for c in columns)
         )
 
     with conn.cursor() as cur:
@@ -249,12 +272,6 @@ def fetch_table_page(conn, table_name, columns, filters, sort_col, sort_dir, pag
 # ---------------------------------------------------------------------------
 # QC review page
 # ---------------------------------------------------------------------------
-
-# model/model_tag a human correction is stored under (see save_human_edit())
-# -- distinct from any real Ollama model tag, so it's unambiguous in every
-# view/filter that groups or displays by model_tag, including the
-# dashboard and the generic table browser above.
-HUMAN_MODEL_TAG = "human-review"
 
 # Editable catalogue_entries fields, in schema order, excluding id/
 # extraction_id/entry_index (identity, not something a reviewer edits) and
@@ -375,17 +392,30 @@ def fetch_qc_page(conn, page_id, model_tag=None):
     }
 
 
-def qc_verdict_target(conn, extraction_id):
-    """Look up the (page_id, model_tag) an extraction_id may be verdicted
-    against, plus whether it's currently under an *active* claim. Excludes
-    HUMAN_MODEL_TAG rows entirely -- the QC form never renders a verdict
-    control for a human correction, so an id resolving to one here only
-    happens via a crafted request, and there's no model attempt behind it
-    to judge. Returns None if extraction_id doesn't exist (or is a human
-    row); otherwise (page_id, model_tag, status, actively_claimed).
-    actively_claimed mirrors the dashboard's active/stale split: true only
-    while a worker could plausibly still be mid-page on it, so callers can
-    refuse to act on a row a worker might overwrite moments later.
+def apply_qc_verdict(conn, extraction_id, verdict, note):
+    """Atomically validate and apply a QC verdict against extraction_id.
+    Returns ("ok" | "not_found" | "active_claim" | "not_success", page_id,
+    model_tag) -- page_id/model_tag are None unless the row was found.
+
+    A separate "check, then write" (an earlier version of this function
+    split across qc_verdict_target()/save_qc_verdict()) has a real race:
+    between the check and the write, claim_next_page() could claim the
+    row, and that worker's own later success/failure write -- itself
+    unconditional -- would silently overwrite whatever this function had
+    just set, discarding the reviewer's verdict with no trace. Locking the
+    row with SELECT ... FOR UPDATE for the rest of this transaction closes
+    that window: claim_next_page()'s own claiming step is an
+    `INSERT ... ON CONFLICT (page_id, model_tag) DO UPDATE`, and taking
+    the UPDATE side of that conflict on this same row requires the same
+    row lock this function is already holding, so a concurrent claim
+    attempt simply blocks until this transaction commits (or rolls back)
+    rather than interleaving with it.
+
+    Excludes HUMAN_MODEL_TAG rows entirely -- the QC form never renders a
+    verdict control for a human correction, so an id resolving to one
+    here only happens via a crafted request, and there's no model attempt
+    behind it to judge. 'approved' additionally requires status='success'
+    -- a failed or (still-)claimed row has no output worth signing off on.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -394,38 +424,41 @@ def qc_verdict_target(conn, extraction_id):
                    (status = 'claimed' AND claimed_at >= now() - %(claim_timeout)s * interval '1 second')
             FROM llm_extractions
             WHERE id = %(extraction_id)s AND model_tag <> %(human_tag)s
+            FOR UPDATE
             """,
             {"extraction_id": extraction_id, "human_tag": HUMAN_MODEL_TAG, "claim_timeout": CLAIM_TIMEOUT_SECONDS},
         )
-        return cur.fetchone()
+        row = cur.fetchone()
+        if row is None:
+            conn.rollback()
+            return "not_found", None, None
+        page_id, model_tag, status, actively_claimed = row
+        if actively_claimed:
+            conn.rollback()
+            return "active_claim", page_id, model_tag
+        if verdict == "approved" and status != "success":
+            conn.rollback()
+            return "not_success", page_id, model_tag
 
-
-def save_qc_verdict(conn, extraction_id, verdict, note):
-    """Log a verdict against `extraction_id`. On 'needs_reprocessing', also
-    reset that same llm_extractions row to look like a stale, non-content
-    (i.e. unconditionally reclaimable) failure: status='failed',
-    content_failure=false, claimed_at pushed further into the past than
-    CLAIM_TIMEOUT_SECONDS (the same constant claim_next_page() itself uses
-    for staleness, rather than a separately hardcoded duration that could
-    silently drift out of sync with it). That's exactly the shape
-    claim_next_page()'s CLAIM_NEXT_PAGE_SQL already treats as immediately
-    reclaimable -- see scripts/extract_with_llm.py -- so the existing
-    worker loop picks the page back up and retries on its own next
-    scheduled run; no new pipeline logic needed. raw_response/raw_text/
-    attempt_count are left untouched so the previous (wrong) output stays
-    visible for comparison once the retry completes.
-
-    Callers must have already checked qc_verdict_target() themselves --
-    this function trusts extraction_id and doesn't re-validate status or
-    the active-claim race, since the caller needed that same lookup
-    anyway to know what to redirect back to.
-    """
-    with conn.cursor() as cur:
         cur.execute(
             "INSERT INTO qc_reviews (extraction_id, verdict, note) VALUES (%(extraction_id)s, %(verdict)s, %(note)s)",
             {"extraction_id": extraction_id, "verdict": verdict, "note": note or None},
         )
         if verdict == "needs_reprocessing":
+            # Reset to look like a stale, non-content (i.e. unconditionally
+            # reclaimable) failure: status='failed', content_failure=false,
+            # claimed_at pushed further into the past than
+            # CLAIM_TIMEOUT_SECONDS (the same constant claim_next_page()
+            # itself uses for staleness, rather than a separately hardcoded
+            # duration that could silently drift out of sync with it).
+            # That's exactly the shape claim_next_page()'s
+            # CLAIM_NEXT_PAGE_SQL already treats as immediately reclaimable
+            # -- see scripts/extract_with_llm.py -- so the existing worker
+            # loop picks the page back up and retries on its own next
+            # scheduled run; no new pipeline logic needed.
+            # raw_response/raw_text/attempt_count are left untouched so the
+            # previous (wrong) output stays visible for comparison once
+            # the retry completes.
             cur.execute(
                 """
                 UPDATE llm_extractions
@@ -436,6 +469,7 @@ def save_qc_verdict(conn, extraction_id, verdict, note):
                 {"extraction_id": extraction_id, "claim_timeout": CLAIM_TIMEOUT_SECONDS},
             )
     conn.commit()
+    return "ok", page_id, model_tag
 
 
 def save_human_edit(conn, page_id, entries):

@@ -17,7 +17,9 @@
   .failed { color: #a02020; }
   .muted { color: #666; }
   .group-header { background: #e5e5e5; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
-  .header-row { display: flex; align-items: baseline; justify-content: space-between; }
+  .header-row { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+  .header-links { display: flex; align-items: baseline; gap: 1rem; }
+  .header-links a { color: #333; }
   .logout-form button { font: inherit; color: #666; background: none; border: none; padding: 0;
                          text-decoration: underline; cursor: pointer; }
   .legend { margin-top: 1.5rem; font-size: 0.9rem; background: #fff; padding: 1rem 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
@@ -32,9 +34,13 @@
 <body>
   <div class="header-row">
     <h1>Punjab Data Project — processing status</h1>
-    <form class="logout-form" method="post" action="{{ url_for('logout') }}">
-      <button type="submit">Sign out</button>
-    </form>
+    <div class="header-links">
+      <a href="{{ url_for('qc_index') }}">QC review</a>
+      <a href="{{ url_for('tables_index') }}">Browse tables</a>
+      <form class="logout-form" method="post" action="{{ url_for('logout') }}">
+        <button type="submit">Sign out</button>
+      </form>
+    </div>
   </div>
   <p class="subtitle">{{ total_pages }} page(s) uploaded and available to process, across all models.</p>
 

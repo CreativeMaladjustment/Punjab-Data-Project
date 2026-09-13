@@ -27,6 +27,16 @@ SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60  # see extract_with_llm.py's CLAIM_TIMEOUT_SECONDS
 MAX_ATTEMPTS_PER_PAGE = 2  # see extract_with_llm.py's MAX_ATTEMPTS_PER_PAGE
 
+# Mirrors api/queries.py's HUMAN_MODEL_TAG (same not-imported-directly
+# rationale as the two constants above) -- the QC review dashboard
+# (api/index.py's qc_save_edit()) upserts a row under this tag when a
+# person corrects a page's catalogue entries. It isn't a model attempt at
+# all, so every query below that groups llm_extractions/catalogue_entries
+# by model_tag excludes it -- without this, saving even one correction
+# would make this report show a fake, always-100%-success "model" with
+# its own (fake) catalogue-entry count.
+HUMAN_MODEL_TAG = "human:review"
+
 # One row per model_tag that has ever been attempted, via conditional
 # aggregation (COUNT ... FILTER) rather than one query per bucket -- a
 # single pass over llm_extractions per model_tag instead of eight.
@@ -60,6 +70,7 @@ STATUS_BY_MODEL_SQL = """
         ) as failed_content_capped,
         count(*) filter (where raw_text is not null) as has_raw_text
     from llm_extractions
+    where model_tag <> %(human_tag)s
     group by model_tag
     order by model_tag
 """
@@ -70,6 +81,7 @@ ENTRY_COUNTS_SQL = """
     select le.model_tag, count(*)
     from catalogue_entries ce
     join llm_extractions le on le.id = ce.extraction_id
+    where le.model_tag <> %(human_tag)s
     group by le.model_tag
 """
 
@@ -99,12 +111,12 @@ def fetch_report(conn):
 
         cur.execute(
             STATUS_BY_MODEL_SQL,
-            {"claim_timeout": CLAIM_TIMEOUT_SECONDS, "max_attempts": MAX_ATTEMPTS_PER_PAGE},
+            {"claim_timeout": CLAIM_TIMEOUT_SECONDS, "max_attempts": MAX_ATTEMPTS_PER_PAGE, "human_tag": HUMAN_MODEL_TAG},
         )
         columns = [d.name for d in cur.description]
         by_model = [dict(zip(columns, row)) for row in cur.fetchall()]
 
-        cur.execute(ENTRY_COUNTS_SQL)
+        cur.execute(ENTRY_COUNTS_SQL, {"human_tag": HUMAN_MODEL_TAG})
         entry_counts = dict(cur.fetchall())
 
         cur.execute(TOP_CAPPED_FAILURE_REASONS_SQL, {"max_attempts": MAX_ATTEMPTS_PER_PAGE})

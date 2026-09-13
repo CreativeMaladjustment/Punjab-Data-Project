@@ -59,11 +59,69 @@ from datetime import timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import hmac
+import json
+import math
 
 import psycopg2
-from flask import Flask, redirect, render_template, request, session, url_for
+from flask import Flask, abort, redirect, render_template, request, session, url_for
 
-from queries import fetch_dashboard_data
+from b2 import load_b2_accounts, presigned_image_url
+from queries import (
+    CATALOGUE_ENTRY_BOOL_FIELDS,
+    CATALOGUE_ENTRY_FIELDS,
+    CATALOGUE_ENTRY_INT_FIELDS,
+    CATALOGUE_ENTRY_JSON_FIELDS,
+    apply_qc_verdict,
+    fetch_dashboard_data,
+    fetch_qc_page,
+    fetch_table_page,
+    list_columns,
+    list_tables,
+    save_human_edit,
+)
+
+TABLE_PAGE_SIZES = (20, 50, 100)
+MAX_TABLE_PAGE = 1_000_000  # request.args["page"] is only ever clamped to
+# >= 1 otherwise; an absurd value (or one crafted to overflow) would still
+# reach fetch_table_page() and drive a huge OFFSET -- at best a wasted
+# full-table scan for a request that can only return zero rows, at worst
+# an overflow. A million pages is already far beyond anything this tool
+# would ever legitimately need to page through.
+EXTRA_BLANK_EDIT_ROWS = 3  # empty rows offered in the QC edit form for adding
+# entries the model missed entirely, on top of however many already exist.
+MAX_EDIT_ROWS = 500  # total_rows arrives as a hidden form field a caller
+# fully controls; without a cap, a huge submitted value would drive an
+# unbounded loop in qc_save_edit() and could tie up a serverless
+# invocation until it times out. Far more than any real page's worth of
+# catalogue entries plus blank rows.
+POSTGRES_INT4_MIN = -2_147_483_648
+POSTGRES_INT4_MAX = 2_147_483_647
+
+
+def _reject_json_constant(constant):
+    raise ValueError(f"non-standard JSON constant {constant!r} is not allowed")
+
+
+def _reject_non_finite_numbers(value):
+    # parse_constant (see _reject_json_constant above) only catches the
+    # literal tokens NaN/Infinity/-Infinity appearing in the JSON text --
+    # it does nothing for an ordinary-looking number that merely overflows
+    # float range, like 1e400. Python's json module parses that to
+    # float('inf') without complaint, and psycopg2.extras.Json would then
+    # serialize it as the bare (invalid-JSON) token `Infinity`, which
+    # Postgres's jsonb column rejects at write time -- the same "500 well
+    # after this 400 should have caught it" problem parse_constant alone
+    # doesn't fully close. Walks the parsed structure recursively since
+    # the offending number could be nested inside a list/object.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"non-finite number {value!r} is not allowed")
+    if isinstance(value, dict):
+        for v in value.values():
+            _reject_non_finite_numbers(v)
+    elif isinstance(value, list):
+        for v in value:
+            _reject_non_finite_numbers(v)
+
 
 # template_folder is given as an absolute path rather than left to Flask's
 # default __name__-based resolution: that default depends on this module
@@ -187,6 +245,339 @@ def dashboard():
     finally:
         conn.close()
     return render_template("dashboard.html", **data)
+
+
+def _table_or_404(conn, table_name):
+    tables = list_tables(conn)
+    table = next((t for t in tables if t["name"] == table_name), None)
+    if table is None:
+        abort(404)
+    columns = list_columns(conn, table_name)
+    return tables, table, columns
+
+
+@app.route("/tables")
+@login_required
+def tables_index():
+    conn = db_connect()
+    try:
+        tables = list_tables(conn)
+    finally:
+        conn.close()
+    return render_template("tables_list.html", tables=tables)
+
+
+@app.route("/tables/<table_name>")
+@login_required
+def table_view(table_name):
+    try:
+        per_page = int(request.args.get("per_page", 50))
+    except ValueError:
+        per_page = 50
+    if per_page not in TABLE_PAGE_SIZES:
+        per_page = 50
+
+    try:
+        page = int(request.args.get("page", 1))
+    except ValueError:
+        page = 1
+    page = min(max(page, 1), MAX_TABLE_PAGE)
+
+    conn = db_connect()
+    try:
+        tables, table, columns = _table_or_404(conn, table_name)
+
+        # Only columns that actually exist on this table are ever looked up
+        # in request.args -- a filter_<col>/sort for anything else is
+        # silently ignored rather than reaching fetch_table_page(), which is
+        # what keeps its psycopg2.sql.Identifier() calls safe despite
+        # table_name/columns ultimately coming from the URL.
+        filters = {}
+        for col in columns:
+            value = request.args.get(f"filter_{col}", "").strip()
+            if value:
+                filters[col] = value
+
+        sort_col = request.args.get("sort")
+        if sort_col not in columns:
+            sort_col = None
+        sort_dir = request.args.get("dir")
+        if sort_dir not in ("asc", "desc"):
+            sort_dir = "asc"
+
+        rows, total = fetch_table_page(conn, table_name, columns, filters, sort_col, sort_dir, page, per_page)
+    finally:
+        conn.close()
+
+    total_pages = max(math.ceil(total / per_page), 1)
+    # Filters only -- sort/dir/page/per_page are passed explicitly wherever
+    # a link is built, since Jinja's default globals don't include dict()
+    # to merge an override in inline.
+    link_params = {f"filter_{c}": v for c, v in filters.items()}
+
+    return render_template(
+        "table_view.html",
+        tables=tables,
+        table=table,
+        table_name=table_name,
+        columns=columns,
+        rows=rows,
+        filters=filters,
+        sort_col=sort_col,
+        sort_dir=sort_dir,
+        page=page,
+        per_page=per_page,
+        total=total,
+        total_pages=total_pages,
+        page_sizes=TABLE_PAGE_SIZES,
+        link_params=link_params,
+    )
+
+
+@app.route("/qc")
+@login_required
+def qc_index():
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            # image_uploaded_at IS NOT NULL: a placeholder page with no
+            # image yet has nothing for a reviewer to look at (same
+            # predicate fetch_qc_page()'s own lookup and prev/next use).
+            cur.execute("SELECT min(id) FROM pages WHERE image_uploaded_at IS NOT NULL")
+            (first_id,) = cur.fetchone()
+    finally:
+        conn.close()
+    if first_id is None:
+        abort(404)
+    return redirect(url_for("qc_page", page_id=first_id))
+
+
+@app.route("/qc/<int:page_id>")
+@login_required
+def qc_page(page_id):
+    model_tag = request.args.get("model_tag") or None
+    conn = db_connect()
+    try:
+        data = fetch_qc_page(conn, page_id, model_tag)
+    finally:
+        conn.close()
+    if data is None:
+        abort(404)
+
+    # Only checked here to decide whether to render the <img> tag at all --
+    # the tag itself points at /image/<page_id> (see qc_image() below), not
+    # at this URL directly, so the page's HTML never embeds a signed B2
+    # URL: every image load goes through the login-gated proxy and gets a
+    # freshly generated signature, rather than the one computed at the
+    # moment this page happened to render.
+    image_available = (
+        presigned_image_url(
+            load_b2_accounts(), data["page"]["b2_account"], data["page"]["b2_bucket"], data["page"]["image_key"]
+        )
+        is not None
+    )
+    # Continuing an existing correction re-opens exactly what's already
+    # saved for it; starting a fresh one seeds the form from whichever
+    # model's entries are currently selected, so a reviewer edits instead
+    # of retyping a whole page from scratch. Branches on whether a human
+    # row exists at all, not on human_entries being non-empty -- a
+    # correction that was deliberately edited down to zero entries must
+    # stay empty on reload, not silently resurrect the model's entries.
+    prefill_entries = data["human_entries"] if data["human_extraction"] else data["entries"]
+
+    return render_template(
+        "qc.html",
+        data=data,
+        image_available=image_available,
+        prefill_entries=prefill_entries,
+        catalogue_fields=CATALOGUE_ENTRY_FIELDS,
+        bool_fields=CATALOGUE_ENTRY_BOOL_FIELDS,
+        json_fields=CATALOGUE_ENTRY_JSON_FIELDS,
+        extra_blank_rows=EXTRA_BLANK_EDIT_ROWS,
+    )
+
+
+@app.route("/image/<int:page_id>")
+@login_required
+def qc_image(page_id):
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT b2_account, b2_bucket, image_key FROM pages WHERE id = %(page_id)s",
+                {"page_id": page_id},
+            )
+            row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        abort(404)
+    b2_account, b2_bucket, image_key = row
+    url = presigned_image_url(load_b2_accounts(), b2_account, b2_bucket, image_key)
+    if url is None:
+        abort(502)
+    return redirect(url)
+
+
+@app.route("/qc/verdict", methods=["POST"])
+@login_required
+def qc_verdict():
+    extraction_id = request.form.get("extraction_id", type=int)
+    verdict = request.form.get("verdict")
+    note = request.form.get("note", "").strip()
+    if extraction_id is None or verdict not in ("approved", "needs_reprocessing"):
+        abort(400)
+
+    conn = db_connect()
+    try:
+        # apply_qc_verdict() is also the source of the redirect's page_id
+        # and model_tag -- read back from the row itself, rather than
+        # whatever the form happened to submit alongside it, both because
+        # the form's copies were only ever for display (trusting them
+        # instead could send a reviewer to the wrong page/tab if they
+        # disagreed) and because a value read straight from request.form
+        # still gets flagged reaching redirect() via url_for() even though
+        # url_for() can only ever build a same-origin URL (see PR history
+        # for next=, which was dropped outright rather than validated in
+        # place) -- sourcing it from a DB row instead avoids relying on a
+        # scanner-specific sanitizer it may not recognize.
+        result, page_id, model_tag = apply_qc_verdict(conn, extraction_id, verdict, note)
+    finally:
+        conn.close()
+    if result == "not_found":
+        abort(404)
+    if result == "claimed":
+        # A worker might be mid-page on this right now (or claimed it
+        # long enough ago that it *looks* stale, without proof it's
+        # actually dead) -- either way its own eventual success/failure
+        # write is unconditional and would overwrite whatever this
+        # verdict sets, silently discarding the reviewer's "needs
+        # reprocessing" reset. There's also nothing meaningful to approve
+        # yet. Reject rather than race it; a genuinely stale claim doesn't
+        # need QC's help anyway -- claim_next_page() reclaims it on its
+        # own regardless.
+        abort(409)
+    if result == "not_success":
+        # Only a completed, successful extraction has output worth
+        # signing off on -- a failed or (stale-)claimed row has nothing
+        # to approve.
+        abort(400)
+    return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
+
+
+@app.route("/qc/save_edit", methods=["POST"])
+@login_required
+def qc_save_edit():
+    submitted_page_id = request.form.get("page_id", type=int)
+    submitted_model_tag = request.form.get("model_tag") or None
+    # `... or 0` would treat a missing or malformed total_rows the same as
+    # an explicit, legitimate 0 (which does mean something real: "save
+    # this correction with every entry deleted") -- silently running the
+    # loop zero times either way and committing an empty correction, even
+    # for a request that should have been rejected outright. type=int
+    # already returns None for both "absent" and "not a valid int", so
+    # None is checked explicitly instead of coalescing it away.
+    total_rows = request.form.get("total_rows", type=int)
+    if submitted_page_id is None or total_rows is None:
+        abort(400)
+    if total_rows < 0 or total_rows > MAX_EDIT_ROWS:
+        abort(400)
+
+    entries = []
+    for i in range(total_rows):
+        prefix = f"row_{i}_"
+        if request.form.get(prefix + "delete"):
+            continue
+
+        entry = {}
+        # True for a checked boolean field too, not just a non-blank text
+        # value -- otherwise a row whose only content is a checked
+        # title_native (every text field left blank) reads as "empty" and
+        # gets silently dropped below.
+        has_content = False
+        for field in CATALOGUE_ENTRY_FIELDS:
+            if field in CATALOGUE_ENTRY_BOOL_FIELDS:
+                value = bool(request.form.get(prefix + field))
+                entry[field] = value
+                has_content = has_content or value
+                continue
+
+            raw = request.form.get(prefix + field, "").strip()
+            if raw == "":
+                entry[field] = None
+                continue
+            has_content = True
+            if field in CATALOGUE_ENTRY_INT_FIELDS:
+                try:
+                    value = int(raw)
+                except ValueError:
+                    # Reject rather than silently save NULL: a typo while
+                    # correcting e.g. `serial` would otherwise erase the
+                    # value with no feedback that anything went wrong.
+                    abort(400, description=f"Entry {i + 1}: '{field}' must be a whole number, got {raw!r}.")
+                # Python's int() has no size limit, but pdf_page/
+                # printed_page/serial are Postgres `integer` (32-bit)
+                # columns -- an in-range-for-Python value like
+                # 2147483648 would otherwise reach the INSERT and raise
+                # a raw "integer out of range" error (500) instead of
+                # this same 400.
+                if not (POSTGRES_INT4_MIN <= value <= POSTGRES_INT4_MAX):
+                    abort(400, description=f"Entry {i + 1}: '{field}' is out of range, got {raw!r}.")
+                entry[field] = value
+            elif field in CATALOGUE_ENTRY_JSON_FIELDS:
+                try:
+                    # parse_constant rejects Python's json module's
+                    # non-standard NaN/Infinity/-Infinity extension: those
+                    # parse successfully here but psycopg2.extras.Json
+                    # then serializes them as bare (invalid-JSON) tokens
+                    # Postgres's jsonb column rejects at write time -- a
+                    # 500 well after this 400 was supposed to have already
+                    # caught anything unparseable.
+                    parsed = json.loads(raw, parse_constant=_reject_json_constant)
+                    _reject_non_finite_numbers(parsed)
+                    entry[field] = parsed
+                except ValueError:
+                    abort(400, description=f"Entry {i + 1}: '{field}' must be valid JSON, got {raw!r}.")
+            else:
+                entry[field] = raw
+
+        if has_content:
+            entries.append(entry)
+
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM pages WHERE id = %(page_id)s", {"page_id": submitted_page_id})
+            row = cur.fetchone()
+        if row is None:
+            abort(404)
+        # As in qc_verdict(): the id used for the redirect (and for the
+        # actual write) is read back from the pages row itself, not the
+        # raw submitted value -- closes the same Semgrep open-redirect
+        # finding, and turns what would otherwise be an unhandled foreign-
+        # key IntegrityError on a bogus page_id into a clean 404.
+        (page_id,) = row
+
+        # Same treatment for model_tag, to preserve which tab the reviewer
+        # was on across the redirect without reintroducing the open-
+        # redirect finding: only kept if it actually names a real
+        # extraction on this page, and even then the value used below is
+        # what came back from the query, not the submitted string.
+        model_tag = None
+        if submitted_model_tag:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT model_tag FROM llm_extractions WHERE page_id = %(page_id)s AND model_tag = %(model_tag)s",
+                    {"page_id": page_id, "model_tag": submitted_model_tag},
+                )
+                tag_row = cur.fetchone()
+            if tag_row:
+                (model_tag,) = tag_row
+
+        save_human_edit(conn, page_id, entries)
+    finally:
+        conn.close()
+    return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
 
 
 @app.route("/healthz")

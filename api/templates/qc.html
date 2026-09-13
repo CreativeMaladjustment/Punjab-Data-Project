@@ -64,8 +64,8 @@
 
   <div class="nav-row">
     <span class="pager">
-      {% if data.prev_id %}<a href="{{ url_for('qc_page', page_id=data.prev_id) }}">&laquo; Prev page</a>{% else %}<span class="muted">&laquo; Prev page</span>{% endif %}
-      {% if data.next_id %}<a href="{{ url_for('qc_page', page_id=data.next_id) }}">Next page &raquo;</a>{% else %}<span class="muted">Next page &raquo;</span>{% endif %}
+      {% if data.prev_id %}<a href="{{ url_for('qc_page', page_id=data.prev_id, model_tag=data.selected_tag) }}">&laquo; Prev page</a>{% else %}<span class="muted">&laquo; Prev page</span>{% endif %}
+      {% if data.next_id %}<a href="{{ url_for('qc_page', page_id=data.next_id, model_tag=data.selected_tag) }}">Next page &raquo;</a>{% else %}<span class="muted">Next page &raquo;</span>{% endif %}
     </span>
     <span class="tag-tabs">
       {% for tag in data.model_tags %}
@@ -144,7 +144,9 @@
           <input type="hidden" name="extraction_id" value="{{ data.extraction.id }}">
           <textarea name="note" rows="2" placeholder="Optional note…"></textarea>
           <div class="verdict-buttons">
+            {% if data.extraction.status == 'success' %}
             <button type="submit" name="verdict" value="approved" class="btn-approve">Looks right</button>
+            {% endif %}
             <button type="submit" name="verdict" value="needs_reprocessing" class="btn-reprocess">Needs reprocessing</button>
           </div>
           <p class="muted" style="font-size: 0.8rem; margin-top: 0.4rem;">
@@ -177,6 +179,7 @@
     {% endif %}
     <form method="post" action="{{ url_for('qc_save_edit') }}">
       <input type="hidden" name="page_id" value="{{ data.page.id }}">
+      <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
       <input type="hidden" name="total_rows" value="{{ prefill_entries | length + extra_blank_rows }}">
       <div class="entry-editor">
         {% for i in range(prefill_entries | length + extra_blank_rows) %}

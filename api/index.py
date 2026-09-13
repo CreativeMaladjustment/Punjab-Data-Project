@@ -76,6 +76,7 @@ from queries import (
     fetch_table_page,
     list_columns,
     list_tables,
+    qc_verdict_target,
     save_human_edit,
     save_qc_verdict,
 )
@@ -83,6 +84,11 @@ from queries import (
 TABLE_PAGE_SIZES = (20, 50, 100)
 EXTRA_BLANK_EDIT_ROWS = 3  # empty rows offered in the QC edit form for adding
 # entries the model missed entirely, on top of however many already exist.
+MAX_EDIT_ROWS = 500  # total_rows arrives as a hidden form field a caller
+# fully controls; without a cap, a huge submitted value would drive an
+# unbounded loop in qc_save_edit() and could tie up a serverless
+# invocation until it times out. Far more than any real page's worth of
+# catalogue entries plus blank rows.
 
 # template_folder is given as an absolute path rather than left to Flask's
 # default __name__-based resolution: that default depends on this module
@@ -301,7 +307,10 @@ def qc_index():
     conn = db_connect()
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT min(id) FROM pages")
+            # image_uploaded_at IS NOT NULL: a placeholder page with no
+            # image yet has nothing for a reviewer to look at (same
+            # predicate fetch_qc_page()'s own lookup and prev/next use).
+            cur.execute("SELECT min(id) FROM pages WHERE image_uploaded_at IS NOT NULL")
             (first_id,) = cur.fetchone()
     finally:
         conn.close()
@@ -337,8 +346,11 @@ def qc_page(page_id):
     # Continuing an existing correction re-opens exactly what's already
     # saved for it; starting a fresh one seeds the form from whichever
     # model's entries are currently selected, so a reviewer edits instead
-    # of retyping a whole page from scratch.
-    prefill_entries = data["human_entries"] or data["entries"]
+    # of retyping a whole page from scratch. Branches on whether a human
+    # row exists at all, not on human_entries being non-empty -- a
+    # correction that was deliberately edited down to zero entries must
+    # stay empty on reload, not silently resurrect the model's entries.
+    prefill_entries = data["human_entries"] if data["human_extraction"] else data["entries"]
 
     return render_template(
         "qc.html",
@@ -385,41 +397,48 @@ def qc_verdict():
 
     conn = db_connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT page_id FROM llm_extractions WHERE id = %(extraction_id)s",
-                {"extraction_id": extraction_id},
-            )
-            row = cur.fetchone()
-        if row is None:
+        # qc_verdict_target() is also the source of the redirect's page_id
+        # and model_tag -- read back from the row itself, rather than
+        # whatever the form happened to submit alongside it, both because
+        # the form's copies were only ever for display (trusting them
+        # instead could send a reviewer to the wrong page/tab if they
+        # disagreed) and because a value read straight from request.form
+        # still gets flagged reaching redirect() via url_for() even though
+        # url_for() can only ever build a same-origin URL (see PR history
+        # for next=, which was dropped outright rather than validated in
+        # place) -- sourcing it from a DB row instead avoids relying on a
+        # scanner-specific sanitizer it may not recognize.
+        target = qc_verdict_target(conn, extraction_id)
+        if target is None:
             abort(404)
-        # The redirect target is this extraction's *actual* page_id, read
-        # back from the row itself, rather than whatever page_id the form
-        # happened to submit alongside it -- the form's copy was only ever
-        # for display, and trusting it instead could send a reviewer to
-        # the wrong page if the two ever disagreed. This also closes a
-        # Semgrep open-redirect finding: url_for() can only ever build a
-        # same-origin URL regardless of this value, but a value read
-        # straight from request.form still gets flagged reaching
-        # redirect() through it -- sourcing it from a DB row instead
-        # avoids relying on a scanner-specific sanitizer it may not
-        # recognize (see PR history for next= and model_tag, both of
-        # which were dropped outright rather than validated in place;
-        # page_id can't be dropped the same way since it's the redirect's
-        # whole purpose).
-        (page_id,) = row
+        page_id, model_tag, status, actively_claimed = target
+        if actively_claimed:
+            # A worker could be mid-page on this right now; its own
+            # success/failure write would just overwrite whatever this
+            # verdict sets moments later, silently discarding the
+            # reviewer's "needs reprocessing" reset. There's also nothing
+            # meaningful to approve yet. Reject rather than race it.
+            abort(409)
+        if verdict == "approved" and status != "success":
+            # Only a completed, successful extraction has output worth
+            # signing off on -- a failed or (stale-)claimed row has
+            # nothing to approve.
+            abort(400)
         save_qc_verdict(conn, extraction_id, verdict, note)
     finally:
         conn.close()
-    return redirect(url_for("qc_page", page_id=page_id))
+    return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
 
 
 @app.route("/qc/save_edit", methods=["POST"])
 @login_required
 def qc_save_edit():
     submitted_page_id = request.form.get("page_id", type=int)
+    submitted_model_tag = request.form.get("model_tag") or None
     total_rows = request.form.get("total_rows", type=int) or 0
-    if submitted_page_id is None:
+    if submitted_page_id is None or total_rows < 0:
+        abort(400)
+    if total_rows > MAX_EDIT_ROWS:
         abort(400)
 
     entries = []
@@ -429,10 +448,16 @@ def qc_save_edit():
             continue
 
         entry = {}
+        # True for a checked boolean field too, not just a non-blank text
+        # value -- otherwise a row whose only content is a checked
+        # title_native (every text field left blank) reads as "empty" and
+        # gets silently dropped below.
         has_content = False
         for field in CATALOGUE_ENTRY_FIELDS:
             if field in CATALOGUE_ENTRY_BOOL_FIELDS:
-                entry[field] = bool(request.form.get(prefix + field))
+                value = bool(request.form.get(prefix + field))
+                entry[field] = value
+                has_content = has_content or value
                 continue
 
             raw = request.form.get(prefix + field, "").strip()
@@ -444,12 +469,15 @@ def qc_save_edit():
                 try:
                     entry[field] = int(raw)
                 except ValueError:
-                    entry[field] = None
+                    # Reject rather than silently save NULL: a typo while
+                    # correcting e.g. `serial` would otherwise erase the
+                    # value with no feedback that anything went wrong.
+                    abort(400, description=f"Entry {i + 1}: '{field}' must be a whole number, got {raw!r}.")
             elif field in CATALOGUE_ENTRY_JSON_FIELDS:
                 try:
                     entry[field] = json.loads(raw)
                 except ValueError:
-                    entry[field] = None
+                    abort(400, description=f"Entry {i + 1}: '{field}' must be valid JSON, got {raw!r}.")
             else:
                 entry[field] = raw
 
@@ -469,10 +497,27 @@ def qc_save_edit():
         # finding, and turns what would otherwise be an unhandled foreign-
         # key IntegrityError on a bogus page_id into a clean 404.
         (page_id,) = row
+
+        # Same treatment for model_tag, to preserve which tab the reviewer
+        # was on across the redirect without reintroducing the open-
+        # redirect finding: only kept if it actually names a real
+        # extraction on this page, and even then the value used below is
+        # what came back from the query, not the submitted string.
+        model_tag = None
+        if submitted_model_tag:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT model_tag FROM llm_extractions WHERE page_id = %(page_id)s AND model_tag = %(model_tag)s",
+                    {"page_id": page_id, "model_tag": submitted_model_tag},
+                )
+                tag_row = cur.fetchone()
+            if tag_row:
+                (model_tag,) = tag_row
+
         save_human_edit(conn, page_id, entries)
     finally:
         conn.close()
-    return redirect(url_for("qc_page", page_id=page_id))
+    return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
 
 
 @app.route("/healthz")

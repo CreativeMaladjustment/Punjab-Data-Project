@@ -63,7 +63,7 @@
           </tr>
           <tr class="filter-row">
             {% for col in columns %}
-            <th><input type="text" name="filter_{{ col }}" value="{{ filters.get(col, '') }}" placeholder="filter…"></th>
+            <th><input type="text" name="filter_{{ col }}" value="{{ filters.get(col, '') }}" placeholder="filter…" aria-label="Filter {{ col }}"></th>
             {% endfor %}
           </tr>
         </thead>

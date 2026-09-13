@@ -279,13 +279,19 @@ def fetch_qc_page(conn, page_id, model_tag=None):
     page's OCR text(s), this extraction's review history, and prev/next
     page ids for navigation. Returns None if page_id doesn't exist."""
     with conn.cursor() as cur:
+        # image_uploaded_at IS NOT NULL excludes placeholder pages
+        # process_pcloud.py has recorded but not yet uploaded an image for
+        # -- same predicate the dashboard's TOTAL_PAGES_SQL already uses.
+        # Without it, a direct /qc/<id> hit (or prev/next navigation) could
+        # land on a page with nothing to show and a permanently-broken
+        # image link.
         cur.execute(
             """
             SELECT p.id, p.page_no, p.b2_account, p.b2_bucket, p.image_key,
                    pf.pcloud_fileid, pf.name AS pcloud_name, pf.folder AS pcloud_folder
             FROM pages p
             JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid
-            WHERE p.id = %(page_id)s
+            WHERE p.id = %(page_id)s AND p.image_uploaded_at IS NOT NULL
             """,
             {"page_id": page_id},
         )
@@ -343,9 +349,15 @@ def fetch_qc_page(conn, page_id, model_tag=None):
             rcols = [d.name for d in cur.description]
             reviews = [dict(zip(rcols, r)) for r in cur.fetchall()]
 
-        cur.execute("SELECT min(id) FROM pages WHERE id > %(page_id)s", {"page_id": page_id})
+        cur.execute(
+            "SELECT min(id) FROM pages WHERE id > %(page_id)s AND image_uploaded_at IS NOT NULL",
+            {"page_id": page_id},
+        )
         (next_id,) = cur.fetchone()
-        cur.execute("SELECT max(id) FROM pages WHERE id < %(page_id)s", {"page_id": page_id})
+        cur.execute(
+            "SELECT max(id) FROM pages WHERE id < %(page_id)s AND image_uploaded_at IS NOT NULL",
+            {"page_id": page_id},
+        )
         (prev_id,) = cur.fetchone()
 
     return {
@@ -363,18 +375,50 @@ def fetch_qc_page(conn, page_id, model_tag=None):
     }
 
 
+def qc_verdict_target(conn, extraction_id):
+    """Look up the (page_id, model_tag) an extraction_id may be verdicted
+    against, plus whether it's currently under an *active* claim. Excludes
+    HUMAN_MODEL_TAG rows entirely -- the QC form never renders a verdict
+    control for a human correction, so an id resolving to one here only
+    happens via a crafted request, and there's no model attempt behind it
+    to judge. Returns None if extraction_id doesn't exist (or is a human
+    row); otherwise (page_id, model_tag, status, actively_claimed).
+    actively_claimed mirrors the dashboard's active/stale split: true only
+    while a worker could plausibly still be mid-page on it, so callers can
+    refuse to act on a row a worker might overwrite moments later.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT page_id, model_tag, status,
+                   (status = 'claimed' AND claimed_at >= now() - %(claim_timeout)s * interval '1 second')
+            FROM llm_extractions
+            WHERE id = %(extraction_id)s AND model_tag <> %(human_tag)s
+            """,
+            {"extraction_id": extraction_id, "human_tag": HUMAN_MODEL_TAG, "claim_timeout": CLAIM_TIMEOUT_SECONDS},
+        )
+        return cur.fetchone()
+
+
 def save_qc_verdict(conn, extraction_id, verdict, note):
     """Log a verdict against `extraction_id`. On 'needs_reprocessing', also
     reset that same llm_extractions row to look like a stale, non-content
     (i.e. unconditionally reclaimable) failure: status='failed',
     content_failure=false, claimed_at pushed further into the past than
-    CLAIM_TIMEOUT_SECONDS. That's exactly the shape claim_next_page()'s
-    CLAIM_NEXT_PAGE_SQL already treats as immediately reclaimable -- see
-    scripts/extract_with_llm.py -- so the existing worker loop picks the
-    page back up and retries on its own next scheduled run; no new
-    pipeline logic needed. raw_response/raw_text/attempt_count are left
-    untouched so the previous (wrong) output stays visible for comparison
-    once the retry completes.
+    CLAIM_TIMEOUT_SECONDS (the same constant claim_next_page() itself uses
+    for staleness, rather than a separately hardcoded duration that could
+    silently drift out of sync with it). That's exactly the shape
+    claim_next_page()'s CLAIM_NEXT_PAGE_SQL already treats as immediately
+    reclaimable -- see scripts/extract_with_llm.py -- so the existing
+    worker loop picks the page back up and retries on its own next
+    scheduled run; no new pipeline logic needed. raw_response/raw_text/
+    attempt_count are left untouched so the previous (wrong) output stays
+    visible for comparison once the retry completes.
+
+    Callers must have already checked qc_verdict_target() themselves --
+    this function trusts extraction_id and doesn't re-validate status or
+    the active-claim race, since the caller needed that same lookup
+    anyway to know what to redirect back to.
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -386,10 +430,10 @@ def save_qc_verdict(conn, extraction_id, verdict, note):
                 """
                 UPDATE llm_extractions
                 SET status = 'failed', content_failure = false,
-                    claimed_at = now() - interval '4 hours'
+                    claimed_at = now() - (%(claim_timeout)s + 1) * interval '1 second'
                 WHERE id = %(extraction_id)s
                 """,
-                {"extraction_id": extraction_id},
+                {"extraction_id": extraction_id, "claim_timeout": CLAIM_TIMEOUT_SECONDS},
             )
     conn.commit()
 
@@ -406,11 +450,16 @@ def save_human_edit(conn, page_id, entries):
     Returns the human-review extraction's id.
     """
     with conn.cursor() as cur:
+        # created_at is also bumped on conflict -- there's no separate
+        # updated_at column on this table, and without this the QC page's
+        # "Last edited" display would keep showing the time of the first
+        # correction forever, no matter how many times it's since been
+        # re-edited.
         cur.execute(
             """
             INSERT INTO llm_extractions (page_id, model, model_tag, status)
             VALUES (%(page_id)s, 'human', %(model_tag)s, 'success')
-            ON CONFLICT (page_id, model_tag) DO UPDATE SET status = 'success'
+            ON CONFLICT (page_id, model_tag) DO UPDATE SET status = 'success', created_at = now()
             RETURNING id
             """,
             {"page_id": page_id, "model_tag": HUMAN_MODEL_TAG},

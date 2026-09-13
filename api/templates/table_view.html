@@ -71,7 +71,7 @@
           {% for row in rows %}
           <tr>
             {% for col in columns %}
-            <td title="{{ row[col] if row[col] is not none else '' }}">
+            <td title="{{ (row[col] | string) | truncate(500) if row[col] is not none else '' }}">
               {%- if row[col] is none -%}
                 <span class="muted">—</span>
               {%- else -%}

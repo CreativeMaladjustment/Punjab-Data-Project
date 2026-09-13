@@ -31,7 +31,20 @@ CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60
 # need to exclude it: a correction is not a model attempt, and without this
 # exclusion it would show up as its own "model" row on the processing
 # dashboard, with a fake 100%-success rate and its own entry count.
-HUMAN_MODEL_TAG = "human-review"
+#
+# The colon is load-bearing, not stylistic: extract_with_llm.py derives
+# every real model_tag by slugifying OLLAMA_MODEL through
+# `re.sub(r"[^A-Za-z0-9._-]", "-", OLLAMA_MODEL)`, which replaces any
+# character outside A-Za-z0-9._- with a dash -- so no real pipeline run,
+# whatever OLLAMA_MODEL is set to, can ever produce a model_tag containing
+# a colon. Using "human-review" (all slugify-legal characters) would have
+# meant a real model actually named "human-review" could collide with
+# this reserved tag: its extraction would upsert into the same
+# (page_id, model_tag) row save_human_edit() treats as a correction,
+# silently mixing a person's edits with real model output -- exactly what
+# this feature exists to prevent. The colon closes that off structurally
+# rather than by convention.
+HUMAN_MODEL_TAG = "human:review"
 
 # One row per model that has ever been run against extract_with_llm.py's
 # structured-entry extraction. status/content_failure mirror the same
@@ -394,7 +407,7 @@ def fetch_qc_page(conn, page_id, model_tag=None):
 
 def apply_qc_verdict(conn, extraction_id, verdict, note):
     """Atomically validate and apply a QC verdict against extraction_id.
-    Returns ("ok" | "not_found" | "active_claim" | "not_success", page_id,
+    Returns ("ok" | "not_found" | "claimed" | "not_success", page_id,
     model_tag) -- page_id/model_tag are None unless the row was found.
 
     A separate "check, then write" (an earlier version of this function
@@ -411,31 +424,42 @@ def apply_qc_verdict(conn, extraction_id, verdict, note):
     attempt simply blocks until this transaction commits (or rolls back)
     rather than interleaving with it.
 
+    Any status='claimed' row is rejected outright, regardless of how old
+    claimed_at is -- an earlier version of this check only blocked a claim
+    younger than CLAIM_TIMEOUT_SECONDS, but that staleness cutoff is a
+    heuristic claim_next_page() uses to decide reclaimability, not proof
+    the original worker actually died; a slow-but-still-running worker
+    past the timeout is exactly what claim_next_page() would then also
+    reclaim, and either one's unconditional result write could still
+    overwrite this transaction's reset the moment it lands. Blocking any
+    claimed row costs nothing real: a genuinely stale one doesn't need a
+    QC nudge to get reclaimed, claim_next_page() already treats it as
+    fair game on its own next run.
+
     Excludes HUMAN_MODEL_TAG rows entirely -- the QC form never renders a
     verdict control for a human correction, so an id resolving to one
     here only happens via a crafted request, and there's no model attempt
     behind it to judge. 'approved' additionally requires status='success'
-    -- a failed or (still-)claimed row has no output worth signing off on.
+    -- a failed or claimed row has no output worth signing off on.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT page_id, model_tag, status,
-                   (status = 'claimed' AND claimed_at >= now() - %(claim_timeout)s * interval '1 second')
+            SELECT page_id, model_tag, status
             FROM llm_extractions
             WHERE id = %(extraction_id)s AND model_tag <> %(human_tag)s
             FOR UPDATE
             """,
-            {"extraction_id": extraction_id, "human_tag": HUMAN_MODEL_TAG, "claim_timeout": CLAIM_TIMEOUT_SECONDS},
+            {"extraction_id": extraction_id, "human_tag": HUMAN_MODEL_TAG},
         )
         row = cur.fetchone()
         if row is None:
             conn.rollback()
             return "not_found", None, None
-        page_id, model_tag, status, actively_claimed = row
-        if actively_claimed:
+        page_id, model_tag, status = row
+        if status == "claimed":
             conn.rollback()
-            return "active_claim", page_id, model_tag
+            return "claimed", page_id, model_tag
         if verdict == "approved" and status != "success":
             conn.rollback()
             return "not_success", page_id, model_tag

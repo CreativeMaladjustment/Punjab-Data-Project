@@ -81,6 +81,12 @@ from queries import (
 )
 
 TABLE_PAGE_SIZES = (20, 50, 100)
+MAX_TABLE_PAGE = 1_000_000  # request.args["page"] is only ever clamped to
+# >= 1 otherwise; an absurd value (or one crafted to overflow) would still
+# reach fetch_table_page() and drive a huge OFFSET -- at best a wasted
+# full-table scan for a request that can only return zero rows, at worst
+# an overflow. A million pages is already far beyond anything this tool
+# would ever legitimately need to page through.
 EXTRA_BLANK_EDIT_ROWS = 3  # empty rows offered in the QC edit form for adding
 # entries the model missed entirely, on top of however many already exist.
 MAX_EDIT_ROWS = 500  # total_rows arrives as a hidden form field a caller
@@ -88,10 +94,13 @@ MAX_EDIT_ROWS = 500  # total_rows arrives as a hidden form field a caller
 # unbounded loop in qc_save_edit() and could tie up a serverless
 # invocation until it times out. Far more than any real page's worth of
 # catalogue entries plus blank rows.
+POSTGRES_INT4_MIN = -2_147_483_648
+POSTGRES_INT4_MAX = 2_147_483_647
 
 
 def _reject_json_constant(constant):
     raise ValueError(f"non-standard JSON constant {constant!r} is not allowed")
+
 
 # template_folder is given as an absolute path rather than left to Flask's
 # default __name__-based resolution: that default depends on this module
@@ -251,7 +260,7 @@ def table_view(table_name):
         page = int(request.args.get("page", 1))
     except ValueError:
         page = 1
-    page = max(page, 1)
+    page = min(max(page, 1), MAX_TABLE_PAGE)
 
     conn = db_connect()
     try:
@@ -416,12 +425,16 @@ def qc_verdict():
         conn.close()
     if result == "not_found":
         abort(404)
-    if result == "active_claim":
-        # A worker could be mid-page on this right now; its own
-        # success/failure write would just overwrite whatever this
-        # verdict sets moments later, silently discarding the reviewer's
-        # "needs reprocessing" reset. There's also nothing meaningful to
-        # approve yet. Reject rather than race it.
+    if result == "claimed":
+        # A worker might be mid-page on this right now (or claimed it
+        # long enough ago that it *looks* stale, without proof it's
+        # actually dead) -- either way its own eventual success/failure
+        # write is unconditional and would overwrite whatever this
+        # verdict sets, silently discarding the reviewer's "needs
+        # reprocessing" reset. There's also nothing meaningful to approve
+        # yet. Reject rather than race it; a genuinely stale claim doesn't
+        # need QC's help anyway -- claim_next_page() reclaims it on its
+        # own regardless.
         abort(409)
     if result == "not_success":
         # Only a completed, successful extraction has output worth
@@ -468,12 +481,21 @@ def qc_save_edit():
             has_content = True
             if field in CATALOGUE_ENTRY_INT_FIELDS:
                 try:
-                    entry[field] = int(raw)
+                    value = int(raw)
                 except ValueError:
                     # Reject rather than silently save NULL: a typo while
                     # correcting e.g. `serial` would otherwise erase the
                     # value with no feedback that anything went wrong.
                     abort(400, description=f"Entry {i + 1}: '{field}' must be a whole number, got {raw!r}.")
+                # Python's int() has no size limit, but pdf_page/
+                # printed_page/serial are Postgres `integer` (32-bit)
+                # columns -- an in-range-for-Python value like
+                # 2147483648 would otherwise reach the INSERT and raise
+                # a raw "integer out of range" error (500) instead of
+                # this same 400.
+                if not (POSTGRES_INT4_MIN <= value <= POSTGRES_INT4_MAX):
+                    abort(400, description=f"Entry {i + 1}: '{field}' is out of range, got {raw!r}.")
+                entry[field] = value
             elif field in CATALOGUE_ENTRY_JSON_FIELDS:
                 try:
                     # parse_constant rejects Python's json module's

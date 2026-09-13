@@ -143,7 +143,6 @@
         <form class="verdict-form" method="post" action="{{ url_for('qc_verdict') }}">
           <input type="hidden" name="extraction_id" value="{{ data.extraction.id }}">
           <input type="hidden" name="page_id" value="{{ data.page.id }}">
-          <input type="hidden" name="model_tag" value="{{ data.selected_tag }}">
           <textarea name="note" rows="2" placeholder="Optional note…"></textarea>
           <div class="verdict-buttons">
             <button type="submit" name="verdict" value="approved" class="btn-approve">Looks right</button>
@@ -179,7 +178,6 @@
     {% endif %}
     <form method="post" action="{{ url_for('qc_save_edit') }}">
       <input type="hidden" name="page_id" value="{{ data.page.id }}">
-      <input type="hidden" name="model_tag" value="{{ data.selected_tag }}">
       <input type="hidden" name="total_rows" value="{{ prefill_entries | length + extra_blank_rows }}">
       <div class="entry-editor">
         {% for i in range(prefill_entries | length + extra_blank_rows) %}

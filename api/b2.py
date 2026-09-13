@@ -41,7 +41,7 @@ def b2_client(account):
     )
 
 
-def presigned_image_url(b2_accounts, b2_account, b2_bucket, image_key, expires_in=300):
+def presigned_image_url(b2_accounts, b2_account, b2_bucket, image_key, expires_in=1800):
     """Return a short-lived signed GET URL for a page's image, or None if
     b2_account isn't configured in this deployment. Purely a local
     signature computation (no network call), so a stale/misconfigured

@@ -389,14 +389,20 @@ def qc_verdict():
         save_qc_verdict(conn, extraction_id, verdict, note)
     finally:
         conn.close()
-    return redirect(url_for("qc_page", page_id=page_id, model_tag=request.form.get("model_tag") or None))
+    # Deliberately doesn't carry the submitted model_tag back through the
+    # redirect (fetch_qc_page() already falls back to the page's first
+    # available model_tag on its own) -- same reasoning as login()'s
+    # dropped next= parameter: a request-controlled value reaching
+    # redirect() even by way of url_for()'s query string is still flagged
+    # as an open redirect (see PR history), and there's nothing behind
+    # this route worth preserving that fallback can't already handle.
+    return redirect(url_for("qc_page", page_id=page_id))
 
 
 @app.route("/qc/save_edit", methods=["POST"])
 @login_required
 def qc_save_edit():
     page_id = request.form.get("page_id", type=int)
-    model_tag = request.form.get("model_tag") or None
     total_rows = request.form.get("total_rows", type=int) or 0
     if page_id is None:
         abort(400)
@@ -440,7 +446,9 @@ def qc_save_edit():
         save_human_edit(conn, page_id, entries)
     finally:
         conn.close()
-    return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
+    # See qc_verdict()'s comment -- same reasoning for not carrying
+    # model_tag through this redirect.
+    return redirect(url_for("qc_page", page_id=page_id))
 
 
 @app.route("/healthz")

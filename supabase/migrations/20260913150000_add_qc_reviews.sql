@@ -1,5 +1,5 @@
 -- Backs the dashboard's new QC review page (see api/queries.py's
--- save_qc_verdict()): one row per human verdict on a specific model's
+-- apply_qc_verdict()): one row per human verdict on a specific model's
 -- extraction of a page -- "does this look right, or does it need
 -- reprocessing". Kept as its own append-only log rather than a column on
 -- llm_extractions so re-reviewing the same extraction (e.g. after it's

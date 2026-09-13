@@ -102,6 +102,27 @@ def _reject_json_constant(constant):
     raise ValueError(f"non-standard JSON constant {constant!r} is not allowed")
 
 
+def _reject_non_finite_numbers(value):
+    # parse_constant (see _reject_json_constant above) only catches the
+    # literal tokens NaN/Infinity/-Infinity appearing in the JSON text --
+    # it does nothing for an ordinary-looking number that merely overflows
+    # float range, like 1e400. Python's json module parses that to
+    # float('inf') without complaint, and psycopg2.extras.Json would then
+    # serialize it as the bare (invalid-JSON) token `Infinity`, which
+    # Postgres's jsonb column rejects at write time -- the same "500 well
+    # after this 400 should have caught it" problem parse_constant alone
+    # doesn't fully close. Walks the parsed structure recursively since
+    # the offending number could be nested inside a list/object.
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError(f"non-finite number {value!r} is not allowed")
+    if isinstance(value, dict):
+        for v in value.values():
+            _reject_non_finite_numbers(v)
+    elif isinstance(value, list):
+        for v in value:
+            _reject_non_finite_numbers(v)
+
+
 # template_folder is given as an absolute path rather than left to Flask's
 # default __name__-based resolution: that default depends on this module
 # being registered in sys.modules under a normal dotted name, which
@@ -449,10 +470,17 @@ def qc_verdict():
 def qc_save_edit():
     submitted_page_id = request.form.get("page_id", type=int)
     submitted_model_tag = request.form.get("model_tag") or None
-    total_rows = request.form.get("total_rows", type=int) or 0
-    if submitted_page_id is None or total_rows < 0:
+    # `... or 0` would treat a missing or malformed total_rows the same as
+    # an explicit, legitimate 0 (which does mean something real: "save
+    # this correction with every entry deleted") -- silently running the
+    # loop zero times either way and committing an empty correction, even
+    # for a request that should have been rejected outright. type=int
+    # already returns None for both "absent" and "not a valid int", so
+    # None is checked explicitly instead of coalescing it away.
+    total_rows = request.form.get("total_rows", type=int)
+    if submitted_page_id is None or total_rows is None:
         abort(400)
-    if total_rows > MAX_EDIT_ROWS:
+    if total_rows < 0 or total_rows > MAX_EDIT_ROWS:
         abort(400)
 
     entries = []
@@ -505,7 +533,9 @@ def qc_save_edit():
                     # Postgres's jsonb column rejects at write time -- a
                     # 500 well after this 400 was supposed to have already
                     # caught anything unparseable.
-                    entry[field] = json.loads(raw, parse_constant=_reject_json_constant)
+                    parsed = json.loads(raw, parse_constant=_reject_json_constant)
+                    _reject_non_finite_numbers(parsed)
+                    entry[field] = parsed
                 except ValueError:
                     abort(400, description=f"Entry {i + 1}: '{field}' must be valid JSON, got {raw!r}.")
             else:

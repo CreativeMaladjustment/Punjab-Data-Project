@@ -1,8 +1,8 @@
 """Queries backing the processing dashboard, the generic table browser, and
 the QC review page. The dashboard functions below are plain SELECT/
 aggregate and never write; fetch_table_page() is also read-only. Only the
-QC section (save_qc_verdict, save_human_edit) writes to the database, and
-each does so narrowly: save_qc_verdict() logs a verdict and, on
+QC section (apply_qc_verdict, save_human_edit) writes to the database, and
+each does so narrowly: apply_qc_verdict() logs a verdict and, on
 'needs_reprocessing', resets the *reviewed* llm_extractions row so it's
 reclaimed by the existing worker loop; save_human_edit() never touches an
 existing model's llm_extractions/catalogue_entries rows at all -- it
@@ -239,24 +239,26 @@ def fetch_table_page(conn, table_name, columns, filters, sort_col, sort_dir, pag
         params[key] = f"%{value}%"
     where_sql = psycopg2.sql.SQL(" AND ").join(where_parts) if where_parts else psycopg2.sql.SQL("true")
 
+    # LIMIT/OFFSET with a non-unique ORDER BY key isn't guaranteed stable
+    # between the separate page-1 and page-2 requests that make up one
+    # browsing session -- Postgres is free to return same-key rows in
+    # whatever order a given query plan happens to produce, which can
+    # duplicate or skip rows across pages. That's true whether there's an
+    # explicit sort_col or not, so every other column is always appended
+    # as a full-row tiebreak rather than assuming a primary key column
+    # name (this schema doesn't use one consistently -- pcloud_files uses
+    # pcloud_fileid, not id).
     if sort_col:
-        order_sql = psycopg2.sql.SQL("ORDER BY {} {}").format(
-            psycopg2.sql.Identifier(sort_col),
-            psycopg2.sql.SQL("DESC" if sort_dir == "desc" else "ASC"),
-        )
+        order_parts = [
+            psycopg2.sql.SQL("{} {}").format(
+                psycopg2.sql.Identifier(sort_col),
+                psycopg2.sql.SQL("DESC" if sort_dir == "desc" else "ASC"),
+            )
+        ]
+        order_parts += [psycopg2.sql.Identifier(c) for c in columns if c != sort_col]
     else:
-        # No explicit sort requested doesn't mean "don't care about order"
-        # -- LIMIT/OFFSET with no ORDER BY at all lets Postgres return rows
-        # in whatever order a given query plan happens to produce, which
-        # isn't guaranteed stable between the page-1 and page-2 requests
-        # that make up one browsing session, and can duplicate or skip
-        # rows across pages as a result. Order by every column as a full-
-        # row tiebreak rather than assuming a primary key column name --
-        # this schema doesn't use one consistently (pcloud_files uses
-        # pcloud_fileid, not id).
-        order_sql = psycopg2.sql.SQL("ORDER BY {}").format(
-            psycopg2.sql.SQL(", ").join(psycopg2.sql.Identifier(c) for c in columns)
-        )
+        order_parts = [psycopg2.sql.Identifier(c) for c in columns]
+    order_sql = psycopg2.sql.SQL("ORDER BY {}").format(psycopg2.sql.SQL(", ").join(order_parts))
 
     with conn.cursor() as cur:
         cur.execute(

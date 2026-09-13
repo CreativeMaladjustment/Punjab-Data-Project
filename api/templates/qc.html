@@ -140,9 +140,13 @@
 
       <div class="card">
         <h2>Verdict</h2>
+        {% if data.extraction.status == 'claimed' %}
+        <p class="muted">A worker currently has this extraction claimed, so neither verdict can be applied right now (it would just be overwritten once that worker finishes). Check back after it completes.</p>
+        {% else %}
         <form class="verdict-form" method="post" action="{{ url_for('qc_verdict') }}">
           <input type="hidden" name="extraction_id" value="{{ data.extraction.id }}">
-          <textarea name="note" rows="2" placeholder="Optional note…"></textarea>
+          <label for="qc-note">Note</label>
+          <textarea id="qc-note" name="note" rows="2" placeholder="Optional note…"></textarea>
           <div class="verdict-buttons">
             {% if data.extraction.status == 'success' %}
             <button type="submit" name="verdict" value="approved" class="btn-approve">Looks right</button>
@@ -153,6 +157,7 @@
             "Needs reprocessing" resets this extraction so the extraction worker picks the page back up and retries automatically on its next run.
           </p>
         </form>
+        {% endif %}
       </div>
       {% else %}
       <div class="card"><p class="muted">Nothing to review yet -- no extraction has been attempted for this page.</p></div>
@@ -175,7 +180,7 @@
     {% if data.human_extraction %}
     <p class="muted">Last edited {{ data.human_extraction.created_at }}. Editing below updates this same correction -- it never changes {{ data.selected_tag }}'s own recorded output above.</p>
     {% else %}
-    <p class="muted">Editing below saves a separate "human-review" record for this page -- it never changes {{ data.selected_tag }}'s own recorded output above.</p>
+    <p class="muted">Editing below saves a separate "human:review" record for this page -- it never changes {{ data.selected_tag }}'s own recorded output above.</p>
     {% endif %}
     <form method="post" action="{{ url_for('qc_save_edit') }}">
       <input type="hidden" name="page_id" value="{{ data.page.id }}">

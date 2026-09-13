@@ -142,7 +142,6 @@
         <h2>Verdict</h2>
         <form class="verdict-form" method="post" action="{{ url_for('qc_verdict') }}">
           <input type="hidden" name="extraction_id" value="{{ data.extraction.id }}">
-          <input type="hidden" name="page_id" value="{{ data.page.id }}">
           <textarea name="note" rows="2" placeholder="Optional note…"></textarea>
           <div class="verdict-buttons">
             <button type="submit" name="verdict" value="approved" class="btn-approve">Looks right</button>

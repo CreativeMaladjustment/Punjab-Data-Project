@@ -378,33 +378,48 @@ def qc_image(page_id):
 @login_required
 def qc_verdict():
     extraction_id = request.form.get("extraction_id", type=int)
-    page_id = request.form.get("page_id", type=int)
     verdict = request.form.get("verdict")
     note = request.form.get("note", "").strip()
-    if extraction_id is None or page_id is None or verdict not in ("approved", "needs_reprocessing"):
+    if extraction_id is None or verdict not in ("approved", "needs_reprocessing"):
         abort(400)
 
     conn = db_connect()
     try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT page_id FROM llm_extractions WHERE id = %(extraction_id)s",
+                {"extraction_id": extraction_id},
+            )
+            row = cur.fetchone()
+        if row is None:
+            abort(404)
+        # The redirect target is this extraction's *actual* page_id, read
+        # back from the row itself, rather than whatever page_id the form
+        # happened to submit alongside it -- the form's copy was only ever
+        # for display, and trusting it instead could send a reviewer to
+        # the wrong page if the two ever disagreed. This also closes a
+        # Semgrep open-redirect finding: url_for() can only ever build a
+        # same-origin URL regardless of this value, but a value read
+        # straight from request.form still gets flagged reaching
+        # redirect() through it -- sourcing it from a DB row instead
+        # avoids relying on a scanner-specific sanitizer it may not
+        # recognize (see PR history for next= and model_tag, both of
+        # which were dropped outright rather than validated in place;
+        # page_id can't be dropped the same way since it's the redirect's
+        # whole purpose).
+        (page_id,) = row
         save_qc_verdict(conn, extraction_id, verdict, note)
     finally:
         conn.close()
-    # Deliberately doesn't carry the submitted model_tag back through the
-    # redirect (fetch_qc_page() already falls back to the page's first
-    # available model_tag on its own) -- same reasoning as login()'s
-    # dropped next= parameter: a request-controlled value reaching
-    # redirect() even by way of url_for()'s query string is still flagged
-    # as an open redirect (see PR history), and there's nothing behind
-    # this route worth preserving that fallback can't already handle.
     return redirect(url_for("qc_page", page_id=page_id))
 
 
 @app.route("/qc/save_edit", methods=["POST"])
 @login_required
 def qc_save_edit():
-    page_id = request.form.get("page_id", type=int)
+    submitted_page_id = request.form.get("page_id", type=int)
     total_rows = request.form.get("total_rows", type=int) or 0
-    if page_id is None:
+    if submitted_page_id is None:
         abort(400)
 
     entries = []
@@ -443,11 +458,20 @@ def qc_save_edit():
 
     conn = db_connect()
     try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM pages WHERE id = %(page_id)s", {"page_id": submitted_page_id})
+            row = cur.fetchone()
+        if row is None:
+            abort(404)
+        # As in qc_verdict(): the id used for the redirect (and for the
+        # actual write) is read back from the pages row itself, not the
+        # raw submitted value -- closes the same Semgrep open-redirect
+        # finding, and turns what would otherwise be an unhandled foreign-
+        # key IntegrityError on a bogus page_id into a clean 404.
+        (page_id,) = row
         save_human_edit(conn, page_id, entries)
     finally:
         conn.close()
-    # See qc_verdict()'s comment -- same reasoning for not carrying
-    # model_tag through this redirect.
     return redirect(url_for("qc_page", page_id=page_id))
 
 

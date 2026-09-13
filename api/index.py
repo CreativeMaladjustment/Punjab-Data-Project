@@ -59,6 +59,7 @@ from datetime import timedelta
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import hmac
+from urllib.parse import urlsplit
 
 import psycopg2
 from flask import Flask, redirect, render_template, request, session, url_for
@@ -107,6 +108,22 @@ def _dashboard_password():
         ) from None
 
 
+def _safe_next_path(candidate):
+    # `next` comes straight from the query string, so passing it to
+    # redirect() unchecked is an open redirect: an attacker sends someone
+    # a link like /login?next=https://evil.example and, after they type
+    # their real password in, we'd send them straight on to it. Only
+    # accept a same-origin, relative path -- reject anything with a
+    # scheme or netloc, and reject "//host/path" (browsers treat a
+    # leading "//" as protocol-relative, i.e. still a different origin).
+    if not candidate or not candidate.startswith("/") or candidate.startswith("//"):
+        return None
+    parsed = urlsplit(candidate)
+    if parsed.scheme or parsed.netloc:
+        return None
+    return candidate
+
+
 def login_required(view):
     @functools.wraps(view)
     def wrapped(*args, **kwargs):
@@ -128,7 +145,8 @@ def login():
             session.clear()
             session["authenticated"] = True
             session.permanent = True
-            return redirect(request.args.get("next") or url_for("dashboard"))
+            next_path = _safe_next_path(request.args.get("next"))
+            return redirect(next_path or url_for("dashboard"))
         error = "Incorrect password."
     return render_template("login.html", error=error)
 

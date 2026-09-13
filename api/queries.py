@@ -9,11 +9,27 @@ TOTAL_PAGES_SQL = """
     SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL
 """
 
+# Mirrors extract_with_llm.py's CLAIM_TIMEOUT_SECONDS (not imported from
+# there directly, same rationale as scripts/extraction_status.py: that
+# module does real work at import time -- connecting to B2, requiring
+# OLLAMA_MODEL -- that this read-only dashboard has no reason to need).
+# Keep in sync if either changes.
+CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60
+
 # One row per model that has ever been run against extract_with_llm.py's
 # structured-entry extraction. status/content_failure mirror the same
 # columns claim_next_page() and process_page() write -- see
 # scripts/extract_with_llm.py and supabase/migrations/
 # 20260911120000_add_raw_text_and_attempt_cap.sql for what each means.
+#
+# 'claimed' is split into active/stale rather than counted as one
+# "in progress" bucket: a worker that dies mid-page leaves its claim
+# behind for CLAIM_TIMEOUT_SECONDS before another worker (or this one,
+# next run) reclaims it (see claim_next_page()) -- scripts/
+# extraction_status.py already makes this same active/stale distinction
+# for exactly that reason, and folding both into one count here would
+# show abandoned work as "in progress" for up to 3 hours after the
+# worker that claimed it actually died.
 EXTRACTION_SUMMARY_SQL = """
     SELECT
         model_tag,
@@ -21,7 +37,12 @@ EXTRACTION_SUMMARY_SQL = """
         count(*) FILTER (WHERE status = 'success') AS success,
         count(*) FILTER (WHERE status = 'failed' AND content_failure) AS content_failed,
         count(*) FILTER (WHERE status = 'failed' AND NOT content_failure) AS transient_failed,
-        count(*) FILTER (WHERE status = 'claimed') AS in_progress
+        count(*) FILTER (
+            WHERE status = 'claimed' AND claimed_at >= now() - %(claim_timeout)s * interval '1 second'
+        ) AS claimed_active,
+        count(*) FILTER (
+            WHERE status = 'claimed' AND claimed_at < now() - %(claim_timeout)s * interval '1 second'
+        ) AS claimed_stale
     FROM llm_extractions
     GROUP BY model_tag
     ORDER BY model_tag
@@ -60,7 +81,7 @@ def fetch_dashboard_data(conn):
         cur.execute(TOTAL_PAGES_SQL)
         (total_pages,) = cur.fetchone()
 
-        cur.execute(EXTRACTION_SUMMARY_SQL)
+        cur.execute(EXTRACTION_SUMMARY_SQL, {"claim_timeout": CLAIM_TIMEOUT_SECONDS})
         extraction_cols = [d.name for d in cur.description]
         extraction_rows = [dict(zip(extraction_cols, row)) for row in cur.fetchall()]
 
@@ -80,7 +101,8 @@ def fetch_dashboard_data(conn):
             "extraction_success": row["success"],
             "extraction_content_failed": row["content_failed"],
             "extraction_transient_failed": row["transient_failed"],
-            "extraction_in_progress": row["in_progress"],
+            "extraction_claimed_active": row["claimed_active"],
+            "extraction_claimed_stale": row["claimed_stale"],
             "total_entries": entries_by_model.get(tag, 0),
             "ocr_attempted": 0,
             "ocr_success": 0,
@@ -96,7 +118,8 @@ def fetch_dashboard_data(conn):
                 "extraction_success": 0,
                 "extraction_content_failed": 0,
                 "extraction_transient_failed": 0,
-                "extraction_in_progress": 0,
+                "extraction_claimed_active": 0,
+                "extraction_claimed_stale": 0,
                 "total_entries": 0,
                 "ocr_attempted": 0,
                 "ocr_success": 0,

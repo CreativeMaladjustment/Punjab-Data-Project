@@ -15,7 +15,7 @@
   .section { margin-top: 2rem; }
   .success { color: #1a7a3c; }
   .failed { color: #a02020; }
-  .muted { color: #999; }
+  .muted { color: #666; }
   .group-header { background: #e5e5e5; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
 </style>
 </head>
@@ -28,7 +28,7 @@
       <thead>
         <tr>
           <th rowspan="2">Model</th>
-          <th colspan="5" class="group-header">Catalogue-entry extraction (partial/table data)</th>
+          <th colspan="6" class="group-header">Catalogue-entry extraction (partial/table data)</th>
           <th colspan="3" class="group-header">Full-page OCR</th>
         </tr>
         <tr>
@@ -36,7 +36,8 @@
           <th>Success</th>
           <th>Content&nbsp;failed</th>
           <th>Transient&nbsp;failed</th>
-          <th>In&nbsp;progress</th>
+          <th>Claimed&nbsp;(active)</th>
+          <th>Claimed&nbsp;(stale)</th>
           <th>Attempted</th>
           <th>Success</th>
           <th>Failed</th>
@@ -50,13 +51,14 @@
           <td class="success">{{ m.extraction_success }} <span class="muted">({{ m.total_entries }} entries)</span></td>
           <td class="failed">{{ m.extraction_content_failed }}</td>
           <td class="muted">{{ m.extraction_transient_failed }}</td>
-          <td class="muted">{{ m.extraction_in_progress }}</td>
+          <td class="muted">{{ m.extraction_claimed_active }}</td>
+          <td class="failed">{{ m.extraction_claimed_stale }}</td>
           <td>{{ m.ocr_attempted }}</td>
           <td class="success">{{ m.ocr_success }}</td>
           <td class="failed">{{ m.ocr_failed }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="9" class="muted">No extraction runs recorded yet.</td></tr>
+        <tr><td colspan="10" class="muted">No extraction runs recorded yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>

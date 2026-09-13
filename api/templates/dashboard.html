@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Processing status — Punjab Data Project</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 2rem; color: #1a1a1a; background: #fafafa; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  .subtitle { color: #666; margin-bottom: 1.5rem; }
+  table { border-collapse: collapse; width: 100%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  th, td { padding: 0.5rem 0.75rem; text-align: right; border-bottom: 1px solid #eee; white-space: nowrap; }
+  th { background: #f0f0f0; text-align: right; font-size: 0.85rem; }
+  th:first-child, td:first-child { text-align: left; font-weight: 600; }
+  .section { margin-top: 2rem; }
+  .success { color: #1a7a3c; }
+  .failed { color: #a02020; }
+  .muted { color: #666; }
+  .group-header { background: #e5e5e5; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+</style>
+</head>
+<body>
+  <h1>Punjab Data Project — processing status</h1>
+  <p class="subtitle">{{ total_pages }} page(s) uploaded and available to process, across all models.</p>
+
+  <div class="section">
+    <table>
+      <thead>
+        <tr>
+          <th rowspan="2">Model</th>
+          <th colspan="6" class="group-header">Catalogue-entry extraction (partial/table data)</th>
+          <th colspan="3" class="group-header">Full-page OCR</th>
+        </tr>
+        <tr>
+          <th>Attempted</th>
+          <th>Success</th>
+          <th>Content&nbsp;failed</th>
+          <th>Transient&nbsp;failed</th>
+          <th>Claimed&nbsp;(active)</th>
+          <th>Claimed&nbsp;(stale)</th>
+          <th>Attempted</th>
+          <th>Success</th>
+          <th>Failed</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in models %}
+        <tr>
+          <td>{{ m.model_tag }}</td>
+          <td>{{ m.extraction_attempted }}</td>
+          <td class="success">{{ m.extraction_success }} <span class="muted">({{ m.total_entries }} entries)</span></td>
+          <td class="failed">{{ m.extraction_content_failed }}</td>
+          <td class="muted">{{ m.extraction_transient_failed }}</td>
+          <td class="muted">{{ m.extraction_claimed_active }}</td>
+          <td class="failed">{{ m.extraction_claimed_stale }}</td>
+          <td>{{ m.ocr_attempted }}</td>
+          <td class="success">{{ m.ocr_success }}</td>
+          <td class="failed">{{ m.ocr_failed }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="10" class="muted">No extraction runs recorded yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>

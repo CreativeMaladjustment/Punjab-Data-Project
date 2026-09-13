@@ -20,6 +20,13 @@
   .header-row { display: flex; align-items: baseline; justify-content: space-between; }
   .logout-form button { font: inherit; color: #666; background: none; border: none; padding: 0;
                          text-decoration: underline; cursor: pointer; }
+  .legend { margin-top: 1.5rem; font-size: 0.9rem; background: #fff; padding: 1rem 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  .legend h2 { font-size: 0.95rem; margin: 0 0 0.75rem; }
+  .legend h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; color: #666; margin: 1rem 0 0.4rem; }
+  .legend h3:first-of-type { margin-top: 0; }
+  .legend dl { margin: 0; }
+  .legend dt { font-weight: 600; margin-top: 0.5rem; }
+  .legend dd { margin: 0.15rem 0 0; color: #333; }
 </style>
 </head>
 <body>
@@ -70,6 +77,37 @@
         {% endfor %}
       </tbody>
     </table>
+  </div>
+
+  <div class="legend">
+    <h2>What these columns mean</h2>
+
+    <h3>Catalogue-entry extraction (partial/table data)</h3>
+    <dl>
+      <dt>Attempted</dt>
+      <dd>Every page ever claimed for this model — the sum of every other column in this group.</dd>
+
+      <dt>Success</dt>
+      <dd>The model responded and its output parsed into a valid entry list. This includes pages the model correctly judged to have <em>no</em> catalogue entries (a cover, blank, or title page) — those succeed with zero entries, not a failure. The "(N entries)" figure is how many actual catalogue rows came out of the successful pages.</dd>
+
+      <dt>Content&nbsp;failed</dt>
+      <dd>The model <em>did</em> respond, but its response couldn't be parsed into the expected shape — malformed JSON, wrong structure, hallucinated fields. This is a model-output-quality problem, not a statement about the page itself (it does not mean "no text" or "don't look at this page again"). Each page gets up to 2 attempts total; once both fail this way, the page stops being reclaimed automatically and needs manual review or a different model.</dd>
+
+      <dt>Transient&nbsp;failed</dt>
+      <dd>Something failed <em>before</em> the model ever produced usable output, or after — a B2/network error fetching the image, a bad HTTP response from the model server, an unconfigured storage account, or a database error saving the result. Not the model's fault, and not capped: these keep getting retried on every future run indefinitely.</dd>
+
+      <dt>Claimed&nbsp;(active)</dt>
+      <dd>A worker currently has this page checked out and is presumably still working on it.</dd>
+
+      <dt>Claimed&nbsp;(stale)</dt>
+      <dd>A worker claimed this page but never recorded an outcome — most likely it crashed or the run was cancelled mid-page. Past the claim timeout, so it's eligible to be picked up again automatically; it isn't stuck.</dd>
+    </dl>
+
+    <h3>Full-page OCR</h3>
+    <dl>
+      <dt>Attempted / Success / Failed</dt>
+      <dd>A separate, independent pass that transcribes everything visible on the page — headers and other page furniture included, not just catalogue entries. Its outcome has no bearing on the extraction columns above, or vice versa: a page can succeed at one and fail the other.</dd>
+    </dl>
   </div>
 </body>
 </html>

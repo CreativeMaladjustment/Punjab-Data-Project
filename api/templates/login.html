@@ -20,7 +20,7 @@
 </style>
 </head>
 <body>
-  <form method="post" action="{{ url_for('login', next=request.args.get('next')) }}">
+  <form method="post" action="{{ url_for('login') }}">
     <h1>Punjab Data Project — processing status</h1>
     {% if error %}<p class="error">{{ error }}</p>{% endif %}
     <label for="password">Password</label>

@@ -26,13 +26,34 @@ Deployment Protection) since anyone who can reach the URL can currently
 see everything this dashboard shows.
 """
 import os
+import sys
+
+# Vercel's Python runtime imports this file directly by path (see
+# vc_init.py in its traceback), which does not add this file's own
+# directory to sys.path the way running `python index.py` normally would
+# -- confirmed in production logs as `ModuleNotFoundError: No module named
+# 'queries'` even though the exact same import works fine when run
+# locally (where sys.path already includes the script's directory).
+# Adding it explicitly makes the sibling import work regardless of how
+# the entry file is loaded.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import psycopg2
 from flask import Flask, render_template
 
 from queries import fetch_dashboard_data
 
-app = Flask(__name__)
+# template_folder is given as an absolute path rather than left to Flask's
+# default __name__-based resolution: that default depends on this module
+# being registered in sys.modules under a normal dotted name, which
+# Vercel's importlib-by-path loading (see the sys.path comment above)
+# doesn't guarantee -- confirmed locally by reproducing that exact load
+# path, which raised jinja2.exceptions.TemplateNotFound even after fixing
+# the `queries` import.
+app = Flask(
+    __name__,
+    template_folder=os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"),
+)
 
 DB_CONNECT_MAX_ATTEMPTS = 3  # short retry, not the pipeline's 5 -- a
 # dashboard request should fail fast and let the user reload, not hold a

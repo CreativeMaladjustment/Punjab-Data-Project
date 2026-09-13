@@ -1,0 +1,17 @@
+# By default Vercel bundles the entire repo into every serverless
+# function's deployment package. The api/ Flask app (see api/index.py)
+# needs nothing outside api/ and the root requirements.txt at runtime --
+# everything below is either GitHub Pages/pipeline/analysis content that
+# has nothing to do with the dashboard, or would just bloat the function
+# for no reason.
+#
+# docs/pages/ alone is ~258MB (the GitHub Pages catalog viewer's page
+# images) and was the actual cause of the first deploy's "Total bundle
+# size (328.10 MB) exceeds the maximum function size (225 MB)" failure --
+# none of it is imported by api/index.py or api/queries.py.
+docs/
+pipeline/
+analysis/
+dialectic/
+scripts/
+supabase/

@@ -34,20 +34,36 @@ from queries import fetch_dashboard_data
 
 app = Flask(__name__)
 
-SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
-
 DB_CONNECT_MAX_ATTEMPTS = 3  # short retry, not the pipeline's 5 -- a
 # dashboard request should fail fast and let the user reload, not hold a
 # serverless invocation open for a long backoff.
 
 
 def db_connect():
+    # Read at call time, not at module import: Vercel's Python builder
+    # imports this file to find the WSGI `app` object, and raising here
+    # (as a bare os.environ[...] at module level would, if the env var
+    # isn't set for this deployment's environment -- e.g. added for
+    # Production but not Preview) would abort the whole build with an
+    # opaque "Error" status instead of a clear message on the one request
+    # that actually needs it.
+    try:
+        db_url = os.environ["SUPABASE_DB_URL"]
+    except KeyError:
+        raise RuntimeError(
+            "SUPABASE_DB_URL is not set for this deployment -- add it in "
+            "Vercel's project environment variables (Supabase's "
+            "Transaction-mode pooler connection string, port 6543), making "
+            "sure it's enabled for this deployment's environment "
+            "(Production/Preview/Development)."
+        ) from None
+
     import time
 
     last_exc = None
     for attempt in range(1, DB_CONNECT_MAX_ATTEMPTS + 1):
         try:
-            return psycopg2.connect(SUPABASE_DB_URL)
+            return psycopg2.connect(db_url)
         except psycopg2.OperationalError as exc:
             last_exc = exc
             if attempt < DB_CONNECT_MAX_ATTEMPTS:

@@ -19,12 +19,13 @@ TOTAL_PAGES_SQL = """
     SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL
 """
 
-# Mirrors extract_with_llm.py's CLAIM_TIMEOUT_SECONDS (not imported from
-# there directly, same rationale as scripts/extraction_status.py: that
-# module does real work at import time -- connecting to B2, requiring
-# OLLAMA_MODEL -- that this read-only dashboard has no reason to need).
-# Keep in sync if either changes.
+# Mirrors extract_with_llm.py's CLAIM_TIMEOUT_SECONDS/MAX_ATTEMPTS_PER_PAGE
+# (not imported from there directly, same rationale as
+# scripts/extraction_status.py: that module does real work at import time
+# -- connecting to B2, requiring OLLAMA_MODEL -- that this read-only
+# dashboard has no reason to need). Keep in sync if either changes.
 CLAIM_TIMEOUT_SECONDS = 3 * 60 * 60
+MAX_ATTEMPTS_PER_PAGE = 2
 
 # model/model_tag a human correction is stored under (see save_human_edit()
 # further down) -- defined up here too since the dashboard queries below
@@ -72,7 +73,16 @@ EXTRACTION_SUMMARY_SQL = """
         ) AS claimed_active,
         count(*) FILTER (
             WHERE status = 'claimed' AND claimed_at < now() - %(claim_timeout)s * interval '1 second'
-        ) AS claimed_stale
+        ) AS claimed_stale,
+        -- Subset of content_failed that claim_next_page() will still
+        -- reclaim on its own (attempt_count hasn't hit the cap yet) --
+        -- see MAX_ATTEMPTS_PER_PAGE. Needed to compute "remaining" below:
+        -- a *capped* content failure needs a person or a different model,
+        -- not another automatic retry, so it must not count as remaining
+        -- work the pipeline will still get to on its own.
+        count(*) FILTER (
+            WHERE status = 'failed' AND content_failure AND attempt_count < %(max_attempts)s
+        ) AS content_failed_retryable
     FROM llm_extractions
     WHERE model_tag <> %(human_tag)s
     GROUP BY model_tag
@@ -115,7 +125,10 @@ def fetch_dashboard_data(conn):
         cur.execute(TOTAL_PAGES_SQL)
         (total_pages,) = cur.fetchone()
 
-        cur.execute(EXTRACTION_SUMMARY_SQL, {"claim_timeout": CLAIM_TIMEOUT_SECONDS, "human_tag": HUMAN_MODEL_TAG})
+        cur.execute(
+            EXTRACTION_SUMMARY_SQL,
+            {"claim_timeout": CLAIM_TIMEOUT_SECONDS, "human_tag": HUMAN_MODEL_TAG, "max_attempts": MAX_ATTEMPTS_PER_PAGE},
+        )
         extraction_cols = [d.name for d in cur.description]
         extraction_rows = [dict(zip(extraction_cols, row)) for row in cur.fetchall()]
 
@@ -137,6 +150,22 @@ def fetch_dashboard_data(conn):
             "extraction_transient_failed": row["transient_failed"],
             "extraction_claimed_active": row["claimed_active"],
             "extraction_claimed_stale": row["claimed_stale"],
+            # Mirrors scripts/extraction_status.py's own "remaining"
+            # definition: never-attempted pages (assuming this model will
+            # eventually run against every uploaded page) + stale claims +
+            # transient failures + under-cap content failures -- every
+            # page still eligible to be picked up and retried
+            # automatically, either by a fresh claim or the pipeline's
+            # next run, with no person needing to do anything first. A
+            # *capped* content failure is deliberately excluded: it won't
+            # move again on its own (see extraction_content_failed's own
+            # legend entry), so it isn't "remaining" in that sense.
+            "remaining": (
+                (total_pages - row["total_attempted"])
+                + row["claimed_stale"]
+                + row["transient_failed"]
+                + row["content_failed_retryable"]
+            ),
             "total_entries": entries_by_model.get(tag, 0),
             "ocr_attempted": 0,
             "ocr_success": 0,
@@ -154,6 +183,10 @@ def fetch_dashboard_data(conn):
                 "extraction_transient_failed": 0,
                 "extraction_claimed_active": 0,
                 "extraction_claimed_stale": 0,
+                # No extraction attempted at all yet for this model (it
+                # only shows up here via the OCR pass) -- every uploaded
+                # page is still remaining work for it.
+                "remaining": total_pages,
                 "total_entries": 0,
                 "ocr_attempted": 0,
                 "ocr_success": 0,

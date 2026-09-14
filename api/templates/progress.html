@@ -1,0 +1,173 @@
+{% extends "_layout.html" %}
+{% block title %}Processing progress — Punjab Data Project{% endblock %}
+{% block extra_style %}
+  main { max-width: 1180px; margin: 0 auto; padding: 48px 32px 96px; }
+  .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 24px; flex-wrap: wrap; margin-bottom: 8px; }
+  .page-head h1 { font: 400 30px/1.2 "IBM Plex Serif", Georgia, serif; margin: 0; }
+  .page-head .live-tag { font: 400 12px/1 "IBM Plex Mono", monospace; color: var(--muted); }
+  .page-head .logout-form button {
+    font: 400 12px/1 "IBM Plex Mono", monospace; color: var(--muted); background: none; border: none;
+    padding: 0; text-decoration: underline; cursor: pointer;
+  }
+  .lede { font: 400 15px/1.6 "IBM Plex Sans", sans-serif; color: var(--body-text); margin: 0 0 40px; max-width: 70ch; }
+
+  section.block { margin-bottom: 48px; }
+  section.block h2 {
+    font: 500 12px/1 "IBM Plex Mono", monospace;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 20px;
+  }
+
+  .model-list { display: flex; flex-direction: column; gap: 1px; background: var(--border); border: 1px solid var(--border); }
+  .model-row {
+    background: var(--panel);
+    padding: 20px 24px;
+    display: grid;
+    grid-template-columns: 190px 1fr 120px;
+    gap: 24px;
+    align-items: center;
+  }
+  .model-tag { font: 500 14px/1.3 "IBM Plex Mono", monospace; }
+  .model-role { font: 400 11.5px/1.4 "IBM Plex Sans", sans-serif; color: var(--muted); margin-top: 5px; }
+  .bar { height: 22px; background: #ece5d8; display: flex; overflow: hidden; }
+  .bar .done { background: var(--green); }
+  .bar .fail { background: var(--brick); }
+  .bar-legend { display: flex; gap: 18px; margin-top: 9px; font: 400 11.5px/1 "IBM Plex Sans", sans-serif; color: var(--muted); flex-wrap: wrap; }
+  .model-remaining { text-align: right; }
+  .model-remaining .num { font: 500 24px/1 "IBM Plex Mono", monospace; letter-spacing: -0.02em; }
+  .model-remaining .label { font: 400 11px/1.4 "IBM Plex Sans", sans-serif; color: var(--muted); margin-top: 6px; }
+  .remaining-note { font: 400 12.5px/1.65 "IBM Plex Sans", sans-serif; color: var(--muted); margin: 16px 0 0; max-width: 82ch; }
+
+  .outcome-wrap { border: 1px solid var(--border); background: var(--panel); overflow-x: auto; }
+  table.outcome { width: 100%; min-width: 900px; }
+  table.outcome th {
+    text-align: right; font: 500 11px/1.3 "IBM Plex Mono", monospace; letter-spacing: 0.04em; color: var(--muted);
+    padding: 14px 18px; border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  table.outcome th:first-child { text-align: left; letter-spacing: 0.06em; text-transform: uppercase; }
+  table.outcome td {
+    text-align: right; font: 400 13px/1 "IBM Plex Mono", monospace; padding: 13px 18px;
+    border-bottom: 1px solid var(--border-soft); white-space: nowrap; color: var(--body-text);
+  }
+  table.outcome td:first-child { text-align: left; font: 500 13px/1 "IBM Plex Mono", monospace; color: var(--ink); }
+  table.outcome td.success { color: var(--green); }
+  table.outcome td.fail { color: var(--brick); }
+
+  .glossary { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px,1fr)); gap: 24px; }
+  .glossary-card { background: var(--panel); border: 1px solid var(--border); padding: 20px 22px; }
+  .glossary-term { font: 500 13.5px/1.3 "IBM Plex Sans", sans-serif; margin-bottom: 9px; }
+  .glossary-body { font: 400 13px/1.65 "IBM Plex Sans", sans-serif; color: var(--body-text); margin: 0; text-wrap: pretty; }
+
+  @media (max-width: 640px) {
+    .model-row { grid-template-columns: 1fr; gap: 12px; }
+    .model-remaining { text-align: left; display: flex; align-items: baseline; gap: 8px; }
+  }
+{% endblock %}
+{% block content %}
+<main>
+  <div class="page-head">
+    <h1>Processing progress</h1>
+    <div style="display:flex; align-items:baseline; gap:16px;">
+      <span class="live-tag">live from Postgres</span>
+      <form class="logout-form" method="post" action="{{ url_for('logout') }}"><button type="submit">Sign out</button></form>
+    </div>
+  </div>
+  <p class="lede">{{ "{:,}".format(total_pages) }} page images uploaded to Backblaze B2 and available to process. Each model works through the same backlog independently; a page is never done until a person has looked at it.</p>
+
+  <section class="block">
+    <h2>Pages remaining, per model</h2>
+    <div class="model-list">
+      {% for m in models %}
+      <div class="model-row">
+        <div>
+          <div class="model-tag">{{ m.model_tag }}</div>
+          <div class="model-role">{{ m.role }}</div>
+        </div>
+        <div>
+          <div class="bar">
+            <div class="done" style="width:{{ m.done_pct }}%"></div>
+            <div class="fail" style="width:{{ m.fail_pct }}%"></div>
+          </div>
+          <div class="bar-legend">
+            <span>{{ "{:,}".format(m.approved) }} reviewed &amp; approved</span>
+            <span>{{ "{:,}".format(m.extraction_success) }} extracted</span>
+            <span>{{ "{:,}".format(m.content_failed_capped) }} needs a person</span>
+            <span>{{ "{:,}".format(m.total_entries) }} entries</span>
+          </div>
+        </div>
+        <div class="model-remaining">
+          <div class="num">{{ "{:,}".format(m.remaining) }}</div>
+          <div class="label">remaining</div>
+        </div>
+      </div>
+      {% else %}
+      <div class="model-row"><span class="model-role">No extraction runs recorded yet.</span></div>
+      {% endfor %}
+    </div>
+    <p class="remaining-note">Remaining assumes each model will eventually run against every uploaded page: never-attempted pages, plus stale claims, transient failures, and content failures still under the two-attempt retry cap. A capped content failure is excluded — it won't move again without a person or a different model.</p>
+  </section>
+
+  <section class="block">
+    <h2>Outcome breakdown</h2>
+    <div class="outcome-wrap">
+      <table class="outcome">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>Attempted</th>
+            <th>Success</th>
+            <th>Content failed</th>
+            <th>Transient</th>
+            <th>Claimed active / stale</th>
+            <th>OCR attempted</th>
+            <th>OCR success</th>
+            <th>OCR failed</th>
+            <th>Human-reviewed</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for m in models %}
+          <tr>
+            <td>{{ m.model_tag }}</td>
+            <td>{{ "{:,}".format(m.extraction_attempted) }}</td>
+            <td class="success">{{ "{:,}".format(m.extraction_success) }}</td>
+            <td class="fail">{{ "{:,}".format(m.extraction_content_failed) }}</td>
+            <td>{{ "{:,}".format(m.extraction_transient_failed) }}</td>
+            <td>{{ m.extraction_claimed_active }} / {{ m.extraction_claimed_stale }}</td>
+            <td>{{ "{:,}".format(m.ocr_attempted) }}</td>
+            <td class="success">{{ "{:,}".format(m.ocr_success) if m.ocr_attempted else "—" }}</td>
+            <td class="fail">{{ "{:,}".format(m.ocr_failed) if m.ocr_attempted else "—" }}</td>
+            <td>{{ "{:,}".format(m.reviewed) }}</td>
+          </tr>
+          {% else %}
+          <tr><td colspan="10">No extraction runs recorded yet.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="block" style="margin-bottom:0;">
+    <div class="glossary">
+      <div class="glossary-card">
+        <div class="glossary-term">Content failed</div>
+        <p class="glossary-body">The model responded, but its output couldn't be parsed into the expected shape — malformed JSON, wrong structure, invented fields. A quality problem with the model's output, not a statement about the page. Two attempts, then it stops being reclaimed.</p>
+      </div>
+      <div class="glossary-card">
+        <div class="glossary-term">Transient failed</div>
+        <p class="glossary-body">Something broke around the model: a B2 fetch error, a bad HTTP response, a database write failure. Not capped — these keep retrying on every future run.</p>
+      </div>
+      <div class="glossary-card">
+        <div class="glossary-term">Claimed</div>
+        <p class="glossary-body">A worker has the page checked out. Past the three-hour claim timeout it counts as stale and is fair game for another worker; it isn't stuck.</p>
+      </div>
+      <div class="glossary-card">
+        <div class="glossary-term">Full-page OCR</div>
+        <p class="glossary-body">A separate pass that transcribes everything visible, page furniture included. Independent of extraction — a page can succeed at one and fail the other.</p>
+      </div>
+    </div>
+  </section>
+</main>
+{% endblock %}

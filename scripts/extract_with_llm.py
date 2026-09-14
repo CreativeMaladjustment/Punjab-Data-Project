@@ -885,13 +885,20 @@ def db_save_extraction_success(page_id, model, model_tag, entries, raw_text):
     # by the time this runs, extract_page()'s multi-minute Ollama call has
     # already finished, so nothing here needs a connection held open any
     # longer than this one write actually takes.
+    #
+    # created_at is bumped on conflict (same reasoning as save_human_edit()
+    # in api/queries.py): id/page_id/model_tag stay stable across a retry,
+    # so this is the only column that marks *when this row's output last
+    # changed* -- REVIEWED_PER_MODEL_SQL relies on that to stop counting a
+    # qc_reviews verdict against output that's since been replaced by a
+    # reprocess.
     with db_connection() as conn, conn.cursor() as cur:
         cur.execute(
             "INSERT INTO llm_extractions (page_id, model, model_tag, status, raw_response, raw_text) "
             "VALUES (%s, %s, %s, 'success', %s, %s) "
             "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
             "status = 'success', raw_response = EXCLUDED.raw_response, "
-            "raw_text = EXCLUDED.raw_text, error_message = NULL "
+            "raw_text = EXCLUDED.raw_text, error_message = NULL, created_at = now() "
             "RETURNING id",
             (page_id, model, model_tag, Json(entries), raw_text),
         )
@@ -932,7 +939,8 @@ def db_save_extraction_failure(page_id, model, model_tag, error_message, raw_tex
             "VALUES (%s, %s, %s, 'failed', %s, %s, %s) "
             "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
             "status = 'failed', error_message = EXCLUDED.error_message, "
-            "raw_text = EXCLUDED.raw_text, content_failure = EXCLUDED.content_failure",
+            "raw_text = EXCLUDED.raw_text, content_failure = EXCLUDED.content_failure, "
+            "created_at = now()",
             (page_id, model, model_tag, error_message, raw_text, content_failure),
         )
         conn.commit()

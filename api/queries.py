@@ -286,16 +286,19 @@ _CANONICAL_EXTRACTION_PER_PAGE_SQL = """
 # a thousands separator ("12.7% carry a thousands separator" -- see
 # analysis/integrity/INTEGRITY_SWEEP.md), and a page can leave it blank or
 # carry a non-numeric annotation the schema doesn't rule out. The `~
-# '^[0-9,]+$'` guard casts only strings that are digits-and-commas, so
-# stripping the comma and summing can't itself throw on the other cases --
-# anything else is silently excluded from the sum rather than raising, same
-# as sum() already does for a NULL/blank copies value.
+# '^[0-9]+(,[0-9]+)*$'` guard requires at least one digit (not just
+# `[0-9,]+`, which also matches a comma-only value like "," -- stripping the
+# comma from that leaves an empty string, and ''::bigint raises rather than
+# being excluded, taking this whole request down), so stripping the comma
+# and summing can't itself throw on the other cases -- anything else is
+# silently excluded from the sum rather than raising, same as sum() already
+# does for a NULL/blank copies value.
 CORPUS_LIVE_STATS_SQL = f"""
     WITH canonical AS ({_CANONICAL_EXTRACTION_PER_PAGE_SQL})
     SELECT
         count(*) AS total_entries,
         sum(
-            CASE WHEN ce.copies ~ '^[0-9,]+$' THEN replace(ce.copies, ',', '')::bigint ELSE NULL END
+            CASE WHEN ce.copies ~ '^[0-9]+(,[0-9]+)*$' THEN replace(ce.copies, ',', '')::bigint ELSE NULL END
         ) AS total_copies,
         count(DISTINCT nullif(ce.printer, '')) AS total_printers,
         count(DISTINCT nullif(ce.publisher, '')) AS total_publishers,

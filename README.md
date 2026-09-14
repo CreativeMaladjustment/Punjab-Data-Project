@@ -1,7 +1,7 @@
 # Punjab Data Project
 
 **A computational sociological analysis of British Punjab through the imperial print register, 1867–1942.**
-Thomas Graves, with Prof. Emmett Davis.
+Thomas Graves and Jason Davis, with Prof. Emmett Davis.
 
 ## The live explorer
 

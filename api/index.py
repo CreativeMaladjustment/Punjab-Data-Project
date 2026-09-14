@@ -117,6 +117,7 @@ CORPUS_STAT_LABELS = [
     ("total_printers", "printers"),
     ("total_publishers", "publishers"),
     ("total_quarters", "quarterly catalogues"),
+    ("total_source_pdfs", "source PDF files"),
 ]
 
 PIPELINE_STAGES = [

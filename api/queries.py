@@ -293,6 +293,13 @@ _CANONICAL_EXTRACTION_PER_PAGE_SQL = """
 # and summing can't itself throw on the other cases -- anything else is
 # silently excluded from the sum rather than raising, same as sum() already
 # does for a NULL/blank copies value.
+#
+# source_pdf is set by extract_with_llm.py's process_page() on every entry
+# it produces (the PDF filename stem, not part of the model's own JSON
+# output -- see that function's own comment) -- one of the bound volumes
+# downloaded from the British Library Research Repository (see the Sources
+# page), so this counts how many of those volumes have contributed at
+# least one canonical entry so far.
 CORPUS_LIVE_STATS_SQL = f"""
     WITH canonical AS ({_CANONICAL_EXTRACTION_PER_PAGE_SQL})
     SELECT
@@ -302,7 +309,8 @@ CORPUS_LIVE_STATS_SQL = f"""
         ) AS total_copies,
         count(DISTINCT nullif(ce.printer, '')) AS total_printers,
         count(DISTINCT nullif(ce.publisher, '')) AS total_publishers,
-        count(DISTINCT nullif(ce.quarter, '')) AS total_quarters
+        count(DISTINCT nullif(ce.quarter, '')) AS total_quarters,
+        count(DISTINCT nullif(ce.source_pdf, '')) AS total_source_pdfs
     FROM canonical c
     JOIN catalogue_entries ce ON ce.extraction_id = c.extraction_id
 """
@@ -324,6 +332,7 @@ def fetch_corpus_stats(conn):
         "total_printers": row["total_printers"] or 0,
         "total_publishers": row["total_publishers"] or 0,
         "total_quarters": row["total_quarters"] or 0,
+        "total_source_pdfs": row["total_source_pdfs"] or 0,
     }
 
 

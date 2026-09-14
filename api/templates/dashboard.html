@@ -49,6 +49,7 @@
       <thead>
         <tr>
           <th rowspan="2">Model</th>
+          <th rowspan="2">Remaining</th>
           <th colspan="6" class="group-header">Catalogue-entry extraction (partial/table data)</th>
           <th colspan="3" class="group-header">Full-page OCR</th>
         </tr>
@@ -68,6 +69,7 @@
         {% for m in models %}
         <tr>
           <td>{{ m.model_tag }}</td>
+          <td><strong>{{ m.remaining }}</strong></td>
           <td>{{ m.extraction_attempted }}</td>
           <td class="success">{{ m.extraction_success }} <span class="muted">({{ m.total_entries }} entries)</span></td>
           <td class="failed">{{ m.extraction_content_failed }}</td>
@@ -79,7 +81,7 @@
           <td class="failed">{{ m.ocr_failed }}</td>
         </tr>
         {% else %}
-        <tr><td colspan="10" class="muted">No extraction runs recorded yet.</td></tr>
+        <tr><td colspan="11" class="muted">No extraction runs recorded yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -87,6 +89,12 @@
 
   <div class="legend">
     <h2>What these columns mean</h2>
+
+    <h3>Remaining</h3>
+    <dl>
+      <dt>Remaining</dt>
+      <dd>How much of this model's work is left, <em>assuming it will eventually run against every uploaded page</em>: pages never attempted yet + stale claims + transient failures + content failures still under the retry cap — everything still eligible to be picked up and retried automatically, either by a fresh claim or the pipeline's next run, with nobody needing to do anything first. A <em>capped</em> content failure is deliberately excluded, since it won't move again on its own.</dd>
+    </dl>
 
     <h3>Catalogue-entry extraction (partial/table data)</h3>
     <dl>

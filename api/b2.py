@@ -9,8 +9,31 @@ through this Vercel function at all (keeps response times and payload
 size down, and avoids needing B2 credentials anywhere near the browser).
 """
 import os
+import re
 
 import boto3
+from botocore.config import Config
+
+# B2's S3-compatible endpoints (s3.<region>.backblazeb2.com) only accept
+# Signature Version 4 -- rejecting a v2-signed request with 401 and
+# `WWW-Authenticate: AWS4-HMAC-SHA256` rather than any bucket/permission
+# error. botocore's generate_presigned_url() defaults to v2 for a
+# non-AWS endpoint_url unless told otherwise (direct calls like
+# get_object() aren't affected -- only presigned-URL *generation* picks
+# the wrong default), so both the signature version and a region must be
+# set explicitly here. B2 doesn't need the region to be "real" for
+# signature verification (v4 signing is self-consistent between signer
+# and verifier), but it must be present -- fall back to a placeholder
+# when it can't be parsed off the endpoint host rather than leaving it
+# unset, which would raise instead of just presigning with a region B2
+# doesn't care about.
+_REGION_RE = re.compile(r"^s3\.([a-z0-9-]+)\.backblazeb2\.com$")
+
+
+def _b2_region(endpoint):
+    host = endpoint.split("://", 1)[-1]
+    match = _REGION_RE.match(host)
+    return match.group(1) if match else "us-east-1"
 
 
 def load_b2_accounts():
@@ -38,6 +61,8 @@ def b2_client(account):
         endpoint_url=account["endpoint"],
         aws_access_key_id=account["key_id"],
         aws_secret_access_key=account["app_key"],
+        region_name=_b2_region(account["endpoint"]),
+        config=Config(signature_version="s3v4"),
     )
 
 

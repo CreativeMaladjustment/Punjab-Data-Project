@@ -62,6 +62,7 @@ import time
 import boto3
 import psycopg2
 import requests
+from botocore.config import Config
 from psycopg2.extras import Json
 
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
@@ -175,12 +176,29 @@ def elapsed():
     return time.time() - START_TIME
 
 
+# Mirrors api/b2.py's _b2_region()/b2_client() -- direct calls here
+# (get_object() via b2_get_bytes()) already work without this, since
+# botocore's default signature version for a *direct* S3 call is v4
+# regardless of endpoint, but this stays explicit rather than relying on
+# defaults that differ between direct calls and presigned-URL generation
+# (see api/b2.py for where that split actually bites).
+_B2_REGION_RE = re.compile(r"^s3\.([a-z0-9-]+)\.backblazeb2\.com$")
+
+
+def _b2_region(endpoint):
+    host = endpoint.split("://", 1)[-1]
+    match = _B2_REGION_RE.match(host)
+    return match.group(1) if match else "us-east-1"
+
+
 def b2_client(account):
     return boto3.client(
         "s3",
         endpoint_url=account["endpoint"],
         aws_access_key_id=account["key_id"],
         aws_secret_access_key=account["app_key"],
+        region_name=_b2_region(account["endpoint"]),
+        config=Config(signature_version="s3v4"),
     )
 
 

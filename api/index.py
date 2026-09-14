@@ -116,7 +116,6 @@ CORPUS_STAT_LABELS = [
     ("total_copies", "registered copies"),
     ("total_printers", "printers"),
     ("total_publishers", "publishers"),
-    ("total_cities", "printing cities"),
     ("total_quarters", "quarterly catalogues"),
 ]
 

@@ -302,7 +302,6 @@ CORPUS_LIVE_STATS_SQL = f"""
         ) AS total_copies,
         count(DISTINCT nullif(ce.printer, '')) AS total_printers,
         count(DISTINCT nullif(ce.publisher, '')) AS total_publishers,
-        count(DISTINCT nullif(ce.pcity, '')) AS total_cities,
         count(DISTINCT nullif(ce.quarter, '')) AS total_quarters
     FROM canonical c
     JOIN catalogue_entries ce ON ce.extraction_id = c.extraction_id
@@ -324,7 +323,6 @@ def fetch_corpus_stats(conn):
         "total_copies": row["total_copies"] or 0,
         "total_printers": row["total_printers"] or 0,
         "total_publishers": row["total_publishers"] or 0,
-        "total_cities": row["total_cities"] or 0,
         "total_quarters": row["total_quarters"] or 0,
     }
 

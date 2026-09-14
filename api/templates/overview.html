@@ -117,18 +117,8 @@
   .pipeline-body { font: 400 13px/1.6 "IBM Plex Sans", sans-serif; color: var(--muted); text-wrap: pretty; }
   .pipeline-file { font: 400 11px/1.5 "IBM Plex Mono", monospace; color: var(--muted-2); margin-top: auto; padding-top: 10px; word-break: break-all; }
 
-  .notes-section { padding: 56px 0; display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 56px; }
+  .notes-section { padding: 56px 0; max-width: 640px; }
   .notes-section h2 { margin: 0 0 22px; }
-  .callout {
-    background: var(--panel);
-    border-left: 3px solid var(--brick);
-    padding: 20px 22px;
-  }
-  .callout + .callout { margin-top: 20px; }
-  .callout-title { font: 500 14.5px/1.4 "IBM Plex Sans", sans-serif; margin-bottom: 9px; }
-  .callout p { font: 400 13.5px/1.65 "IBM Plex Sans", sans-serif; color: var(--body-text); margin: 0 0 12px; }
-  .callout code { font-size: 12.5px; background: var(--tint); padding: 1px 4px; }
-  .callout .ref { font: 400 12px/1.5 "IBM Plex Mono", monospace; color: var(--muted); }
 
   .pull-quote {
     font: 400 19px/1.6 "IBM Plex Serif", Georgia, serif;
@@ -139,7 +129,7 @@
   .notes-section .prose { font: 400 13.5px/1.7 "IBM Plex Sans", sans-serif; color: var(--body-text); margin: 0 0 16px; }
 
   @media (max-width: 860px) {
-    .hero, .notes-section { grid-template-columns: 1fr; }
+    .hero { grid-template-columns: 1fr; }
   }
 {% endblock %}
 {% block content %}
@@ -186,25 +176,10 @@
   </section>
 
   <section class="notes-section">
-    <div>
-      <h2 class="section-heading">Two things to know before querying</h2>
-      <div class="callout">
-        <div class="callout-title">Print runs are stored as text, and 12.7% carry a thousands separator.</div>
-        <p>A na&iuml;ve <code>sum(cast(copies as integer))</code> silently undercounts by 16.7%. Strip the comma first.</p>
-        <div class="ref">analysis/integrity/INTEGRITY_SWEEP.md</div>
-      </div>
-      <div class="callout">
-        <div class="callout-title">The register's own completeness is stratified by language.</div>
-        <p>The printing <em>method</em> field is blank for 3.3% of Urdu entries but 71.5% of Punjabi and 88.2% of Hindi. Cross-language comparison on sparse fields needs a recorded-versus-blank control. This is a property of the imperial record, not of the extraction.</p>
-        <div class="ref">analysis/ocr_lab/E0B_RESULTS.md §3</div>
-      </div>
-    </div>
-    <div>
-      <h2 class="section-heading">What print runs do and don't measure</h2>
-      <blockquote class="pull-quote">Print runs measure publisher supply decisions under a legal-deposit regime — not readership, not literacy.</blockquote>
-      <p class="prose">The catalogue is an instrument of surveillance before it is a bibliography. What it counts is what a printer was willing to declare, in a city where declaring was compulsory. Entries carry the annotator's own editorialising, which is kept verbatim rather than corrected.</p>
-      <p class="prose" style="margin-bottom:0;">Three layers are kept separate throughout: page image, verbatim record, normalised layer. Nothing is silently corrected — uncertain readings are flagged per entry, with stated reasoning, and surfaced in the QC review queue.</p>
-    </div>
+    <h2 class="section-heading">What print runs do and don't measure</h2>
+    <blockquote class="pull-quote">Print runs measure publisher supply decisions under a legal-deposit regime — not readership, not literacy.</blockquote>
+    <p class="prose">The catalogue is an instrument of surveillance before it is a bibliography. What it counts is what a printer was willing to declare, in a city where declaring was compulsory. Entries carry the annotator's own editorialising, which is kept verbatim rather than corrected.</p>
+    <p class="prose" style="margin-bottom:0;">Three layers are kept separate throughout: page image, verbatim record, normalised layer. Nothing is silently corrected — uncertain readings are flagged per entry, with stated reasoning, and surfaced in the QC review queue.</p>
   </section>
 
 </main>

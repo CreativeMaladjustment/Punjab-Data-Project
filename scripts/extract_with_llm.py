@@ -37,6 +37,18 @@ records exactly which, so this script always fetches from the right place.
 
 Requires an Ollama server already running and reachable at OLLAMA_HOST (see
 .github/workflows/extract-pages.yml) with OLLAMA_MODEL already pulled.
+
+Optional SOURCE_MODEL env var puts this run into "rescue" mode: instead of
+claiming any outstanding page under OLLAMA_MODEL's own tag, it only claims
+pages where SOURCE_MODEL's tag is stuck at a *capped* content failure
+(status='failed', content_failure, attempt_count >= MAX_ATTEMPTS_PER_PAGE --
+the same definition count_capped_failures() and the dashboard's "content
+failed" reporting already use for "needs manual review or a different
+model"). Use this to point a second model at exactly the pages a first one
+(e.g. glm-ocr) gave up on, without also re-running it against everything
+that model already succeeded on. A content failure that isn't capped yet is
+deliberately left out -- it's still being retried automatically under its
+own tag next run.
 """
 import base64
 import contextlib
@@ -55,6 +67,20 @@ from psycopg2.extras import Json
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.environ["OLLAMA_MODEL"]
 MODEL_TAG = re.sub(r"[^A-Za-z0-9._-]", "-", OLLAMA_MODEL)
+
+# See the module docstring's "rescue mode" section. Slugified the same way
+# as MODEL_TAG so it matches whatever tag that source model's own run
+# actually wrote to llm_extractions.model_tag.
+SOURCE_MODEL = os.environ.get("SOURCE_MODEL", "").strip()
+if SOURCE_MODEL == "(none)":  # extract-pages.yml's placeholder for "disabled"
+    SOURCE_MODEL = ""
+SOURCE_MODEL_TAG = re.sub(r"[^A-Za-z0-9._-]", "-", SOURCE_MODEL) if SOURCE_MODEL else None
+if SOURCE_MODEL_TAG is not None and SOURCE_MODEL_TAG == MODEL_TAG:
+    raise ValueError(
+        f"SOURCE_MODEL ({SOURCE_MODEL!r}) slugifies to the same tag as OLLAMA_MODEL "
+        f"({OLLAMA_MODEL!r}) -- a model can't rescue its own capped content failures "
+        "under its own tag; set OLLAMA_MODEL to a different model"
+    )
 
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
@@ -300,6 +326,24 @@ if MAX_B2_FAILURES_PER_WORKER < 0:
 # not for a stale transient failure (not the kind this cap counts) -- so a
 # run of crashes or transient errors never eats into the two real content
 # attempts the cap promises.
+# Appended to both CLAIM_NEXT_PAGE_SQL's candidate CTE and PENDING_EXISTS_SQL
+# below when SOURCE_MODEL_TAG is set (empty string otherwise, so the query
+# text is identical to the pre-rescue-mode version when the feature isn't in
+# use). Narrows candidates to pages a *different* model's tag already gave
+# up on for good -- see the module docstring's "rescue mode" section for why
+# this checks attempt_count >= max_attempts rather than content_failure
+# alone.
+_SOURCE_CAPPED_FILTER = """
+          AND EXISTS (
+            SELECT 1 FROM llm_extractions src
+            WHERE src.page_id = p.id
+              AND src.model_tag = %(source_model_tag)s
+              AND src.status = 'failed'
+              AND src.content_failure
+              AND src.attempt_count >= %(max_attempts)s
+          )
+""" if SOURCE_MODEL_TAG else ""
+
 CLAIM_NEXT_PAGE_SQL = """
     WITH candidate AS (
         SELECT p.id
@@ -315,6 +359,7 @@ CLAIM_NEXT_PAGE_SQL = """
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
+          {source_filter}
         ORDER BY random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
@@ -341,7 +386,7 @@ CLAIM_NEXT_PAGE_SQL = """
         RETURNING page_id
     )
     SELECT (SELECT page_id FROM inserted) AS page_id
-"""
+""".format(source_filter=_SOURCE_CAPPED_FILTER)
 
 # A separate, lock-free EXISTS check -- deliberately not folded into
 # CLAIM_NEXT_PAGE_SQL above (a previous version did, and ran it on every
@@ -373,8 +418,9 @@ PENDING_EXISTS_SQL = """
             OR (le.status = 'failed'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
+          {source_filter}
     )
-"""
+""".format(source_filter=_SOURCE_CAPPED_FILTER)
 
 
 CLAIM_CONTENDED = object()  # sentinel: every attempt found a candidate but
@@ -424,6 +470,9 @@ def claim_next_page(model, model_tag, claim_timeout_seconds):
         "claim_timeout": claim_timeout_seconds,
         "model": model,
         "max_attempts": MAX_ATTEMPTS_PER_PAGE,
+        # Unused (and harmless) when _SOURCE_CAPPED_FILTER is "" -- psycopg2
+        # ignores named params the query text doesn't reference.
+        "source_model_tag": SOURCE_MODEL_TAG,
     }
     with db_connection() as conn:
         for _ in range(CLAIM_MAX_ATTEMPTS):
@@ -1004,6 +1053,11 @@ def main():
     clients = {aid: b2_client(acct) for aid, acct in B2_ACCOUNTS.items()}
 
     print(f"model: {OLLAMA_MODEL} (tag: {MODEL_TAG})")
+    if SOURCE_MODEL_TAG:
+        print(
+            f"rescue mode: only claiming pages capped out as content failures "
+            f"under source model tag {SOURCE_MODEL_TAG!r}"
+        )
     if MAX_PAGES_PER_WORKER:
         print(f"MAX_PAGES_PER_WORKER set: stopping after {MAX_PAGES_PER_WORKER} page(s)")
     processed = 0

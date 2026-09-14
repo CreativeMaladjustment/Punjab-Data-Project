@@ -18,6 +18,14 @@
 # Ollama's model library changes over time — if `ollama pull` fails for one
 # of these, check https://ollama.com/library for the current tag and update
 # the `options` list below.
+#
+# Rescue mode: set `source_model` to reprocess ONLY the pages that model
+# already gave up on (capped-out content failures) with `model` instead of
+# running `model` against the full backlog -- e.g. source_model: glm-ocr,
+# model: minicpm-v4.6 sends glm-ocr's stuck pages to minicpm-v4.6 without
+# also re-running minicpm-v4.6 against everything glm-ocr already succeeded
+# on. See extract_with_llm.py's module docstring for the exact definition
+# of "already gave up on".
 name: Extract catalogue entries with a local LLM
 
 on:
@@ -28,6 +36,23 @@ on:
         type: choice
         default: glm-ocr
         options:
+          - minicpm-v4.6
+          - qwen3-vl:2b
+          - qwen3-vl:4b
+          - gemma4:e2b
+          - glm-ocr
+          - minicpm-v4.5
+      source_model:
+        description: >-
+          Rescue mode (optional): only reprocess pages that this OTHER
+          model already gave up on (capped-out content failures, i.e. its
+          "content failed" pages after 2 attempts) -- instead of the normal
+          full backlog for "model" above. Leave as "(none)" for a normal
+          run. Must differ from "model".
+        type: choice
+        default: "(none)"
+        options:
+          - "(none)"
           - minicpm-v4.6
           - qwen3-vl:2b
           - qwen3-vl:4b
@@ -209,6 +234,9 @@ jobs:
           # through the whole time.
           PYTHONUNBUFFERED: "1"
           OLLAMA_MODEL: ${{ inputs.model }}
+          # extract_with_llm.py treats "(none)" the same as unset -- see its
+          # module docstring's "rescue mode" section.
+          SOURCE_MODEL: ${{ inputs.source_model }}
           # Was a temporary smoke-test cap (2) while confirming the num_ctx
           # fix for the 400s every Ollama call started throwing on
           # 2026-09-11 -- two full runs since (34601420598, 34617429251)

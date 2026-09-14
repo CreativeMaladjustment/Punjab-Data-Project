@@ -117,6 +117,20 @@ OCR_SUMMARY_SQL = """
     ORDER BY model_tag
 """
 
+# One row per model, counting how many of its extractions have at least one
+# human qc_reviews verdict recorded against them -- backs the research
+# site's Progress page ("Human-reviewed" column). Joined the same way
+# apply_qc_verdict() writes qc_reviews (extraction_id -> llm_extractions),
+# so this already excludes HUMAN_MODEL_TAG rows: qc_reviews is only ever
+# written against a real model's extraction_id (see apply_qc_verdict()'s
+# own WHERE model_tag <> %(human_tag)s), never against a human correction.
+REVIEWED_PER_MODEL_SQL = """
+    SELECT le.model_tag, count(DISTINCT qr.extraction_id) AS reviewed
+    FROM qc_reviews qr
+    JOIN llm_extractions le ON le.id = qr.extraction_id
+    GROUP BY le.model_tag
+"""
+
 
 def fetch_dashboard_data(conn):
     """Run every query above and merge extraction/entries/OCR stats into one
@@ -139,6 +153,9 @@ def fetch_dashboard_data(conn):
         ocr_cols = [d.name for d in cur.description]
         ocr_rows = [dict(zip(ocr_cols, row)) for row in cur.fetchall()]
 
+        cur.execute(REVIEWED_PER_MODEL_SQL)
+        reviewed_by_model = dict(cur.fetchall())
+
     models = {}
     for row in extraction_rows:
         tag = row["model_tag"]
@@ -147,9 +164,16 @@ def fetch_dashboard_data(conn):
             "extraction_attempted": row["total_attempted"],
             "extraction_success": row["success"],
             "extraction_content_failed": row["content_failed"],
+            # The subset of content_failed that has hit MAX_ATTEMPTS_PER_PAGE
+            # and so will never be reclaimed automatically again -- the
+            # "needs a person" bucket the Progress page's bar highlights
+            # separately from success, as opposed to content failures still
+            # under the cap (which are still "remaining", not stuck).
+            "content_failed_capped": row["content_failed"] - row["content_failed_retryable"],
             "extraction_transient_failed": row["transient_failed"],
             "extraction_claimed_active": row["claimed_active"],
             "extraction_claimed_stale": row["claimed_stale"],
+            "reviewed": reviewed_by_model.get(tag, 0),
             # Mirrors scripts/extraction_status.py's own "remaining"
             # definition: never-attempted pages (assuming this model will
             # eventually run against every uploaded page) + stale claims +
@@ -180,9 +204,11 @@ def fetch_dashboard_data(conn):
                 "extraction_attempted": 0,
                 "extraction_success": 0,
                 "extraction_content_failed": 0,
+                "content_failed_capped": 0,
                 "extraction_transient_failed": 0,
                 "extraction_claimed_active": 0,
                 "extraction_claimed_stale": 0,
+                "reviewed": reviewed_by_model.get(tag, 0),
                 # No extraction attempted at all yet for this model (it
                 # only shows up here via the OCR pass) -- every uploaded
                 # page is still remaining work for it.
@@ -438,6 +464,23 @@ def fetch_qc_page(conn, page_id, model_tag=None):
         "prev_id": prev_id,
         "next_id": next_id,
     }
+
+
+def fetch_qc_position(conn, page_id):
+    """(rank, total) of page_id among every image-available page, ordered by
+    id -- backs the QC page's "page N of M" counter. rank counts pages with
+    id <= page_id, so it's meaningful even though prev/next (see
+    fetch_qc_page()) walk the same id ordering rather than a queue of
+    specifically-unreviewed pages."""
+    with conn.cursor() as cur:
+        cur.execute(TOTAL_PAGES_SQL)
+        (total,) = cur.fetchone()
+        cur.execute(
+            "SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL AND id <= %(page_id)s",
+            {"page_id": page_id},
+        )
+        (rank,) = cur.fetchone()
+    return rank, total
 
 
 def apply_qc_verdict(conn, extraction_id, verdict, note):

@@ -47,6 +47,15 @@ MAX_ATTEMPTS_PER_PAGE = 2
 # rather than by convention.
 HUMAN_MODEL_TAG = "human:review"
 
+# The model whose output counts as a page's extraction when no human
+# correction exists yet -- see fetch_corpus_stats() below, which needs
+# exactly one row-set per page (not one per model that happened to run
+# against it) to report a real entry count. Matches MODEL_ROLE_LABELS'
+# "purpose-built document OCR · default" tag on the Progress page in
+# api/index.py -- same model, formalized here as the one this query treats
+# as canonical rather than just a cosmetic label.
+PRIMARY_MODEL_TAG = "glm-ocr"
+
 # One row per model that has ever been run against extract_with_llm.py's
 # structured-entry extraction. status/content_failure mirror the same
 # columns claim_next_page() and process_page() write -- see
@@ -248,6 +257,72 @@ def fetch_dashboard_data(conn):
     return {
         "total_pages": total_pages,
         "models": sorted(models.values(), key=lambda m: m["model_tag"]),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public overview page
+# ---------------------------------------------------------------------------
+
+# One row-set per page, not one per model attempt: a page can have a
+# successful extraction from several different models (they're run
+# independently to bake off against each other -- see
+# scripts/extract_with_llm.py's module docstring) plus, once reviewed, a
+# human correction. Counting every one of those would inflate "catalogue
+# entries" by however many models happened to run, so this treats a human
+# correction as authoritative where one exists, and PRIMARY_MODEL_TAG's own
+# successful extraction otherwise -- `DISTINCT ON (page_id)` with
+# HUMAN_MODEL_TAG sorted first picks exactly one extraction_id per page
+# under that rule.
+_CANONICAL_EXTRACTION_PER_PAGE_SQL = """
+    SELECT DISTINCT ON (page_id) page_id, id AS extraction_id
+    FROM llm_extractions
+    WHERE status = 'success' AND model_tag IN (%(human_tag)s, %(primary_tag)s)
+    ORDER BY page_id, (model_tag = %(human_tag)s) DESC
+"""
+
+# copies is stored as free text, not a number (see supabase/migrations'
+# init_processing_schema.sql) -- the source column mixes plain digits with
+# a thousands separator ("12.7% carry a thousands separator" -- see
+# analysis/integrity/INTEGRITY_SWEEP.md), and a page can leave it blank or
+# carry a non-numeric annotation the schema doesn't rule out. The `~
+# '^[0-9,]+$'` guard casts only strings that are digits-and-commas, so
+# stripping the comma and summing can't itself throw on the other cases --
+# anything else is silently excluded from the sum rather than raising, same
+# as sum() already does for a NULL/blank copies value.
+CORPUS_LIVE_STATS_SQL = f"""
+    WITH canonical AS ({_CANONICAL_EXTRACTION_PER_PAGE_SQL})
+    SELECT
+        count(*) AS total_entries,
+        sum(
+            CASE WHEN ce.copies ~ '^[0-9,]+$' THEN replace(ce.copies, ',', '')::bigint ELSE NULL END
+        ) AS total_copies,
+        count(DISTINCT nullif(ce.printer, '')) AS total_printers,
+        count(DISTINCT nullif(ce.publisher, '')) AS total_publishers,
+        count(DISTINCT nullif(ce.pcity, '')) AS total_cities,
+        count(DISTINCT nullif(ce.quarter, '')) AS total_quarters
+    FROM canonical c
+    JOIN catalogue_entries ce ON ce.extraction_id = c.extraction_id
+"""
+
+
+def fetch_corpus_stats(conn):
+    """One row of corpus-wide totals for the Overview page's stats card --
+    see CORPUS_LIVE_STATS_SQL for what counts as "the" extraction for a
+    page. Every total is 0/None over an empty table (no pipeline run yet),
+    so callers get a well-formed all-zero dict rather than needing to
+    special-case a NULL row."""
+    with conn.cursor() as cur:
+        cur.execute(CORPUS_LIVE_STATS_SQL, {"human_tag": HUMAN_MODEL_TAG, "primary_tag": PRIMARY_MODEL_TAG})
+        cols = [d.name for d in cur.description]
+        row = dict(zip(cols, cur.fetchone()))
+    return {
+        "total_entries": row["total_entries"] or 0,
+        "total_copies": row["total_copies"] or 0,
+        "total_printers": row["total_printers"] or 0,
+        "total_publishers": row["total_publishers"] or 0,
+        "total_cities": row["total_cities"] or 0,
+        "total_quarters": row["total_quarters"] or 0,
     }
 
 

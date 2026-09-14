@@ -72,6 +72,7 @@ from queries import (
     CATALOGUE_ENTRY_INT_FIELDS,
     CATALOGUE_ENTRY_JSON_FIELDS,
     apply_qc_verdict,
+    fetch_corpus_stats,
     fetch_dashboard_data,
     fetch_qc_page,
     fetch_qc_position,
@@ -107,17 +108,16 @@ MODEL_ROLE_LABELS = {
 FLAG_FIELD_ALIASES = {"char_qualifier": "char"}
 FLAG_FIELD_ALIAS_TO_CANONICAL = {alias: canonical for canonical, alias in FLAG_FIELD_ALIASES.items()}
 
-# Real catalogue-entry fields worth showing in the Progress page's corpus
-# overview -- see README.md's "Published slice" figures, which this mirrors
-# verbatim: they describe the completed 1910-1912 slice, not a live query
-# against the (still in-progress) processing database.
-CORPUS_STATS_1910_1912 = [
-    {"value": "4,502", "label": "catalogue entries"},
-    {"value": "6,944,051", "label": "registered copies"},
-    {"value": "350", "label": "printers"},
-    {"value": "1,726", "label": "publishers"},
-    {"value": "59", "label": "printing cities"},
-    {"value": "12", "label": "quarterly catalogues"},
+# Labels for the Overview page's stats card, in display order -- each keyed
+# to the matching total from fetch_corpus_stats() so overview() only has to
+# zip values onto them, not repeat the label text at the call site.
+CORPUS_STAT_LABELS = [
+    ("total_entries", "catalogue entries"),
+    ("total_copies", "registered copies"),
+    ("total_printers", "printers"),
+    ("total_publishers", "publishers"),
+    ("total_cities", "printing cities"),
+    ("total_quarters", "quarterly catalogues"),
 ]
 
 PIPELINE_STAGES = [
@@ -354,10 +354,17 @@ def db_connect():
 
 @app.route("/")
 def overview():
+    conn = db_connect()
+    try:
+        stats = fetch_corpus_stats(conn)
+    finally:
+        conn.close()
+    corpus_stats = [{"value": "{:,}".format(stats[key]), "label": label} for key, label in CORPUS_STAT_LABELS]
+
     return render_template(
         "overview.html",
         active="overview",
-        corpus_stats=CORPUS_STATS_1910_1912,
+        corpus_stats=corpus_stats,
         stages=PIPELINE_STAGES,
     )
 

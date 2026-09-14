@@ -91,6 +91,7 @@
             <div class="fail" style="width:{{ m.fail_pct }}%"></div>
           </div>
           <div class="bar-legend">
+            <span>{{ "{:,}".format(m.approved) }} reviewed &amp; approved</span>
             <span>{{ "{:,}".format(m.extraction_success) }} extracted</span>
             <span>{{ "{:,}".format(m.content_failed_capped) }} needs a person</span>
             <span>{{ "{:,}".format(m.total_entries) }} entries</span>
@@ -119,8 +120,10 @@
             <th>Success</th>
             <th>Content failed</th>
             <th>Transient</th>
-            <th>Claimed act/stale</th>
+            <th>Claimed active / stale</th>
+            <th>OCR attempted</th>
             <th>OCR success</th>
+            <th>OCR failed</th>
             <th>Human-reviewed</th>
           </tr>
         </thead>
@@ -133,11 +136,13 @@
             <td class="fail">{{ "{:,}".format(m.extraction_content_failed) }}</td>
             <td>{{ "{:,}".format(m.extraction_transient_failed) }}</td>
             <td>{{ m.extraction_claimed_active }} / {{ m.extraction_claimed_stale }}</td>
-            <td>{{ "{:,}".format(m.ocr_success) if m.ocr_attempted else "—" }}</td>
+            <td>{{ "{:,}".format(m.ocr_attempted) }}</td>
+            <td class="success">{{ "{:,}".format(m.ocr_success) if m.ocr_attempted else "—" }}</td>
+            <td class="fail">{{ "{:,}".format(m.ocr_failed) if m.ocr_attempted else "—" }}</td>
             <td>{{ "{:,}".format(m.reviewed) }}</td>
           </tr>
           {% else %}
-          <tr><td colspan="8">No extraction runs recorded yet.</td></tr>
+          <tr><td colspan="10">No extraction runs recorded yet.</td></tr>
           {% endfor %}
         </tbody>
       </table>

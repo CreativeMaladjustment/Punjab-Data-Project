@@ -273,7 +273,7 @@
             </legend>
             <div class="entry-grid">
               {% for field in catalogue_fields %}
-              {% set is_flagged = field in flagged_names %}
+              {% set is_flagged = field in flagged_names or flag_field_aliases.get(field) in flagged_names %}
               <label class="field">
                 <span class="flabel {{ 'flagged' if is_flagged else '' }}">{{ field }}{% if is_flagged %} &#9873;{% endif %}</span>
                 {% if field in bool_fields %}

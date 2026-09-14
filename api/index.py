@@ -94,6 +94,19 @@ MODEL_ROLE_LABELS = {
     "qwen3-vl-2b": "general vision, 2B · smallest",
 }
 
+# pipeline/schema.md names this flag field "char", but the catalogue_entries
+# column -- and CATALOGUE_ENTRY_FIELDS's own name for it -- is
+# "char_qualifier" (see supabase/migrations). Without this alias, a
+# {"field": "char"} flag from the extractor never matches any real field
+# name, so it's silently dropped from both the QC status row's flagged-field
+# count and the correction form's per-field highlighting. Keyed by the
+# canonical CATALOGUE_ENTRY_FIELDS name -> the raw schema.md name, since
+# that's the direction qc.html's per-field highlighting needs; FLAG_FIELD_ALIAS_TO_CANONICAL
+# below is the same mapping in the other direction, for normalizing a raw
+# flag's field name.
+FLAG_FIELD_ALIASES = {"char_qualifier": "char"}
+FLAG_FIELD_ALIAS_TO_CANONICAL = {alias: canonical for canonical, alias in FLAG_FIELD_ALIASES.items()}
+
 # Real catalogue-entry fields worth showing in the Progress page's corpus
 # overview -- see README.md's "Published slice" figures, which this mirrors
 # verbatim: they describe the completed 1910-1912 slice, not a live query
@@ -386,7 +399,10 @@ def progress():
         # Same formula the design mockup used: each bar segment is sized
         # against the *total* uploaded pages (not this model's own attempted
         # count), so every model's bar is directly comparable at a glance.
-        m["done_pct"] = (m["extraction_success"] / total_pages * 100) if total_pages else 0
+        # Keyed off m["approved"], not m["extraction_success"] -- this page's
+        # own lede says a page is never done until a person has looked at
+        # it, so a successful-but-unreviewed extraction isn't "done" here.
+        m["done_pct"] = (m["approved"] / total_pages * 100) if total_pages else 0
         m["fail_pct"] = (m["content_failed_capped"] / total_pages * 100) if total_pages else 0
         models.append(m)
 
@@ -516,7 +532,18 @@ def _entries_for_display(entries):
         flags = e.get("flags") or []
         if not isinstance(flags, list):
             flags = []
-        field_names = [f["field"] for f in flags if isinstance(f, dict) and f.get("field")]
+        # str() coerces a malformed flag (e.g. {"field": 1}, which the
+        # correction form's own flags textarea doesn't stop a reviewer from
+        # saving) instead of raising here; sorted(set(...)) both dedupes
+        # repeated flags and canonicalizes the "char"/"char_qualifier" alias
+        # (see FLAG_FIELD_ALIASES) so it isn't double-counted or double-listed.
+        field_names = sorted(
+            {
+                FLAG_FIELD_ALIAS_TO_CANONICAL.get(str(f["field"]), str(f["field"]))
+                for f in flags
+                if isinstance(f, dict) and f.get("field")
+            }
+        )
         total_flagged += len(field_names)
         rows.append(
             {
@@ -582,6 +609,7 @@ def qc_page(page_id):
         catalogue_fields=CATALOGUE_ENTRY_FIELDS,
         bool_fields=CATALOGUE_ENTRY_BOOL_FIELDS,
         json_fields=CATALOGUE_ENTRY_JSON_FIELDS,
+        flag_field_aliases=FLAG_FIELD_ALIASES,
         extra_blank_rows=EXTRA_BLANK_EDIT_ROWS,
     )
 

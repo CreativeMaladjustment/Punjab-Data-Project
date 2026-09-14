@@ -117,17 +117,33 @@ OCR_SUMMARY_SQL = """
     ORDER BY model_tag
 """
 
-# One row per model, counting how many of its extractions have at least one
-# human qc_reviews verdict recorded against them -- backs the research
-# site's Progress page ("Human-reviewed" column). Joined the same way
-# apply_qc_verdict() writes qc_reviews (extraction_id -> llm_extractions),
-# so this already excludes HUMAN_MODEL_TAG rows: qc_reviews is only ever
-# written against a real model's extraction_id (see apply_qc_verdict()'s
-# own WHERE model_tag <> %(human_tag)s), never against a human correction.
+# One row per model, counting how many of its extractions have a human
+# qc_reviews verdict recorded against their *current* output -- backs the
+# research site's Progress page ("Human-reviewed" column and, via the
+# approved count, the completion bar's green segment).
+#
+# qc_reviews.extraction_id points at the stable (page_id, model_tag) row in
+# llm_extractions, but a 'needs_reprocessing' verdict resets that same row
+# for the existing claim loop to retry (see apply_qc_verdict()), and a
+# retry's own db_save_extraction_success()/db_save_extraction_failure()
+# overwrite it in place rather than inserting a new id -- so without a
+# version boundary, a review of the *old* (now-replaced) output would go on
+# counting that extraction_id as reviewed/approved forever. The
+# qr.created_at >= le.created_at join closes that: both save functions bump
+# created_at on every write (see their own comments), so a review only
+# counts once it postdates the extraction's current output. Excludes
+# HUMAN_MODEL_TAG rows for the same reason as EXTRACTION_SUMMARY_SQL above
+# -- a human correction's own row is never what a qc_reviews verdict is
+# recorded against (see apply_qc_verdict()'s own WHERE model_tag <>
+# %(human_tag)s).
 REVIEWED_PER_MODEL_SQL = """
-    SELECT le.model_tag, count(DISTINCT qr.extraction_id) AS reviewed
-    FROM qc_reviews qr
-    JOIN llm_extractions le ON le.id = qr.extraction_id
+    SELECT
+        le.model_tag,
+        count(DISTINCT le.id) AS reviewed,
+        count(DISTINCT le.id) FILTER (WHERE qr.verdict = 'approved') AS approved
+    FROM llm_extractions le
+    JOIN qc_reviews qr ON qr.extraction_id = le.id AND qr.created_at >= le.created_at
+    WHERE le.model_tag <> %(human_tag)s
     GROUP BY le.model_tag
 """
 
@@ -153,8 +169,12 @@ def fetch_dashboard_data(conn):
         ocr_cols = [d.name for d in cur.description]
         ocr_rows = [dict(zip(ocr_cols, row)) for row in cur.fetchall()]
 
-        cur.execute(REVIEWED_PER_MODEL_SQL)
-        reviewed_by_model = dict(cur.fetchall())
+        cur.execute(REVIEWED_PER_MODEL_SQL, {"human_tag": HUMAN_MODEL_TAG})
+        reviewed_by_model = {}
+        approved_by_model = {}
+        for tag, reviewed, approved in cur.fetchall():
+            reviewed_by_model[tag] = reviewed
+            approved_by_model[tag] = approved
 
     models = {}
     for row in extraction_rows:
@@ -174,6 +194,7 @@ def fetch_dashboard_data(conn):
             "extraction_claimed_active": row["claimed_active"],
             "extraction_claimed_stale": row["claimed_stale"],
             "reviewed": reviewed_by_model.get(tag, 0),
+            "approved": approved_by_model.get(tag, 0),
             # Mirrors scripts/extraction_status.py's own "remaining"
             # definition: never-attempted pages (assuming this model will
             # eventually run against every uploaded page) + stale claims +
@@ -209,6 +230,7 @@ def fetch_dashboard_data(conn):
                 "extraction_claimed_active": 0,
                 "extraction_claimed_stale": 0,
                 "reviewed": reviewed_by_model.get(tag, 0),
+                "approved": approved_by_model.get(tag, 0),
                 # No extraction attempted at all yet for this model (it
                 # only shows up here via the OCR pass) -- every uploaded
                 # page is still remaining work for it.
@@ -423,7 +445,7 @@ def fetch_qc_page(conn, page_id, model_tag=None):
         human_extraction, human_entries = _extraction_and_entries(HUMAN_MODEL_TAG)
 
         cur.execute(
-            "SELECT model_tag, status, raw_text FROM page_ocr_text "
+            "SELECT model_tag, status, raw_text, error_message FROM page_ocr_text "
             "WHERE page_id = %(page_id)s ORDER BY model_tag",
             {"page_id": page_id},
         )

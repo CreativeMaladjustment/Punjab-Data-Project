@@ -45,6 +45,24 @@ on:
           - gemma4:e2b
           - glm-ocr
           - minicpm-v4.5
+      source_model:
+        description: >-
+          Rescue mode (optional): only reprocess pages that this OTHER
+          model already gave up on (capped-out content failures, i.e. its
+          "content failed" pages after 2 attempts) -- instead of the normal
+          full backlog for "model" above. Leave as "(none)" for a normal
+          run. Must differ from "model". See extract-pages.yml / extract_with_llm.py's
+          docstring for the exact definition.
+        type: choice
+        default: "(none)"
+        options:
+          - "(none)"
+          - minicpm-v4.6
+          - qwen3-vl:2b
+          - qwen3-vl:4b
+          - gemma4:e2b
+          - glm-ocr
+          - minicpm-v4.5
 
 permissions:
   contents: read
@@ -134,6 +152,9 @@ jobs:
           # through the whole time.
           PYTHONUNBUFFERED: "1"
           OLLAMA_MODEL: ${{ inputs.model }}
+          # extract_with_llm.py treats "(none)" the same as unset -- see its
+          # module docstring's "rescue mode" section.
+          SOURCE_MODEL: ${{ inputs.source_model }}
           MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}

@@ -726,9 +726,22 @@ def qc_exclude():
             if tag_row:
                 (model_tag,) = tag_row
 
-        apply_page_exclusion(conn, page_id, action == "exclude", note)
+        result = apply_page_exclusion(conn, page_id, action == "exclude", note)
     finally:
         conn.close()
+    if result == "not_found":
+        # Shouldn't happen given the existence check above, but a page
+        # deleted between that SELECT and here (pcloud_files cascades)
+        # would otherwise fall through to a misleading redirect.
+        abort(404)
+    if result == "claimed":
+        # A worker may be mid-attempt on this page right now -- see
+        # apply_page_exclusion()'s own docstring for why exclusion is
+        # rejected outright rather than raced against it. The QC page
+        # itself avoids offering the Exclude button in this state (see
+        # data.any_claimed in qc.html), so reaching this is a narrow
+        # timing window, not the expected path.
+        abort(409)
     return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
 
 

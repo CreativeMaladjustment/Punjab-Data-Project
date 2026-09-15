@@ -182,6 +182,8 @@
             <input type="hidden" name="action" value="include">
             <button type="submit" class="btn-outline">Re-include in processing</button>
           </form>
+        {% elif data.any_claimed %}
+          <p class="muted-block">A worker currently has this page claimed, so it can't be excluded right now (it could still write a result right after). Check back once it completes.</p>
         {% else %}
           <form method="post" action="{{ url_for('qc_exclude') }}">
             <input type="hidden" name="page_id" value="{{ data.page.id }}">

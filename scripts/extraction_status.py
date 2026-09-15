@@ -43,36 +43,42 @@ HUMAN_MODEL_TAG = "human:review"
 # total_attempted is exactly count(distinct page_id) for that model_tag
 # already, since (page_id, model_tag) is unique -- no extra distinct
 # needed.
+# Joined to pages and filtered on excluded_at is null, same as
+# TOTAL_IMAGES_SQL below -- otherwise an already-attempted page that gets
+# excluded would keep counting toward total_attempted here while dropping
+# out of total_images, and never_attempted/remaining (computed from both,
+# further down) could go negative.
 STATUS_BY_MODEL_SQL = """
     select
-        model_tag,
+        le.model_tag,
         count(*) as total_attempted,
         count(*) filter (
-            where status = 'success' and coalesce(jsonb_array_length(raw_response), 0) > 0
+            where le.status = 'success' and coalesce(jsonb_array_length(le.raw_response), 0) > 0
         ) as success_with_entries,
         count(*) filter (
-            where status = 'success' and coalesce(jsonb_array_length(raw_response), 0) = 0
+            where le.status = 'success' and coalesce(jsonb_array_length(le.raw_response), 0) = 0
         ) as success_empty,
         count(*) filter (
-            where status = 'claimed' and claimed_at >= now() - %(claim_timeout)s * interval '1 second'
+            where le.status = 'claimed' and le.claimed_at >= now() - %(claim_timeout)s * interval '1 second'
         ) as claimed_active,
         count(*) filter (
-            where status = 'claimed' and claimed_at < now() - %(claim_timeout)s * interval '1 second'
+            where le.status = 'claimed' and le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
         ) as claimed_stale,
         count(*) filter (
-            where status = 'failed' and not content_failure
+            where le.status = 'failed' and not le.content_failure
         ) as failed_transient,
         count(*) filter (
-            where status = 'failed' and content_failure and attempt_count < %(max_attempts)s
+            where le.status = 'failed' and le.content_failure and le.attempt_count < %(max_attempts)s
         ) as failed_content_retryable,
         count(*) filter (
-            where status = 'failed' and content_failure and attempt_count >= %(max_attempts)s
+            where le.status = 'failed' and le.content_failure and le.attempt_count >= %(max_attempts)s
         ) as failed_content_capped,
-        count(*) filter (where raw_text is not null) as has_raw_text
-    from llm_extractions
-    where model_tag <> %(human_tag)s
-    group by model_tag
-    order by model_tag
+        count(*) filter (where le.raw_text is not null) as has_raw_text
+    from llm_extractions le
+    join pages p on p.id = le.page_id
+    where le.model_tag <> %(human_tag)s and p.excluded_at is null
+    group by le.model_tag
+    order by le.model_tag
 """
 
 # excluded_at is not null: a page a QC reviewer has pulled out of
@@ -87,7 +93,8 @@ ENTRY_COUNTS_SQL = """
     select le.model_tag, count(*)
     from catalogue_entries ce
     join llm_extractions le on le.id = ce.extraction_id
-    where le.model_tag <> %(human_tag)s
+    join pages p on p.id = le.page_id
+    where le.model_tag <> %(human_tag)s and p.excluded_at is null
     group by le.model_tag
 """
 
@@ -96,13 +103,17 @@ ENTRY_COUNTS_SQL = """
 # failures with the same root cause rarely have byte-identical messages
 # (line/column/char positions differ), but the first ~60 chars usually
 # capture which kind of failure it was (e.g. "Unterminated string
-# starting at" vs "expected a JSON array, got dict").
+# starting at" vs "expected a JSON array, got dict"). Excludes excluded
+# pages too -- a capped failure someone has since excluded isn't a
+# needs-review item anymore, it's settled.
 TOP_CAPPED_FAILURE_REASONS_SQL = """
-    select model_tag, left(error_message, 60) as reason, count(*) as n
-    from llm_extractions
-    where status = 'failed' and content_failure and attempt_count >= %(max_attempts)s
-    group by model_tag, left(error_message, 60)
-    order by model_tag, n desc
+    select le.model_tag, left(le.error_message, 60) as reason, count(*) as n
+    from llm_extractions le
+    join pages p on p.id = le.page_id
+    where le.status = 'failed' and le.content_failure and le.attempt_count >= %(max_attempts)s
+      and p.excluded_at is null
+    group by le.model_tag, left(le.error_message, 60)
+    order by le.model_tag, n desc
 """
 
 

@@ -170,6 +170,28 @@ REVIEWED_PER_MODEL_SQL = """
     GROUP BY le.model_tag
 """
 
+# The actual top-line goal -- "is there data extracted from this page at
+# all" -- as opposed to every query above, which is deliberately sliced per
+# model_tag to track which model is doing the work and how well. This one
+# collapses all of that: a page counts the moment *any* source (any vision
+# model bake-off candidate, the textparse:* OCR-text backfill, or a human
+# correction) has a successful llm_extractions row for it, full stop, with
+# no per-model breakdown and no review/approval requirement -- a
+# successfully extracted-but-not-yet-reviewed page still counts here, since
+# the question this answers is narrower than the per-model "done_pct"
+# (which requires review) on the Progress page. HUMAN_MODEL_TAG is
+# deliberately included (not excluded like the per-model queries above) --
+# a page a human corrected by hand, with no model ever succeeding on it,
+# is still a page with data extracted from it.
+PAGES_ANY_EXTRACTED_SQL = """
+    SELECT count(DISTINCT le.page_id)
+    FROM llm_extractions le
+    JOIN pages p ON p.id = le.page_id
+    WHERE le.status = 'success'
+      AND p.image_uploaded_at IS NOT NULL
+      AND p.excluded_at IS NULL
+"""
+
 
 def fetch_dashboard_data(conn):
     """Run every query above and merge extraction/entries/OCR stats into one
@@ -177,6 +199,9 @@ def fetch_dashboard_data(conn):
     with conn.cursor() as cur:
         cur.execute(TOTAL_PAGES_SQL)
         (total_pages,) = cur.fetchone()
+
+        cur.execute(PAGES_ANY_EXTRACTED_SQL)
+        (any_extracted_pages,) = cur.fetchone()
 
         cur.execute(
             EXTRACTION_SUMMARY_SQL,
@@ -270,6 +295,7 @@ def fetch_dashboard_data(conn):
 
     return {
         "total_pages": total_pages,
+        "any_extracted_pages": any_extracted_pages,
         "models": sorted(models.values(), key=lambda m: m["model_tag"]),
     }
 

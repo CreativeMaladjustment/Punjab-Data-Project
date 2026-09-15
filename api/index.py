@@ -423,10 +423,15 @@ def progress():
         m["fail_pct"] = (m["content_failed_capped"] / total_pages * 100) if total_pages else 0
         models.append(m)
 
+    any_extracted_pages = data["any_extracted_pages"]
+    any_extracted_pct = (any_extracted_pages / total_pages * 100) if total_pages else 0
+
     return render_template(
         "progress.html",
         active="progress",
         total_pages=total_pages,
+        any_extracted_pages=any_extracted_pages,
+        any_extracted_pct=any_extracted_pct,
         models=models,
     )
 

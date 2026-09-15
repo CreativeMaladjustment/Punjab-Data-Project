@@ -49,6 +49,33 @@ model"). Use this to point a second model at exactly the pages a first one
 that model already succeeded on. A content failure that isn't capped yet is
 deliberately left out -- it's still being retried automatically under its
 own tag next run.
+
+Default candidate selection also skips any *never-attempted* page (no
+llm_extractions row at all yet under OLLAMA_MODEL's own tag) that already
+has a *successful* extraction under ANY OTHER model_tag -- a different
+vision model's own run, scripts/parse_ocr_text.py's textparse:* OCR-text
+backfill, or HUMAN_MODEL_TAG (a hand-corrected page already has data). The
+actual goal is getting data extracted from every page, not any one model's
+own completeness -- once some source has succeeded on a page, spending
+another model's run re-attempting it is wasted effort against that goal,
+even though the per-model tracking on the dashboard still very much wants
+every model's own numbers kept accurate for comparison. Set
+ALLOW_ALREADY_EXTRACTED=true to turn this off for a deliberate model
+bake-off/comparison run -- restores the original behavior of claiming
+purely off OLLAMA_MODEL's own tag, regardless of what any other source
+already produced. Applies in rescue mode too: a page SOURCE_MODEL capped
+out on that some *other* source has since covered doesn't need rescuing
+either.
+
+Deliberately NOT applied to a page OLLAMA_MODEL's own tag has already
+touched (a stale claim, or a retryable failure) -- only ever a fresh
+claim is skipped this way. Once a page is mid-flight under this tag it
+always runs to a normal terminal state regardless of what succeeds
+elsewhere meanwhile; otherwise a stale claim superseded by another
+source's success mid-flight would be stuck forever, matching neither
+"never attempted" nor anything reclaimable -- see claim_next_page()'s
+own comments for the full reasoning (caught in review on the PR that
+introduced this).
 """
 import base64
 import contextlib
@@ -82,6 +109,12 @@ if SOURCE_MODEL_TAG is not None and SOURCE_MODEL_TAG == MODEL_TAG:
         f"({OLLAMA_MODEL!r}) -- a model can't rescue its own capped content failures "
         "under its own tag; set OLLAMA_MODEL to a different model"
     )
+
+# See the module docstring's "default candidate selection" section. Off by
+# default -- skipping already-extracted pages is the default behavior; this
+# opts back into the old claim-purely-off-my-own-tag behavior for a
+# deliberate model comparison run.
+ALLOW_ALREADY_EXTRACTED = os.environ.get("ALLOW_ALREADY_EXTRACTED", "").strip().lower() in ("true", "1", "yes")
 
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
@@ -369,6 +402,39 @@ _SOURCE_CAPPED_FILTER = """
           )
 """ if SOURCE_MODEL_TAG else ""
 
+# See the module docstring's "default candidate selection" section and
+# ALLOW_ALREADY_EXTRACTED above. Appended (empty string otherwise, same
+# pattern as _SOURCE_CAPPED_FILTER) ONLY to the `le.id IS NULL` branch below
+# in both CLAIM_NEXT_PAGE_SQL's candidate CTE and PENDING_EXISTS_SQL -- a
+# genuinely never-attempted page skips straight past if some *other*
+# model_tag (or HUMAN_MODEL_TAG) already has a successful extraction for it.
+#
+# Deliberately NOT applied to the stale-claimed/stale-failed-retryable
+# branches alongside it: a Copilot review on the PR that introduced this
+# caught the real bug in an earlier version that did apply it everywhere --
+# model A claims a page, model B (or a human) succeeds on it before A's
+# worker finishes, A's worker dies leaving a stale 'claimed' row, and a
+# blanket filter would then make that row match neither "never attempted"
+# (it has a row) nor anything reclaimable (filtered out because B
+# succeeded) -- permanently stuck as 'claimed' forever, inflating
+# claimed_stale/remaining in EXTRACTION_SUMMARY_SQL indefinitely with no
+# path back to a terminal state. Scoping the filter to `le.id IS NULL` only
+# closes that: a page already mid-flight (or already failed once) under
+# THIS model_tag always gets to run to a normal terminal state
+# (success/failed, capped or not) via the existing reclaim logic below,
+# regardless of what any other model_tag does meanwhile -- only a *fresh*
+# claim attempt is skipped when the page already has data elsewhere. The
+# corollary: if B's success already existed *before* A ever tried to claim
+# this page, A's original claim attempt would itself have been filtered out
+# here, so A can only reach a stale/retryable row this way via the genuine
+# race the comment above describes, not a pattern that recurs indefinitely
+# on the same page.
+_SKIP_ALREADY_EXTRACTED_FILTER = """
+                AND NOT EXISTS (
+                  SELECT 1 FROM llm_extractions any_le
+                  WHERE any_le.page_id = p.id AND any_le.status = 'success'
+                )""" if not ALLOW_ALREADY_EXTRACTED else ""
+
 CLAIM_NEXT_PAGE_SQL = """
     WITH candidate AS (
         SELECT p.id
@@ -378,7 +444,7 @@ CLAIM_NEXT_PAGE_SQL = """
         WHERE p.image_uploaded_at IS NOT NULL
           AND p.excluded_at IS NULL
           AND (
-            le.id IS NULL
+            (le.id IS NULL{skip_extracted_filter})
             OR (le.status = 'claimed'
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second')
             OR (le.status = 'failed'
@@ -412,7 +478,7 @@ CLAIM_NEXT_PAGE_SQL = """
         RETURNING page_id
     )
     SELECT (SELECT page_id FROM inserted) AS page_id
-""".format(source_filter=_SOURCE_CAPPED_FILTER)
+""".format(source_filter=_SOURCE_CAPPED_FILTER, skip_extracted_filter=_SKIP_ALREADY_EXTRACTED_FILTER)
 
 # A separate, lock-free EXISTS check -- deliberately not folded into
 # CLAIM_NEXT_PAGE_SQL above (a previous version did, and ran it on every
@@ -440,14 +506,14 @@ PENDING_EXISTS_SQL = """
         WHERE p.image_uploaded_at IS NOT NULL
           AND p.excluded_at IS NULL
           AND (
-            le.id IS NULL
+            (le.id IS NULL{skip_extracted_filter})
             OR le.status = 'claimed'
             OR (le.status = 'failed'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
           {source_filter}
     )
-""".format(source_filter=_SOURCE_CAPPED_FILTER)
+""".format(source_filter=_SOURCE_CAPPED_FILTER, skip_extracted_filter=_SKIP_ALREADY_EXTRACTED_FILTER)
 
 
 CLAIM_CONTENDED = object()  # sentinel: every attempt found a candidate but
@@ -1093,6 +1159,10 @@ def main():
             f"rescue mode: only claiming pages capped out as content failures "
             f"under source model tag {SOURCE_MODEL_TAG!r}"
         )
+    if ALLOW_ALREADY_EXTRACTED:
+        print("ALLOW_ALREADY_EXTRACTED set: will claim pages another model/textparse/human already succeeded on")
+    else:
+        print("default: skipping pages that already have a successful extraction from any source")
     if MAX_PAGES_PER_WORKER:
         print(f"MAX_PAGES_PER_WORKER set: stopping after {MAX_PAGES_PER_WORKER} page(s)")
     processed = 0

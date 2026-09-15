@@ -40,6 +40,13 @@
   .model-remaining .label { font: 400 11px/1.4 "IBM Plex Sans", sans-serif; color: var(--muted); margin-top: 6px; }
   .remaining-note { font: 400 12.5px/1.65 "IBM Plex Sans", sans-serif; color: var(--muted); margin: 16px 0 0; max-width: 82ch; }
 
+  .overall-card { background: var(--panel); border: 1px solid var(--border); padding: 28px 28px 24px; }
+  .overall-headline { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 16px; }
+  .overall-headline .num { font: 500 40px/1 "IBM Plex Mono", monospace; letter-spacing: -0.02em; color: var(--ink); }
+  .overall-headline .pct { font: 500 20px/1 "IBM Plex Mono", monospace; color: var(--green); }
+  .overall-headline .of { font: 400 14px/1 "IBM Plex Sans", sans-serif; color: var(--muted); }
+  .overall-card .bar { height: 26px; }
+
   .outcome-wrap { border: 1px solid var(--border); background: var(--panel); overflow-x: auto; }
   table.outcome { width: 100%; min-width: 900px; }
   table.outcome th {
@@ -75,6 +82,25 @@
     </div>
   </div>
   <p class="lede">{{ "{:,}".format(total_pages) }} page images uploaded to Backblaze B2 and available to process. Each model works through the same backlog independently; a page is never done until a person has looked at it.</p>
+
+  <section class="block">
+    <h2>Overall: pages with data extracted</h2>
+    <div class="overall-card">
+      <div class="overall-headline">
+        <span class="num">{{ "{:,}".format(any_extracted_pages) }}</span>
+        <span class="of">of {{ "{:,}".format(total_pages) }} pages</span>
+        <span class="pct">{{ "%.1f"|format(any_extracted_pct) }}%</span>
+      </div>
+      <div class="bar">
+        <div class="done" style="width:{{ any_extracted_pct }}%"></div>
+      </div>
+      <div class="bar-legend">
+        <span>{{ "{:,}".format(any_extracted_pages) }} have a successful extraction from at least one source</span>
+        <span>{{ "{:,}".format(total_pages - any_extracted_pages) }} have none yet</span>
+      </div>
+    </div>
+    <p class="remaining-note">The real goal, collapsed to one number: has <em>any</em> source — any model in the bake-off, the textparse:* OCR-text backfill, or a human correction — successfully produced output for this page, whether or not it's been reviewed yet. This is deliberately different from "reviewed &amp; approved" below, and from any single model's own progress — it only asks whether the page has data at all. The per-model breakdown below is unaffected by this number; it still tracks which model is doing the work and how well.</p>
+  </section>
 
   <section class="block">
     <h2>Pages remaining, per model</h2>

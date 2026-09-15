@@ -30,14 +30,13 @@ jobs:
   parse:
     strategy:
       fail-fast: false
-      # Single worker for now, on purpose -- this is a new, unvalidated path
-      # (see scripts/parse_ocr_text.py) and a text-only call is already much
-      # faster per page than the vision pass (no image decode, no vision
-      # tokens), so one worker still clears a meaningful chunk of backlog
-      # while it's watched. Bump the list back up (extract-pages.yml uses up
-      # to 18) once results look right.
+      # 15 workers -- single-worker throughput was slower than wanted for
+      # the size of this backlog. A text-only call is still much faster per
+      # page than the vision pass (no image decode, no vision tokens), so
+      # this clears noticeably faster than extract-pages.yml's own even at
+      # fewer than its 18 workers.
       matrix:
-        worker: [1]
+        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload  # where SUPABASE_DB_URL lives; no B2 secrets are

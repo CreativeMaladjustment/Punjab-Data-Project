@@ -307,6 +307,13 @@ MAX_ATTEMPTS_PER_PAGE = 2  # total tries allowed per (page, model_tag) -- one
 # `inserted` would silently vanish (zero rows) on a lost race, which would
 # be indistinguishable from a genuinely empty candidate pick.
 #
+# p.excluded_at IS NOT NULL removes a page a QC reviewer has pulled out of
+# processing (see supabase/migrations/20260915120000_add_page_exclusion.sql
+# and api/queries.py's apply_page_exclusion()) -- e.g. a duplicate or blank
+# scan not worth extracting -- from candidate selection entirely, same as
+# PENDING_EXISTS_SQL below. Its existing llm_extractions rows, if any, are
+# untouched; this only stops new claims against it.
+#
 MAX_B2_FAILURES_PER_WORKER = int(os.environ.get("MAX_B2_FAILURES_PER_WORKER", "10"))
 if MAX_B2_FAILURES_PER_WORKER < 0:
     raise ValueError(
@@ -369,6 +376,7 @@ CLAIM_NEXT_PAGE_SQL = """
         LEFT JOIN llm_extractions le
             ON le.page_id = p.id AND le.model_tag = %(model_tag)s
         WHERE p.image_uploaded_at IS NOT NULL
+          AND p.excluded_at IS NULL
           AND (
             le.id IS NULL
             OR (le.status = 'claimed'
@@ -430,6 +438,7 @@ PENDING_EXISTS_SQL = """
         LEFT JOIN llm_extractions le
             ON le.page_id = p.id AND le.model_tag = %(model_tag)s
         WHERE p.image_uploaded_at IS NOT NULL
+          AND p.excluded_at IS NULL
           AND (
             le.id IS NULL
             OR le.status = 'claimed'

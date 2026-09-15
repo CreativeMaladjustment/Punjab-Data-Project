@@ -75,7 +75,13 @@ STATUS_BY_MODEL_SQL = """
     order by model_tag
 """
 
-TOTAL_IMAGES_SQL = "select count(*) from pages where image_uploaded_at is not null"
+# excluded_at is not null: a page a QC reviewer has pulled out of
+# processing (api/queries.py's apply_page_exclusion()) -- same predicate
+# extract_with_llm.py's CLAIM_NEXT_PAGE_SQL/PENDING_EXISTS_SQL use to skip
+# it. Without this, an excluded page would count toward never_attempted/
+# remaining below forever, even though claim_next_page() will never pick
+# it up again.
+TOTAL_IMAGES_SQL = "select count(*) from pages where image_uploaded_at is not null and excluded_at is null"
 
 ENTRY_COUNTS_SQL = """
     select le.model_tag, count(*)

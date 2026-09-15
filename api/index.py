@@ -71,6 +71,7 @@ from queries import (
     CATALOGUE_ENTRY_FIELDS,
     CATALOGUE_ENTRY_INT_FIELDS,
     CATALOGUE_ENTRY_JSON_FIELDS,
+    apply_page_exclusion,
     apply_qc_verdict,
     fetch_corpus_stats,
     fetch_dashboard_data,
@@ -518,7 +519,9 @@ def qc_index():
             # image_uploaded_at IS NOT NULL: a placeholder page with no
             # image yet has nothing for a reviewer to look at (same
             # predicate fetch_qc_page()'s own lookup and prev/next use).
-            cur.execute("SELECT min(id) FROM pages WHERE image_uploaded_at IS NOT NULL")
+            # excluded_at IS NULL: skip straight past a page someone's
+            # already pulled out of processing, same as prev/next do.
+            cur.execute("SELECT min(id) FROM pages WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL")
             (first_id,) = cur.fetchone()
     finally:
         conn.close()
@@ -686,6 +689,46 @@ def qc_verdict():
         # signing off on -- a failed or (stale-)claimed row has nothing
         # to approve.
         abort(400)
+    return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
+
+
+@app.route("/qc/exclude", methods=["POST"])
+@login_required
+def qc_exclude():
+    submitted_page_id = request.form.get("page_id", type=int)
+    submitted_model_tag = request.form.get("model_tag") or None
+    action = request.form.get("action")
+    note = request.form.get("note", "").strip()
+    if submitted_page_id is None or action not in ("exclude", "include"):
+        abort(400)
+
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM pages WHERE id = %(page_id)s", {"page_id": submitted_page_id})
+            row = cur.fetchone()
+        if row is None:
+            abort(404)
+        # Same "read the id back from the row, don't trust the submitted
+        # value" treatment as qc_verdict()/qc_save_edit() use for their own
+        # redirects -- avoids the same open-redirect scanner finding even
+        # though url_for() can only ever build a same-origin URL.
+        (page_id,) = row
+
+        model_tag = None
+        if submitted_model_tag:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT model_tag FROM llm_extractions WHERE page_id = %(page_id)s AND model_tag = %(model_tag)s",
+                    {"page_id": page_id, "model_tag": submitted_model_tag},
+                )
+                tag_row = cur.fetchone()
+            if tag_row:
+                (model_tag,) = tag_row
+
+        apply_page_exclusion(conn, page_id, action == "exclude", note)
+    finally:
+        conn.close()
     return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
 
 

@@ -16,7 +16,7 @@ import psycopg2.sql
 from psycopg2.extras import Json
 
 TOTAL_PAGES_SQL = """
-    SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL
+    SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL
 """
 
 # Mirrors extract_with_llm.py's CLAIM_TIMEOUT_SECONDS/MAX_ATTEMPTS_PER_PAGE
@@ -486,6 +486,7 @@ def fetch_qc_page(conn, page_id, model_tag=None):
         cur.execute(
             """
             SELECT p.id, p.page_no, p.b2_account, p.b2_bucket, p.image_key,
+                   p.excluded_at, p.excluded_note,
                    pf.pcloud_fileid, pf.name AS pcloud_name, pf.folder AS pcloud_folder
             FROM pages p
             JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid
@@ -547,13 +548,20 @@ def fetch_qc_page(conn, page_id, model_tag=None):
             rcols = [d.name for d in cur.description]
             reviews = [dict(zip(rcols, r)) for r in cur.fetchall()]
 
+        # Excluded pages are skipped by prev/next (not just by the counts
+        # above) -- there's nothing left for a reviewer to do on one until
+        # it's re-included, so walking past it here keeps Prev/Next moving
+        # through pages that still need attention. Landing on one directly
+        # (via URL, or because it was excluded while it was the current
+        # page) still works -- see the page lookup above, which doesn't
+        # filter on excluded_at -- so re-including it is always reachable.
         cur.execute(
-            "SELECT min(id) FROM pages WHERE id > %(page_id)s AND image_uploaded_at IS NOT NULL",
+            "SELECT min(id) FROM pages WHERE id > %(page_id)s AND image_uploaded_at IS NOT NULL AND excluded_at IS NULL",
             {"page_id": page_id},
         )
         (next_id,) = cur.fetchone()
         cur.execute(
-            "SELECT max(id) FROM pages WHERE id < %(page_id)s AND image_uploaded_at IS NOT NULL",
+            "SELECT max(id) FROM pages WHERE id < %(page_id)s AND image_uploaded_at IS NOT NULL AND excluded_at IS NULL",
             {"page_id": page_id},
         )
         (prev_id,) = cur.fetchone()
@@ -574,16 +582,19 @@ def fetch_qc_page(conn, page_id, model_tag=None):
 
 
 def fetch_qc_position(conn, page_id):
-    """(rank, total) of page_id among every image-available page, ordered by
-    id -- backs the QC page's "page N of M" counter. rank counts pages with
-    id <= page_id, so it's meaningful even though prev/next (see
-    fetch_qc_page()) walk the same id ordering rather than a queue of
-    specifically-unreviewed pages."""
+    """(rank, total) of page_id among every image-available, non-excluded
+    page, ordered by id -- backs the QC page's "page N of M" counter. rank
+    counts pages with id <= page_id, so it's meaningful even though prev/next
+    (see fetch_qc_page()) walk the same id ordering rather than a queue of
+    specifically-unreviewed pages. If page_id itself is excluded, it isn't
+    counted in rank either (TOTAL_PAGES_SQL excludes it from total the same
+    way) -- a harmless cosmetic wrinkle while sitting on an excluded page,
+    not a data problem."""
     with conn.cursor() as cur:
         cur.execute(TOTAL_PAGES_SQL)
         (total,) = cur.fetchone()
         cur.execute(
-            "SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL AND id <= %(page_id)s",
+            "SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL AND id <= %(page_id)s",
             {"page_id": page_id},
         )
         (rank,) = cur.fetchone()
@@ -679,6 +690,38 @@ def apply_qc_verdict(conn, extraction_id, verdict, note):
             )
     conn.commit()
     return "ok", page_id, model_tag
+
+
+def apply_page_exclusion(conn, page_id, excluded, note):
+    """Toggle whether page_id is excluded from future processing.
+
+    excluded=True sets excluded_at to now() and stores note (if any); this
+    is what CLAIM_NEXT_PAGE_SQL/PENDING_EXISTS_SQL (scripts/
+    extract_with_llm.py) and TOTAL_PAGES_SQL (above) check to keep the page
+    from ever being claimed again or counted in dashboard totals.
+    excluded=False clears both columns -- re-included is re-included clean,
+    with no stale note left over from whatever justified the exclusion
+    last time.
+
+    Deliberately narrow: only pages.excluded_at/excluded_note change. Any
+    llm_extractions/catalogue_entries rows already on this page (from
+    before it was excluded) are left exactly as they were -- this isn't a
+    verdict on their content, just a switch for whether the pipeline should
+    keep trying. Returns False if page_id doesn't exist, True otherwise.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE pages
+            SET excluded_at = CASE WHEN %(excluded)s THEN now() ELSE NULL END,
+                excluded_note = CASE WHEN %(excluded)s THEN %(note)s ELSE NULL END
+            WHERE id = %(page_id)s
+            """,
+            {"page_id": page_id, "excluded": excluded, "note": note or None},
+        )
+        found = cur.rowcount > 0
+    conn.commit()
+    return found
 
 
 def save_human_edit(conn, page_id, entries):

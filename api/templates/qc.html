@@ -34,6 +34,13 @@
     display: flex; align-items: center; justify-content: center; border: 1px solid #e0d8c9;
     font: 400 12px/1.7 "IBM Plex Mono", monospace; color: #9a8f7f; text-align: center; padding: 12px;
   }
+  .exclude-block { padding: 14px 16px; border-top: 1px solid var(--border); }
+  .exclude-block .lbl { font: 500 11px/1 "IBM Plex Mono", monospace; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); display: block; margin-bottom: 10px; }
+  .exclude-pill {
+    font: 500 11px/1 "IBM Plex Mono", monospace; letter-spacing: 0.05em; text-transform: uppercase;
+    padding: 6px 10px; display: inline-block; background: var(--brick-bg); color: var(--brick); margin-bottom: 10px;
+  }
+  .exclude-block .verdict-note { margin-bottom: 10px; }
   .ocr-block { padding: 0 16px 16px; }
   .ocr-block + .ocr-block { padding-top: 4px; }
   .ocr-block .lbl { font: 500 11px/1 "IBM Plex Mono", monospace; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
@@ -162,6 +169,27 @@
           <img src="{{ url_for('qc_image', page_id=data.page.id) }}" alt="Page {{ data.page.page_no }} scan">
         {% else %}
           <div class="scan-placeholder">image unavailable<br>(B2 account "{{ data.page.b2_account }}" not configured for this deployment)</div>
+        {% endif %}
+      </div>
+      <div class="exclude-block">
+        <span class="lbl">Processing</span>
+        {% if data.page.excluded_at %}
+          <div class="exclude-pill">Excluded since {{ data.page.excluded_at }}</div>
+          {% if data.page.excluded_note %}<p class="muted-block" style="margin:0 0 12px;">{{ data.page.excluded_note }}</p>{% endif %}
+          <form method="post" action="{{ url_for('qc_exclude') }}">
+            <input type="hidden" name="page_id" value="{{ data.page.id }}">
+            <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
+            <input type="hidden" name="action" value="include">
+            <button type="submit" class="btn-outline">Re-include in processing</button>
+          </form>
+        {% else %}
+          <form method="post" action="{{ url_for('qc_exclude') }}">
+            <input type="hidden" name="page_id" value="{{ data.page.id }}">
+            <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
+            <input type="hidden" name="action" value="exclude">
+            <textarea class="verdict-note" name="note" rows="2" placeholder="Optional note — why this page shouldn't be processed (duplicate, blank, unusable scan, ...)"></textarea>
+            <button type="submit" class="btn-reprocess">Exclude from processing</button>
+          </form>
         {% endif %}
       </div>
       {% for o in data.ocr_rows %}

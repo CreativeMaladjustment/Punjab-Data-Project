@@ -59,6 +59,17 @@ on:
           - gemma4:e2b
           - glm-ocr
           - minicpm-v4.5
+      allow_already_extracted:
+        description: >-
+          By default this run skips any page that already has a successful
+          extraction from ANY source (another model, the textparse:* OCR-
+          text backfill, or a human correction) -- the goal is coverage,
+          not re-running a page that already has data. Check this box only
+          for a deliberate model bake-off/comparison run, where you want
+          "model" above to run against every page regardless of what
+          already succeeded there.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -237,6 +248,9 @@ jobs:
           # extract_with_llm.py treats "(none)" the same as unset -- see its
           # module docstring's "rescue mode" section.
           SOURCE_MODEL: ${{ inputs.source_model }}
+          # A `type: boolean` input renders as the string "true"/"false" --
+          # matches what extract_with_llm.py's ALLOW_ALREADY_EXTRACTED parses.
+          ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted }}
           # Was a temporary smoke-test cap (2) while confirming the num_ctx
           # fix for the 400s every Ollama call started throwing on
           # 2026-09-11 -- two full runs since (34601420598, 34617429251)

@@ -63,6 +63,16 @@ on:
           - gemma4:e2b
           - glm-ocr
           - minicpm-v4.5
+      allow_already_extracted:
+        description: >-
+          By default this run skips any page that already has a successful
+          extraction from ANY source (another model, the textparse:* OCR-
+          text backfill, or a human correction) -- the goal is coverage,
+          not re-running a page that already has data. Check this box only
+          for a deliberate model bake-off/comparison run. See
+          extract-pages.yml / extract_with_llm.py's docstring.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -155,6 +165,7 @@ jobs:
           # extract_with_llm.py treats "(none)" the same as unset -- see its
           # module docstring's "rescue mode" section.
           SOURCE_MODEL: ${{ inputs.source_model }}
+          ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted }}
           MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}

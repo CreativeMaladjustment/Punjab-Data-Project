@@ -49,6 +49,22 @@ model"). Use this to point a second model at exactly the pages a first one
 that model already succeeded on. A content failure that isn't capped yet is
 deliberately left out -- it's still being retried automatically under its
 own tag next run.
+
+Default candidate selection also skips any page that already has a
+*successful* extraction under ANY model_tag -- not just OLLAMA_MODEL's own,
+and including both a different vision model's own run and
+scripts/parse_ocr_text.py's textparse:* OCR-text backfill (HUMAN_MODEL_TAG
+counts too: a hand-corrected page already has data). The actual goal is
+getting data extracted from every page, not any one model's own completeness
+-- once some source has succeeded on a page, spending another model's run
+re-attempting it is wasted effort against that goal, even though the
+per-model tracking on the dashboard still very much wants every model's own
+numbers kept accurate for comparison. Set ALLOW_ALREADY_EXTRACTED=true to
+turn this off for a deliberate model bake-off/comparison run -- restores the
+original behavior of claiming purely off OLLAMA_MODEL's own tag, regardless
+of what any other source already produced. Applies in rescue mode too: a
+page SOURCE_MODEL capped out on that some *other* source has since covered
+doesn't need rescuing either.
 """
 import base64
 import contextlib
@@ -82,6 +98,12 @@ if SOURCE_MODEL_TAG is not None and SOURCE_MODEL_TAG == MODEL_TAG:
         f"({OLLAMA_MODEL!r}) -- a model can't rescue its own capped content failures "
         "under its own tag; set OLLAMA_MODEL to a different model"
     )
+
+# See the module docstring's "default candidate selection" section. Off by
+# default -- skipping already-extracted pages is the default behavior; this
+# opts back into the old claim-purely-off-my-own-tag behavior for a
+# deliberate model comparison run.
+ALLOW_ALREADY_EXTRACTED = os.environ.get("ALLOW_ALREADY_EXTRACTED", "").strip().lower() in ("true", "1", "yes")
 
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
@@ -369,6 +391,25 @@ _SOURCE_CAPPED_FILTER = """
           )
 """ if SOURCE_MODEL_TAG else ""
 
+# See the module docstring's "default candidate selection" section and
+# ALLOW_ALREADY_EXTRACTED above. Appended (empty string otherwise, same
+# pattern as _SOURCE_CAPPED_FILTER) to both CLAIM_NEXT_PAGE_SQL's candidate
+# CTE and PENDING_EXISTS_SQL below, so this model_tag skips any page some
+# *other* model_tag (or HUMAN_MODEL_TAG) has already succeeded on -- a page
+# this exact model_tag already succeeded on was never a candidate anyway
+# (le.status='success' matches none of the OR branches above/below), so
+# this only ever newly excludes pages that already have data from
+# elsewhere. Not scoped to any particular tag: any successful row at all is
+# enough, deliberately matching api/queries.py's PAGES_ANY_EXTRACTED_SQL,
+# which answers the same "does this page have data yet" question for the
+# Progress page's overall summary.
+_SKIP_ALREADY_EXTRACTED_FILTER = """
+          AND NOT EXISTS (
+            SELECT 1 FROM llm_extractions any_le
+            WHERE any_le.page_id = p.id AND any_le.status = 'success'
+          )
+""" if not ALLOW_ALREADY_EXTRACTED else ""
+
 CLAIM_NEXT_PAGE_SQL = """
     WITH candidate AS (
         SELECT p.id
@@ -386,6 +427,7 @@ CLAIM_NEXT_PAGE_SQL = """
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
           {source_filter}
+          {skip_extracted_filter}
         ORDER BY random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
@@ -412,7 +454,7 @@ CLAIM_NEXT_PAGE_SQL = """
         RETURNING page_id
     )
     SELECT (SELECT page_id FROM inserted) AS page_id
-""".format(source_filter=_SOURCE_CAPPED_FILTER)
+""".format(source_filter=_SOURCE_CAPPED_FILTER, skip_extracted_filter=_SKIP_ALREADY_EXTRACTED_FILTER)
 
 # A separate, lock-free EXISTS check -- deliberately not folded into
 # CLAIM_NEXT_PAGE_SQL above (a previous version did, and ran it on every
@@ -446,8 +488,9 @@ PENDING_EXISTS_SQL = """
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
           {source_filter}
+          {skip_extracted_filter}
     )
-""".format(source_filter=_SOURCE_CAPPED_FILTER)
+""".format(source_filter=_SOURCE_CAPPED_FILTER, skip_extracted_filter=_SKIP_ALREADY_EXTRACTED_FILTER)
 
 
 CLAIM_CONTENDED = object()  # sentinel: every attempt found a candidate but
@@ -1093,6 +1136,10 @@ def main():
             f"rescue mode: only claiming pages capped out as content failures "
             f"under source model tag {SOURCE_MODEL_TAG!r}"
         )
+    if ALLOW_ALREADY_EXTRACTED:
+        print("ALLOW_ALREADY_EXTRACTED set: will claim pages another model/textparse/human already succeeded on")
+    else:
+        print("default: skipping pages that already have a successful extraction from any source")
     if MAX_PAGES_PER_WORKER:
         print(f"MAX_PAGES_PER_WORKER set: stopping after {MAX_PAGES_PER_WORKER} page(s)")
     processed = 0

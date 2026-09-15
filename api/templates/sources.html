@@ -88,7 +88,7 @@
     <div>
       {% for d in docs %}
       <div class="doc-row">
-        <span class="doc-path"><a href="{{ d.url }}" target="_blank" rel="noopener">{{ d.path }}</a></span>
+        <span class="doc-path">{{ d.link }}</span>
         <span class="doc-what">{{ d.what }}</span>
       </div>
       {% endfor %}

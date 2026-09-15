@@ -40,7 +40,7 @@
     <h2>{{ s.heading }}</h2>
     <p>{{ s.body }}</p>
     <p>{{ s.body2 }}</p>
-    <div class="ref">{% for r in s.ref %}{% if r.url %}<a href="{{ r.url }}" target="_blank" rel="noopener">{{ r.text }}</a>{% else %}{{ r.text }}{% endif %}{{ ' · ' if not loop.last }}{% endfor %}</div>
+    <div class="ref">{% for r in s.ref %}{{ r }}{{ ' · ' if not loop.last }}{% endfor %}</div>
   </section>
   {% endfor %}
 

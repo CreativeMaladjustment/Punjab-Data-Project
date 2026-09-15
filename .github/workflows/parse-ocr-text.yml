@@ -1,0 +1,156 @@
+# Backfills structured catalogue entries from already-successful full-page
+# OCR transcriptions (page_ocr_text) for pages that don't yet have a
+# successful structured extraction under the primary model (glm-ocr) --
+# see scripts/parse_ocr_text.py's module docstring for the full reasoning.
+#
+# Unlike extract-pages.yml, this workflow never touches page images or B2:
+# the only input is the OCR text already sitting in Postgres, and the only
+# output is Postgres writes -- so no B2 secrets are used here at all, and
+# there's no image-decode/vision-token cost, just a much cheaper text-only
+# Ollama call per page.
+name: Parse structured entries from OCR text
+
+on:
+  workflow_dispatch:
+    inputs:
+      text_model:
+        description: "Ollama text model to run"
+        type: choice
+        default: llama3.1:8b
+        options:
+          - llama3.1:8b
+          - llama3.2:3b
+          - qwen2.5:7b
+          - mistral:7b
+
+permissions:
+  contents: read
+
+jobs:
+  parse:
+    strategy:
+      fail-fast: false
+      # Fewer workers than extract-pages.yml's 18 -- a text-only call is
+      # much faster per page (no image decode, no vision tokens), so fewer
+      # workers clear the same backlog in comparable wall time, leaving more
+      # of the shared 20-job account-wide concurrency cap free for
+      # extract-pages.yml/process-pdfs.yml to run alongside this.
+      matrix:
+        worker: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    environment: b2-upload  # where SUPABASE_DB_URL lives; no B2 secrets are
+    # actually used here -- see the module docstring in parse_ocr_text.py.
+    env:
+      # Routed through an env var rather than interpolating
+      # ${{ inputs.text_model }} directly into run: scripts (Semgrep:
+      # yaml.github-actions.security.run-shell-injection) -- same pattern
+      # extract-pages.yml uses for inputs.model.
+      TEXT_MODEL_INPUT: ${{ inputs.text_model }}
+      OLLAMA_VERSION: "0.34.0"  # keep in sync with extract-pages.yml
+    steps:
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          sudo rm -rf /usr/local/share/boost
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          df -h
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Cache Ollama binary
+        id: cache-ollama-bin
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ollama-bin
+          key: ollama-bin-${{ env.OLLAMA_VERSION }}
+
+      - name: Restore Ollama binary from cache
+        if: steps.cache-ollama-bin.outputs.cache-hit == 'true'
+        run: |
+          sudo mkdir -p /usr/local/lib/ollama
+          sudo cp ~/.cache/ollama-bin/ollama /usr/local/bin/ollama
+          sudo chmod 755 /usr/local/bin/ollama
+          sudo cp -r ~/.cache/ollama-bin/lib/. /usr/local/lib/ollama/
+          command -v ollama
+
+      - name: Install Ollama
+        if: steps.cache-ollama-bin.outputs.cache-hit != 'true'
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL https://ollama.com/install.sh -o install-ollama.sh && sh install-ollama.sh; then
+              exit 0
+            fi
+            echo "Ollama install attempt $attempt failed"
+            if [ "$attempt" -lt 5 ]; then
+              sleep $((2 ** attempt))
+            fi
+          done
+          echo "Ollama install failed after 5 attempts"
+          exit 1
+
+      - name: Populate Ollama binary cache
+        if: steps.cache-ollama-bin.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/.cache/ollama-bin/lib
+          cp /usr/local/bin/ollama ~/.cache/ollama-bin/ollama
+          cp -r /usr/local/lib/ollama/. ~/.cache/ollama-bin/lib/
+
+      - name: Cache Ollama model
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ollama
+          key: ollama-model-${{ inputs.text_model }}
+
+      - name: Start Ollama server
+        run: |
+          nohup ollama serve > ollama.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:11434/api/tags > /dev/null && exit 0
+            sleep 2
+          done
+          echo "Ollama server did not come up in time"; cat ollama.log; exit 1
+
+      - name: Pull model
+        run: ollama pull "$TEXT_MODEL_INPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run OCR-text parsing
+        id: run
+        env:
+          PYTHONUNBUFFERED: "1"
+          TEXT_MODEL: ${{ inputs.text_model }}
+          MAX_PAGES_PER_WORKER: "2000"
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set +e
+          python scripts/parse_ocr_text.py
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Flag runtime guard trip for manual resume
+        if: steps.run.outputs.exit_code == '42'
+        run: |
+          echo "### ⏱️ Runtime guard tripped for \`$TEXT_MODEL_INPUT\` (worker ${{ matrix.worker }}) — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The run stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** re-run this workflow with the same text model (\`$TEXT_MODEL_INPUT\`) to continue." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail job on unexpected script error
+        if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42'
+        run: exit 1

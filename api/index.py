@@ -403,7 +403,16 @@ def progress():
     models = []
     for m in data["models"]:
         m = dict(m)
-        m["role"] = MODEL_ROLE_LABELS.get(m["model_tag"], "")
+        if m["model_tag"] in MODEL_ROLE_LABELS:
+            m["role"] = MODEL_ROLE_LABELS[m["model_tag"]]
+        elif m["model_tag"].startswith("textparse:"):
+            # scripts/parse_ocr_text.py's namespace -- a specific parser
+            # model (e.g. "textparse:llama3.1-8b") rather than a fixed
+            # tag, so this can't be a MODEL_ROLE_LABELS entry the way a
+            # real vision model's fixed tag is.
+            m["role"] = "text-parsed from full-page OCR, not the image"
+        else:
+            m["role"] = ""
         # Same formula the design mockup used: each bar segment is sized
         # against the *total* uploaded pages (not this model's own attempted
         # count), so every model's bar is directly comparable at a glance.

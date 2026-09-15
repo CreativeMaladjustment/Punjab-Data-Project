@@ -19,7 +19,7 @@ is printed; do not correct, complete, or infer beyond the stated rules.**
 | `printer_verbatim` | printer + place as printed, incl. `"Ditto"` |
 | `printer` | printer name with Ditto resolved (still verbatim spelling) |
 | `pcity` | printer's city, Ditto resolved |
-| `author` | author as printed, incl. honorifics (`"Jiwan Singh, Bhai"`); translators noted as `"(tr. ...)"`; empty if entry is title-first with no author |
+| `author` | author as printed, incl. honorifics (`"Jiwan Singh, Bhai"`); a role string printed next to the name is kept in parentheses, e.g. `"(tr. ...)"` for a translator or `"(ed. ...)"` for an editor; empty if entry is title-first with no author |
 | `title` | romanized title; if only native script + English gloss given, use the bracketed romanization |
 | `title_native` | `true` if the entry prints a native-script title (bool) |
 | `gloss` | the annotator's English content summary, verbatim, full |
@@ -40,4 +40,10 @@ is printed; do not correct, complete, or infer beyond the stated rules.**
 Conventions: numbers keep printed value (do not sum pagination — postprocess
 does that); `(Designed for educational purposes.)` between entries governs the
 following entry/entries under that heading; a header `X—Y.—concluded.` means
-lang/topic continue from the previous page's section.
+lang/topic continue from the previous page's section. Page layout varies by
+era: earlier quarters print each entry as a paragraph; later quarters
+increasingly print entries as rows of an actual multi-column table, with
+columns roughly matching the `serial`/`reg`/`copies`/`copyright` "column N"
+references above. Extract one entry per paragraph or per table row either
+way — the fields mean the same thing regardless of which layout a given
+page uses.

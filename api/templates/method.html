@@ -14,6 +14,8 @@
   }
   .method-section p { font: 400 15px/1.75 "IBM Plex Sans", sans-serif; color: var(--body-text-2); margin: 0 0 14px; text-wrap: pretty; }
   .method-section .ref { font: 400 12px/1.6 "IBM Plex Mono", monospace; color: var(--muted); }
+  .method-section .ref a { color: inherit; text-decoration: none; }
+  .method-section .ref a:hover { color: var(--brick); text-decoration: underline; }
 
   .checks-intro { font: 400 15px/1.75 "IBM Plex Sans", sans-serif; color: var(--body-text-2); margin: 0 0 18px; }
   .checks-grid {
@@ -38,7 +40,7 @@
     <h2>{{ s.heading }}</h2>
     <p>{{ s.body }}</p>
     <p>{{ s.body2 }}</p>
-    <div class="ref">{{ s.ref }}</div>
+    <div class="ref">{% for r in s.ref %}{{ r }}{{ ' · ' if not loop.last }}{% endfor %}</div>
   </section>
   {% endfor %}
 

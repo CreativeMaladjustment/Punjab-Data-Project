@@ -116,6 +116,8 @@
   .pipeline-title { font: 500 15px/1.3 "IBM Plex Sans", sans-serif; }
   .pipeline-body { font: 400 13px/1.6 "IBM Plex Sans", sans-serif; color: var(--muted); text-wrap: pretty; }
   .pipeline-file { font: 400 11px/1.5 "IBM Plex Mono", monospace; color: var(--muted-2); margin-top: auto; padding-top: 10px; word-break: break-all; }
+  .pipeline-file a { color: inherit; text-decoration: none; }
+  .pipeline-file a:hover { color: var(--brick); text-decoration: underline; }
 
   .notes-section { padding: 56px 0; max-width: 640px; }
   .notes-section h2 { margin: 0 0 22px; }
@@ -169,7 +171,7 @@
         <div class="pipeline-num">{{ st.num }}</div>
         <div class="pipeline-title">{{ st.title }}</div>
         <div class="pipeline-body">{{ st.body }}</div>
-        <div class="pipeline-file">{{ st.file }}</div>
+        <div class="pipeline-file">{{ st.link }}</div>
       </div>
       {% endfor %}
     </div>

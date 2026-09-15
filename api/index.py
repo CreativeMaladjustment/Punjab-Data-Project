@@ -45,6 +45,7 @@ Vercel-account login. Two env vars are required for this:
 """
 import functools
 import os
+import re
 import sys
 from datetime import timedelta
 
@@ -64,6 +65,7 @@ import math
 
 import psycopg2
 from flask import Flask, abort, redirect, render_template, request, session, url_for
+from markupsafe import Markup
 
 from b2 import load_b2_accounts, presigned_image_url
 from queries import (
@@ -121,6 +123,50 @@ CORPUS_STAT_LABELS = [
     ("total_source_pdfs", "source PDF files"),
 ]
 
+# Every source/method citation in the public site (Overview's pipeline
+# stages, Method's per-section refs, Sources' working-documents list) links
+# straight to this repo on GitHub rather than sitting as inert path text --
+# a reader curious about "how, exactly" shouldn't have to go find the repo
+# and navigate to the file themselves. Pinned to main (not a commit SHA):
+# these are living documents a reader should see the current state of, not
+# a snapshot frozen at whatever commit happened to be deployed.
+GITHUB_REPO = "CreativeMaladjustment/Punjab-Data-Project"
+
+# Every path passed to _repo_link_html() below is a hardcoded literal from
+# the lists in this file, never anything request-derived -- but this still
+# validates it against a strict allowlist before it's allowed anywhere near
+# an href, rather than trusting "it's a literal today" to stay true forever.
+_SAFE_REPO_PATH_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
+
+
+def _repo_link_html(path, text=None, kind="blob"):
+    """Safe, pre-rendered HTML linking to `path` in this repo on main --
+    plain escaped text instead of a link if path is None (a citation that
+    isn't a repo path at all: a SQL view name, a function name). kind=
+    "tree" for a directory, "blob" (default) for a file.
+
+    Returns a markupsafe.Markup, built entirely server-side, rather than
+    the more obvious `<a href="{{ url }}">` in the template with `url`
+    computed here and handed over as a plain string: a generic template
+    scanner flags any raw variable inside href="..." on sight (it can't
+    see that these values only ever come from the hardcoded literals
+    below), and Flask's own usual answer to that -- url_for() -- only
+    builds links within this app, not to an external site like this one.
+    Building the whole anchor tag here, through Markup.format() (which
+    HTML-escapes every value it substitutes, exactly like Jinja's own
+    autoescaping would), sidesteps that ambiguity instead of arguing with
+    a purely syntactic check -- and the path validation below means this
+    is actually safe, not just quiet about it.
+    """
+    label = text if text is not None else path
+    if path is None:
+        return Markup("{}").format(label)
+    if not _SAFE_REPO_PATH_RE.match(path):
+        raise ValueError(f"unsafe repo path for a GitHub link: {path!r}")
+    url = f"https://github.com/{GITHUB_REPO}/{kind}/main/{path}"
+    return Markup('<a href="{}" target="_blank" rel="noopener">{}</a>').format(url, label)
+
+
 PIPELINE_STAGES = [
     {
         "num": "01", "title": "Source volumes",
@@ -148,31 +194,50 @@ PIPELINE_STAGES = [
         "file": "pipeline/postprocess.py",
     },
 ]
+for _stage in PIPELINE_STAGES:
+    _stage["link"] = _repo_link_html(_stage["file"])
 
+# Each ref is a list of pre-rendered Markup fragments (see
+# _repo_link_html()) -- a real repo path renders as a link, a citation
+# that isn't one at all (a SQL view name, a function name) as plain escaped
+# text. "supabase/migrations" is a directory, not a file, hence kind="tree"
+# -- every other ref here is a real file, linked as a blob.
 METHOD_SECTIONS = [
     {
         "heading": "Verbatim first",
         "body": "The extractor transcribes what is printed. It does not correct, complete, or infer beyond a stated set of rules. Misprints stay, the annotator's editorialising stays, and a reading the model is unsure of is flagged rather than smoothed over.",
         "body2": "A separate normalised layer resolves Ditto, folds printer and publisher aliases, and types the numeric fields. The verbatim layer is never rewritten by it.",
-        "ref": "pipeline/schema.md · OCR_RESEARCH_AGENDA.md",
+        "ref": [
+            _repo_link_html("pipeline/schema.md"),
+            _repo_link_html("OCR_RESEARCH_AGENDA.md"),
+        ],
     },
     {
         "heading": "Provenance on every entry",
         "body": "Each entry records the page number printed on the page and the PDF page index it was read from, so any row can be traced back to the pixels it came from.",
         "body2": "A database view joins each entry all the way back to its B2 image key and its original pCloud file, in one query.",
-        "ref": "supabase/migrations · catalogue_entries_full",
+        "ref": [
+            _repo_link_html("supabase/migrations", kind="tree"),
+            _repo_link_html(None, text="catalogue_entries_full"),
+        ],
     },
     {
         "heading": "Native-script titles",
         "body": "Where the register prints a vernacular title alongside a printed romanization, the localization workstream finds the native-script title within the entry and pairs it with its romanization.",
         "body2": "Legibility of the native script varies sharply across the volumes. A 21-page re-imaging pilot tests whether buying better scans is worth it.",
-        "ref": "pipeline/localize.py · analysis/ocr_lab/REIMAGING_PILOT.md",
+        "ref": [
+            _repo_link_html("pipeline/localize.py"),
+            _repo_link_html("analysis/ocr_lab/REIMAGING_PILOT.md"),
+        ],
     },
     {
         "heading": "The model is not the record",
         "body": "A human correction is stored under its own reserved tag rather than edited into a model's output, so a person's judgement is always distinguishable from what a model actually produced.",
         "body2": "Several models run against the same backlog and their output is namespaced separately, so they can be compared page by page rather than merged.",
-        "ref": "api/queries.py · save_human_edit()",
+        "ref": [
+            _repo_link_html("api/queries.py"),
+            _repo_link_html(None, text="save_human_edit()"),
+        ],
     },
 ]
 
@@ -189,13 +254,21 @@ SOURCE_LICENCES = [
 ]
 
 SOURCE_DOCS = [
+    {"path": "README.md", "what": "Project overview and the live explorer link."},
+    {"path": "PLAN.md", "what": "Governing document for project direction and scope."},
     {"path": "OCR_RESEARCH_AGENDA.md", "what": "Governing document for transcription and extraction."},
     {"path": "DECISIONS.md", "what": "Numbered decision log governing every normalisation fold and method choice."},
+    {"path": "ARCHITECTURE.md", "what": "Infrastructure/engineering decision record for the CI/CD-as-compute pipeline itself."},
     {"path": "analysis/integrity/INTEGRITY_SWEEP.md", "what": "Does the stored record match its own specification?"},
     {"path": "analysis/ocr_lab/E0B_RESULTS.md", "what": "Legibility measurements across the volumes, by language and script."},
     {"path": "analysis/ocr_lab/REIMAGING_PILOT.md", "what": "The 21-page experiment deciding whether to buy re-imaged volumes."},
     {"path": "dialectic/dead_ends.md", "what": "What was tried and abandoned. Read this one first."},
+    {"path": "PERFORMANCE_NOTES.md", "what": "Point-in-time extraction throughput measurements, by runner type."},
+    {"path": "NEXT_STEPS.md", "what": "Personal to-do list for adding more free-tier inference capacity."},
+    {"path": "LICENSING.md", "what": "Authoritative statement of which licence covers code, data, and prose."},
 ]
+for _doc in SOURCE_DOCS:
+    _doc["link"] = _repo_link_html(_doc["path"])
 
 TABLE_PAGE_SIZES = (20, 50, 100)
 MAX_TABLE_PAGE = 1_000_000  # request.args["page"] is only ever clamped to

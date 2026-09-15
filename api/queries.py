@@ -16,7 +16,7 @@ import psycopg2.sql
 from psycopg2.extras import Json
 
 TOTAL_PAGES_SQL = """
-    SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL
+    SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL
 """
 
 # Mirrors extract_with_llm.py's CLAIM_TIMEOUT_SECONDS/MAX_ATTEMPTS_PER_PAGE
@@ -70,18 +70,27 @@ PRIMARY_MODEL_TAG = "glm-ocr"
 # for exactly that reason, and folding both into one count here would
 # show abandoned work as "in progress" for up to 3 hours after the
 # worker that claimed it actually died.
+# Every query below that groups llm_extractions/page_ocr_text by model_tag
+# joins back to `pages` and filters p.excluded_at IS NULL, matching
+# TOTAL_PAGES_SQL above -- so an excluded page's rows (if it had already
+# been attempted before someone excluded it) drop out of every numerator
+# the same way the page itself drops out of the denominator. Without this,
+# excluding an already-attempted page would leave its old rows still
+# counted in e.g. extraction_attempted while total_pages shrank underneath
+# it, so "remaining" (total_pages - total_attempted + ...) could go
+# negative and a done_pct bar could read over 100%.
 EXTRACTION_SUMMARY_SQL = """
     SELECT
-        model_tag,
+        le.model_tag,
         count(*) AS total_attempted,
-        count(*) FILTER (WHERE status = 'success') AS success,
-        count(*) FILTER (WHERE status = 'failed' AND content_failure) AS content_failed,
-        count(*) FILTER (WHERE status = 'failed' AND NOT content_failure) AS transient_failed,
+        count(*) FILTER (WHERE le.status = 'success') AS success,
+        count(*) FILTER (WHERE le.status = 'failed' AND le.content_failure) AS content_failed,
+        count(*) FILTER (WHERE le.status = 'failed' AND NOT le.content_failure) AS transient_failed,
         count(*) FILTER (
-            WHERE status = 'claimed' AND claimed_at >= now() - %(claim_timeout)s * interval '1 second'
+            WHERE le.status = 'claimed' AND le.claimed_at >= now() - %(claim_timeout)s * interval '1 second'
         ) AS claimed_active,
         count(*) FILTER (
-            WHERE status = 'claimed' AND claimed_at < now() - %(claim_timeout)s * interval '1 second'
+            WHERE le.status = 'claimed' AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
         ) AS claimed_stale,
         -- Subset of content_failed that claim_next_page() will still
         -- reclaim on its own (attempt_count hasn't hit the cap yet) --
@@ -90,12 +99,13 @@ EXTRACTION_SUMMARY_SQL = """
         -- not another automatic retry, so it must not count as remaining
         -- work the pipeline will still get to on its own.
         count(*) FILTER (
-            WHERE status = 'failed' AND content_failure AND attempt_count < %(max_attempts)s
+            WHERE le.status = 'failed' AND le.content_failure AND le.attempt_count < %(max_attempts)s
         ) AS content_failed_retryable
-    FROM llm_extractions
-    WHERE model_tag <> %(human_tag)s
-    GROUP BY model_tag
-    ORDER BY model_tag
+    FROM llm_extractions le
+    JOIN pages p ON p.id = le.page_id
+    WHERE le.model_tag <> %(human_tag)s AND p.excluded_at IS NULL
+    GROUP BY le.model_tag
+    ORDER BY le.model_tag
 """
 
 # Total catalogue_entries rows produced per model -- the actual extracted
@@ -106,7 +116,8 @@ ENTRIES_PER_MODEL_SQL = """
     SELECT le.model_tag, count(ce.id) AS total_entries
     FROM catalogue_entries ce
     JOIN llm_extractions le ON le.id = ce.extraction_id
-    WHERE le.model_tag <> %(human_tag)s
+    JOIN pages p ON p.id = le.page_id
+    WHERE le.model_tag <> %(human_tag)s AND p.excluded_at IS NULL
     GROUP BY le.model_tag
 """
 
@@ -117,13 +128,15 @@ ENTRIES_PER_MODEL_SQL = """
 # the other.
 OCR_SUMMARY_SQL = """
     SELECT
-        model_tag,
+        pot.model_tag,
         count(*) AS total_attempted,
-        count(*) FILTER (WHERE status = 'success') AS success,
-        count(*) FILTER (WHERE status = 'failed') AS failed
-    FROM page_ocr_text
-    GROUP BY model_tag
-    ORDER BY model_tag
+        count(*) FILTER (WHERE pot.status = 'success') AS success,
+        count(*) FILTER (WHERE pot.status = 'failed') AS failed
+    FROM page_ocr_text pot
+    JOIN pages p ON p.id = pot.page_id
+    WHERE p.excluded_at IS NULL
+    GROUP BY pot.model_tag
+    ORDER BY pot.model_tag
 """
 
 # One row per model, counting how many of its extractions have a human
@@ -151,8 +164,9 @@ REVIEWED_PER_MODEL_SQL = """
         count(DISTINCT le.id) AS reviewed,
         count(DISTINCT le.id) FILTER (WHERE qr.verdict = 'approved') AS approved
     FROM llm_extractions le
+    JOIN pages p ON p.id = le.page_id
     JOIN qc_reviews qr ON qr.extraction_id = le.id AND qr.created_at >= le.created_at
-    WHERE le.model_tag <> %(human_tag)s
+    WHERE le.model_tag <> %(human_tag)s AND p.excluded_at IS NULL
     GROUP BY le.model_tag
 """
 
@@ -486,6 +500,7 @@ def fetch_qc_page(conn, page_id, model_tag=None):
         cur.execute(
             """
             SELECT p.id, p.page_no, p.b2_account, p.b2_bucket, p.image_key,
+                   p.excluded_at, p.excluded_note,
                    pf.pcloud_fileid, pf.name AS pcloud_name, pf.folder AS pcloud_folder
             FROM pages p
             JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid
@@ -505,6 +520,17 @@ def fetch_qc_page(conn, page_id, model_tag=None):
         )
         model_tags = [r[0] for r in cur.fetchall()]
         selected_tag = model_tag if model_tag in model_tags else (model_tags[0] if model_tags else None)
+
+        # Backs the exclude control's own claimed-guard message: mirrors
+        # apply_page_exclusion()'s rejection (any model 'claimed', any
+        # staleness) so the template can explain up front why the button
+        # isn't offered, instead of only finding out via a 409 after
+        # submitting.
+        cur.execute(
+            "SELECT EXISTS (SELECT 1 FROM llm_extractions WHERE page_id = %(page_id)s AND status = 'claimed')",
+            {"page_id": page_id},
+        )
+        (any_claimed,) = cur.fetchone()
 
         def _extraction_and_entries(tag):
             if tag is None:
@@ -547,13 +573,20 @@ def fetch_qc_page(conn, page_id, model_tag=None):
             rcols = [d.name for d in cur.description]
             reviews = [dict(zip(rcols, r)) for r in cur.fetchall()]
 
+        # Excluded pages are skipped by prev/next (not just by the counts
+        # above) -- there's nothing left for a reviewer to do on one until
+        # it's re-included, so walking past it here keeps Prev/Next moving
+        # through pages that still need attention. Landing on one directly
+        # (via URL, or because it was excluded while it was the current
+        # page) still works -- see the page lookup above, which doesn't
+        # filter on excluded_at -- so re-including it is always reachable.
         cur.execute(
-            "SELECT min(id) FROM pages WHERE id > %(page_id)s AND image_uploaded_at IS NOT NULL",
+            "SELECT min(id) FROM pages WHERE id > %(page_id)s AND image_uploaded_at IS NOT NULL AND excluded_at IS NULL",
             {"page_id": page_id},
         )
         (next_id,) = cur.fetchone()
         cur.execute(
-            "SELECT max(id) FROM pages WHERE id < %(page_id)s AND image_uploaded_at IS NOT NULL",
+            "SELECT max(id) FROM pages WHERE id < %(page_id)s AND image_uploaded_at IS NOT NULL AND excluded_at IS NULL",
             {"page_id": page_id},
         )
         (prev_id,) = cur.fetchone()
@@ -568,22 +601,26 @@ def fetch_qc_page(conn, page_id, model_tag=None):
         "human_entries": human_entries,
         "ocr_rows": ocr_rows,
         "reviews": reviews,
+        "any_claimed": any_claimed,
         "prev_id": prev_id,
         "next_id": next_id,
     }
 
 
 def fetch_qc_position(conn, page_id):
-    """(rank, total) of page_id among every image-available page, ordered by
-    id -- backs the QC page's "page N of M" counter. rank counts pages with
-    id <= page_id, so it's meaningful even though prev/next (see
-    fetch_qc_page()) walk the same id ordering rather than a queue of
-    specifically-unreviewed pages."""
+    """(rank, total) of page_id among every image-available, non-excluded
+    page, ordered by id -- backs the QC page's "page N of M" counter. rank
+    counts pages with id <= page_id, so it's meaningful even though prev/next
+    (see fetch_qc_page()) walk the same id ordering rather than a queue of
+    specifically-unreviewed pages. If page_id itself is excluded, it isn't
+    counted in rank either (TOTAL_PAGES_SQL excludes it from total the same
+    way) -- a harmless cosmetic wrinkle while sitting on an excluded page,
+    not a data problem."""
     with conn.cursor() as cur:
         cur.execute(TOTAL_PAGES_SQL)
         (total,) = cur.fetchone()
         cur.execute(
-            "SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL AND id <= %(page_id)s",
+            "SELECT count(*) FROM pages WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL AND id <= %(page_id)s",
             {"page_id": page_id},
         )
         (rank,) = cur.fetchone()
@@ -679,6 +716,69 @@ def apply_qc_verdict(conn, extraction_id, verdict, note):
             )
     conn.commit()
     return "ok", page_id, model_tag
+
+
+def apply_page_exclusion(conn, page_id, excluded, note):
+    """Toggle whether page_id is excluded from future processing. Returns
+    "ok", "not_found", or "claimed" (excluding only -- see below).
+
+    excluded=True sets excluded_at to now() and stores note (if any); this
+    is what CLAIM_NEXT_PAGE_SQL/PENDING_EXISTS_SQL (scripts/
+    extract_with_llm.py) and TOTAL_PAGES_SQL/EXTRACTION_SUMMARY_SQL etc.
+    (above) check to keep the page from ever being claimed again or counted
+    in dashboard totals. excluded=False clears both columns -- re-included
+    is re-included clean, with no stale note left over from whatever
+    justified the exclusion last time.
+
+    Deliberately narrow: only pages.excluded_at/excluded_note change. Any
+    llm_extractions/catalogue_entries rows already on this page (from
+    before it was excluded) are left exactly as they were -- this isn't a
+    verdict on their content, just a switch for whether the pipeline should
+    keep trying.
+
+    Excluding locks the pages row FOR UPDATE first and rejects outright if
+    any model currently has this page 'claimed' (any staleness) -- mirrors
+    apply_qc_verdict()'s same guard, for the same reason: process_page()
+    commits its claim up front and only writes the OCR/extraction result
+    once the whole attempt finishes, unconditionally, with no re-check
+    against excluded_at in between. Without this, excluding a page with a
+    claim in flight wouldn't stop that attempt's result from landing right
+    after -- reappearing in the pipeline's output the moment the reviewer
+    was told they'd removed it. The row lock also closes the narrower race
+    where a *new* claim attempt is concurrently evaluating this exact page:
+    CLAIM_NEXT_PAGE_SQL takes the same `FOR UPDATE OF p SKIP LOCKED` lock,
+    so it either skips this page while we hold the lock (and finds it
+    excluded on its next attempt) or claims it first and this call then
+    sees that claim and rejects. Re-including skips the guard entirely --
+    nothing is racing to protect there, a concurrent claim succeeding
+    alongside a re-include is just two independent, harmless writes.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 FROM pages WHERE id = %(page_id)s FOR UPDATE", {"page_id": page_id})
+        if cur.fetchone() is None:
+            conn.rollback()
+            return "not_found"
+
+        if excluded:
+            cur.execute(
+                "SELECT 1 FROM llm_extractions WHERE page_id = %(page_id)s AND status = 'claimed'",
+                {"page_id": page_id},
+            )
+            if cur.fetchone() is not None:
+                conn.rollback()
+                return "claimed"
+
+        cur.execute(
+            """
+            UPDATE pages
+            SET excluded_at = CASE WHEN %(excluded)s THEN now() ELSE NULL END,
+                excluded_note = CASE WHEN %(excluded)s THEN %(note)s ELSE NULL END
+            WHERE id = %(page_id)s
+            """,
+            {"page_id": page_id, "excluded": excluded, "note": note or None},
+        )
+    conn.commit()
+    return "ok"
 
 
 def save_human_edit(conn, page_id, entries):

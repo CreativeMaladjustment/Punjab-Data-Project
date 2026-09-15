@@ -121,6 +121,22 @@ CORPUS_STAT_LABELS = [
     ("total_source_pdfs", "source PDF files"),
 ]
 
+# Every source/method citation in the public site (Overview's pipeline
+# stages, Method's per-section refs, Sources' working-documents list) links
+# straight to this repo on GitHub rather than sitting as inert path text --
+# a reader curious about "how, exactly" shouldn't have to go find the repo
+# and navigate to the file themselves. Pinned to main (not a commit SHA):
+# these are living documents a reader should see the current state of, not
+# a snapshot frozen at whatever commit happened to be deployed.
+GITHUB_REPO = "CreativeMaladjustment/Punjab-Data-Project"
+
+
+def _github_url(path, kind="blob"):
+    """github.com link to `path` in this repo on main. kind="tree" for a
+    directory, "blob" (default) for a file."""
+    return f"https://github.com/{GITHUB_REPO}/{kind}/main/{path}"
+
+
 PIPELINE_STAGES = [
     {
         "num": "01", "title": "Source volumes",
@@ -148,31 +164,50 @@ PIPELINE_STAGES = [
         "file": "pipeline/postprocess.py",
     },
 ]
+for _stage in PIPELINE_STAGES:
+    _stage["url"] = _github_url(_stage["file"])
 
+# Each ref is a list of {"text", "url"} -- url is None for a citation that
+# isn't a repo path at all (a SQL view name, a function name), which the
+# template renders as plain text rather than a broken/misleading link.
+# "supabase/migrations" is a directory, not a file, hence kind="tree" --
+# every other ref here is a real file, linked as a blob.
 METHOD_SECTIONS = [
     {
         "heading": "Verbatim first",
         "body": "The extractor transcribes what is printed. It does not correct, complete, or infer beyond a stated set of rules. Misprints stay, the annotator's editorialising stays, and a reading the model is unsure of is flagged rather than smoothed over.",
         "body2": "A separate normalised layer resolves Ditto, folds printer and publisher aliases, and types the numeric fields. The verbatim layer is never rewritten by it.",
-        "ref": "pipeline/schema.md · OCR_RESEARCH_AGENDA.md",
+        "ref": [
+            {"text": "pipeline/schema.md", "url": _github_url("pipeline/schema.md")},
+            {"text": "OCR_RESEARCH_AGENDA.md", "url": _github_url("OCR_RESEARCH_AGENDA.md")},
+        ],
     },
     {
         "heading": "Provenance on every entry",
         "body": "Each entry records the page number printed on the page and the PDF page index it was read from, so any row can be traced back to the pixels it came from.",
         "body2": "A database view joins each entry all the way back to its B2 image key and its original pCloud file, in one query.",
-        "ref": "supabase/migrations · catalogue_entries_full",
+        "ref": [
+            {"text": "supabase/migrations", "url": _github_url("supabase/migrations", kind="tree")},
+            {"text": "catalogue_entries_full", "url": None},
+        ],
     },
     {
         "heading": "Native-script titles",
         "body": "Where the register prints a vernacular title alongside a printed romanization, the localization workstream finds the native-script title within the entry and pairs it with its romanization.",
         "body2": "Legibility of the native script varies sharply across the volumes. A 21-page re-imaging pilot tests whether buying better scans is worth it.",
-        "ref": "pipeline/localize.py · analysis/ocr_lab/REIMAGING_PILOT.md",
+        "ref": [
+            {"text": "pipeline/localize.py", "url": _github_url("pipeline/localize.py")},
+            {"text": "analysis/ocr_lab/REIMAGING_PILOT.md", "url": _github_url("analysis/ocr_lab/REIMAGING_PILOT.md")},
+        ],
     },
     {
         "heading": "The model is not the record",
         "body": "A human correction is stored under its own reserved tag rather than edited into a model's output, so a person's judgement is always distinguishable from what a model actually produced.",
         "body2": "Several models run against the same backlog and their output is namespaced separately, so they can be compared page by page rather than merged.",
-        "ref": "api/queries.py · save_human_edit()",
+        "ref": [
+            {"text": "api/queries.py", "url": _github_url("api/queries.py")},
+            {"text": "save_human_edit()", "url": None},
+        ],
     },
 ]
 
@@ -189,13 +224,21 @@ SOURCE_LICENCES = [
 ]
 
 SOURCE_DOCS = [
+    {"path": "README.md", "what": "Project overview and the live explorer link."},
+    {"path": "PLAN.md", "what": "Governing document for project direction and scope."},
     {"path": "OCR_RESEARCH_AGENDA.md", "what": "Governing document for transcription and extraction."},
     {"path": "DECISIONS.md", "what": "Numbered decision log governing every normalisation fold and method choice."},
+    {"path": "ARCHITECTURE.md", "what": "Infrastructure/engineering decision record for the CI/CD-as-compute pipeline itself."},
     {"path": "analysis/integrity/INTEGRITY_SWEEP.md", "what": "Does the stored record match its own specification?"},
     {"path": "analysis/ocr_lab/E0B_RESULTS.md", "what": "Legibility measurements across the volumes, by language and script."},
     {"path": "analysis/ocr_lab/REIMAGING_PILOT.md", "what": "The 21-page experiment deciding whether to buy re-imaged volumes."},
     {"path": "dialectic/dead_ends.md", "what": "What was tried and abandoned. Read this one first."},
+    {"path": "PERFORMANCE_NOTES.md", "what": "Point-in-time extraction throughput measurements, by runner type."},
+    {"path": "NEXT_STEPS.md", "what": "Personal to-do list for adding more free-tier inference capacity."},
+    {"path": "LICENSING.md", "what": "Authoritative statement of which licence covers code, data, and prose."},
 ]
+for _doc in SOURCE_DOCS:
+    _doc["url"] = _github_url(_doc["path"])
 
 TABLE_PAGE_SIZES = (20, 50, 100)
 MAX_TABLE_PAGE = 1_000_000  # request.args["page"] is only ever clamped to

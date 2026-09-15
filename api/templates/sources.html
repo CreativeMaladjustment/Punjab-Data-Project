@@ -48,6 +48,8 @@
     align-items: baseline;
   }
   .doc-path { font: 400 12.5px/1.5 "IBM Plex Mono", monospace; color: var(--brick); word-break: break-all; }
+  .doc-path a { color: inherit; text-decoration: none; }
+  .doc-path a:hover { text-decoration: underline; }
   .doc-what { font: 400 13.5px/1.6 "IBM Plex Sans", sans-serif; color: var(--body-text); }
 
   .colophon { font: 400 13px/1.7 "IBM Plex Sans", sans-serif; color: var(--muted); margin: 40px 0 0; padding-top: 20px; border-top: 1px solid var(--border); }
@@ -86,7 +88,7 @@
     <div>
       {% for d in docs %}
       <div class="doc-row">
-        <span class="doc-path">{{ d.path }}</span>
+        <span class="doc-path"><a href="{{ d.url }}" target="_blank" rel="noopener">{{ d.path }}</a></span>
         <span class="doc-what">{{ d.what }}</span>
       </div>
       {% endfor %}

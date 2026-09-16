@@ -1,0 +1,4 @@
+# One owner for the whole repository -- every path falls back to this rule
+# unless a more specific one is added below it (CODEOWNERS uses last-match-
+# wins, same as .gitignore).
+* @CreativeMaladjustment

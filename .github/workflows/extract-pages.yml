@@ -29,6 +29,20 @@
 name: Extract catalogue entries with a local LLM
 
 on:
+  # Every 6 hours, anchored a little past run 35086378308's expected finish
+  # (started 2026-09-16T10:41:55Z; MAX_RUNTIME_SECONDS caps the script itself
+  # at 5h, so ~15:45-15:50Z end to end with setup) -- 16:00 UTC and every 6h
+  # after. Still runs through the `b2-upload` environment below like any
+  # other trigger, so with required reviewers configured a scheduled run
+  # queues for manual approval exactly like a workflow_dispatch one does;
+  # this schedule doesn't make runs unattended, only regularly requested.
+  # A schedule event has none of workflow_dispatch's `inputs` -- every
+  # `inputs.*` reference below falls back to model/source_model/
+  # allow_already_extracted's own declared defaults via `||` so a scheduled
+  # run behaves exactly like a default-inputs manual dispatch, not a blank
+  # `ollama pull ""`.
+  schedule:
+    - cron: "0 4,10,16,22 * * *"
   workflow_dispatch:
     inputs:
       model:
@@ -99,7 +113,12 @@ jobs:
       # directly into run: scripts below (Semgrep: yaml.github-actions.security.
       # run-shell-injection) -- inputs.model is a fixed `type: choice` today, but
       # this is the correct pattern regardless of whether that stays true.
-      OLLAMA_MODEL_INPUT: ${{ inputs.model }}
+      # `|| 'glm-ocr'` reapplies the input's own declared default for a
+      # schedule-triggered run, whose `inputs` context is empty (workflow_
+      # dispatch's declared `default:` only auto-applies within that same
+      # trigger type) -- without this a scheduled run would try `ollama pull
+      # ""` and fail outright.
+      OLLAMA_MODEL_INPUT: ${{ inputs.model || 'glm-ocr' }}
       # Pinned (rather than always installing whatever install.sh calls
       # "latest") so the cache below actually means something -- a cache key
       # can't usefully track a moving target, and an un-pinned install would
@@ -210,7 +229,7 @@ jobs:
           # any blob already on disk with a matching digest, so a cache hit
           # turns that step into a fast no-op instead of a multi-GB download.
           path: ~/.ollama
-          key: ollama-model-${{ inputs.model }}
+          key: ollama-model-${{ inputs.model || 'glm-ocr' }}
 
       - name: Start Ollama server
         run: |
@@ -244,13 +263,19 @@ jobs:
           # DB writes (a separate, immediate network call per page) went
           # through the whole time.
           PYTHONUNBUFFERED: "1"
-          OLLAMA_MODEL: ${{ inputs.model }}
+          OLLAMA_MODEL: ${{ inputs.model || 'glm-ocr' }}
           # extract_with_llm.py treats "(none)" the same as unset -- see its
-          # module docstring's "rescue mode" section.
-          SOURCE_MODEL: ${{ inputs.source_model }}
+          # module docstring's "rescue mode" section. Same schedule-event
+          # fallback as OLLAMA_MODEL_INPUT above -- a scheduled run gets a
+          # normal full-backlog run, not rescue mode.
+          SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
           # A `type: boolean` input renders as the string "true"/"false" --
           # matches what extract_with_llm.py's ALLOW_ALREADY_EXTRACTED parses.
-          ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted }}
+          # `false` is itself falsy to `||`, so this still reads correctly
+          # for every case: a manual run's real true/false short-circuits
+          # before the fallback, and a schedule run's empty `inputs` falls
+          # through to false either way.
+          ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
           # Was a temporary smoke-test cap (2) while confirming the num_ctx
           # fix for the 400s every Ollama call started throwing on
           # 2026-09-11 -- two full runs since (34601420598, 34617429251)

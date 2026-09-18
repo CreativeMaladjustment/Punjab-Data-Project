@@ -38,13 +38,15 @@ extract_with_llm.py beyond swapping Ollama for Gemini:
     Gemini callers would each independently pace against the SAME shared
     per-project rate limit, so more workers here doesn't mean more
     throughput, just N times the 429s.
-  - No full-page OCR pass (contrast extract_with_llm.py's ocr_full_page()):
-    that's a second full API call per page, which would roughly halve how
-    many pages a day's free-tier quota reaches for no gain toward this
-    project's actual goal (structured entries) -- see the Progress page's
-    "pages with data extracted" summary, which already counts a
-    structured-extraction success from any source, textparse:* included,
-    as the win condition this script is chasing.
+  - A full-page OCR pass runs too (see gemini_ocr_full_page(), mirroring
+    extract_with_llm.py's ocr_full_page()) -- a second full API call per
+    page, which roughly halves how many pages a day's free-tier quota
+    reaches. Accepted deliberately: page_ocr_text is worth having rather
+    than re-spending a whole image call through scripts/parse_ocr_text.py
+    later just to get the same transcription from text already sitting in
+    Postgres. Both calls share the same pace()/429 handling below, so the
+    accounting for "how much quota does one page cost" already reflects
+    two calls, not one.
 
 Default candidate selection, rescue mode (SOURCE_MODEL), and
 ALLOW_ALREADY_EXTRACTED all work exactly like extract_with_llm.py's own --
@@ -165,6 +167,16 @@ source. Output the JSON array only, no commentary.
 SCHEMA:
 """ + SCHEMA_PATH.read_text(encoding="utf-8")
 
+# Mirrors extract_with_llm.py's FULL_PAGE_OCR_PROMPT exactly -- see there
+# for the full reasoning (a separate, unconstrained transcription of
+# everything on the page, not just the catalogue entries the schema-
+# constrained prompt above asks for).
+GEMINI_OCR_PROMPT = """Transcribe every word of text visible on this page \
+image, exactly as printed, verbatim, preserving line breaks and reading \
+order top to bottom. Include running headers, page numbers, and any text \
+outside the catalogue entries -- not just the entries themselves. Output \
+plain text only: no JSON, no commentary, no markdown formatting."""
+
 
 def elapsed():
     return time.time() - START_TIME
@@ -218,6 +230,30 @@ def db_connection():
         yield conn
     finally:
         conn.close()
+
+
+def db_save_page_ocr_text(page_id, model, model_tag, raw_text):
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO page_ocr_text (page_id, model, model_tag, status, raw_text) "
+            "VALUES (%s, %s, %s, 'success', %s) "
+            "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
+            "status = 'success', raw_text = EXCLUDED.raw_text, error_message = NULL",
+            (page_id, model, model_tag, raw_text),
+        )
+        conn.commit()
+
+
+def db_save_page_ocr_failure(page_id, model, model_tag, error_message):
+    with db_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO page_ocr_text (page_id, model, model_tag, status, error_message) "
+            "VALUES (%s, %s, %s, 'failed', %s) "
+            "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
+            "status = 'failed', error_message = EXCLUDED.error_message",
+            (page_id, model, model_tag, error_message),
+        )
+        conn.commit()
 
 
 # Mirrors extract_with_llm.py's CLAIM_TIMEOUT_SECONDS/MAX_ATTEMPTS_PER_PAGE
@@ -464,32 +500,20 @@ def pace():
 GEMINI_MAX_429_RETRIES = 5
 
 
-def gemini_generate(image_bytes, context=""):
-    """POST to Gemini's generateContent endpoint for one page image, JSON
-    mode, with its own 429 retry/backoff loop -- separate from and on top
-    of pace()'s fixed floor, since Google's actual per-minute ceiling can
-    be stricter (or looser) than the published number PACE_SECONDS is set
-    from. Returns (entries, raw_text); raises with .raw_text attached on a
-    parse/shape failure, same contract as extract_with_llm.py's
-    extract_page()."""
-    b64 = base64.b64encode(image_bytes).decode()
+def _gemini_post(body, context):
+    """Shared POST-with-pace-and-429-retry core for both gemini_generate()
+    and gemini_ocr_full_page() below -- pacing and backoff apply per HTTP
+    call, not per logical operation, and both make one call each, so they
+    share this rather than each keeping its own copy of the retry loop.
+    Returns the model's raw text response; raises (no .raw_text attached,
+    i.e. transient by is_content_failure()'s convention) on anything short
+    of a clean 200 with a text candidate in it."""
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    body = {
-        "system_instruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
-        "contents": [{
-            "parts": [
-                {"inline_data": {"mime_type": "image/webp", "data": b64}},
-                {"text": "Output the JSON array for this page only."},
-            ],
-        }],
-        "generationConfig": {"responseMimeType": "application/json"},
-    }
     headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
 
     backoff = 30
     for attempt in range(1, GEMINI_MAX_429_RETRIES + 1):
         pace()
-        started = time.time()
         resp = requests.post(
             url, json=body, headers=headers,
             timeout=(GEMINI_CONNECT_TIMEOUT_SECONDS, GEMINI_READ_TIMEOUT_SECONDS),
@@ -514,13 +538,32 @@ def gemini_generate(image_bytes, context=""):
 
     payload = resp.json()
     try:
-        raw_text = payload["candidates"][0]["content"]["parts"][0]["text"]
+        return payload["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError) as exc:
         raise RuntimeError(f"Gemini response had no text candidate: {json.dumps(payload)[:2000]}") from exc
 
+
+def gemini_generate(image_bytes, context=""):
+    """The structured-extraction call: JSON mode, schema-constrained
+    prompt. Returns (entries, raw_text); raises with .raw_text attached on
+    a parse/shape failure, same contract as extract_with_llm.py's
+    extract_page()."""
+    b64 = base64.b64encode(image_bytes).decode()
+    body = {
+        "system_instruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": "image/webp", "data": b64}},
+                {"text": "Output the JSON array for this page only."},
+            ],
+        }],
+        "generationConfig": {"responseMimeType": "application/json"},
+    }
+    started = time.time()
+    raw_text = _gemini_post(body, context)
     text = raw_text.strip()
     text = re.sub(r"^```(json)?|```$", "", text, flags=re.M).strip()
-    print(f"    gemini response for {context} in {time.time() - started:.1f}s ({len(text)} chars): {text[:300]!r}")
+    print(f"    gemini response for {context} in {time.time() - started:.1f}s total ({len(text)} chars): {text[:300]!r}")
     try:
         parsed = json.loads(text)
         entries = _coerce_to_entry_list(parsed)
@@ -528,6 +571,28 @@ def gemini_generate(image_bytes, context=""):
         exc.raw_text = raw_text
         raise
     return entries, raw_text
+
+
+def gemini_ocr_full_page(image_bytes, context=""):
+    """Independent of gemini_generate(): a verbatim transcription of
+    everything on the page, not just the catalogue entries the schema-
+    constrained prompt asks for. See extract_with_llm.py's ocr_full_page()
+    for the full reasoning -- identical shape, just plain text instead of
+    JSON mode, and no system_instruction (the OCR prompt is the only
+    instruction this call needs)."""
+    b64 = base64.b64encode(image_bytes).decode()
+    body = {
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": "image/webp", "data": b64}},
+                {"text": GEMINI_OCR_PROMPT},
+            ],
+        }],
+    }
+    started = time.time()
+    raw_text = _gemini_post(body, context)
+    print(f"    full-page OCR for {context} in {time.time() - started:.1f}s total ({len(raw_text)} chars)")
+    return raw_text
 
 
 def _text(entry, key):
@@ -651,9 +716,8 @@ def is_content_failure(exc):
 
 def process_page(clients, claim):
     """Extract one already-claimed page. See extract_with_llm.py's
-    process_page() -- identical shape minus the full-page OCR call (see
-    module docstring) and the model/model_tag parameters this script
-    doesn't need."""
+    process_page() -- identical shape, including the full-page OCR call,
+    minus the model/model_tag parameters this script doesn't need."""
     page_id = claim["page_id"]
     page_no = claim["page_no"]
     account = claim["account"]
@@ -678,6 +742,18 @@ def process_page(clients, claim):
         except Exception as exc:
             exc.b2_download_failure = True
             raise
+        # Full-page OCR: independent of the structured extraction below --
+        # best-effort, and deliberately not allowed to affect this page's
+        # success/failure/retry accounting (MAX_ATTEMPTS_PER_PAGE,
+        # content_failure, MAX_B2_FAILURES_PER_WORKER all stay scoped to
+        # gemini_generate()'s outcome only), exactly like
+        # extract_with_llm.py's process_page() treats its own OCR call.
+        try:
+            page_text = gemini_ocr_full_page(image_bytes, context=context)
+            db_save_page_ocr_text(page_id, GEMINI_MODEL, MODEL_TAG, page_text)
+        except Exception as exc:
+            print(f"WARNING: full-page OCR failed for {context}: {exc}")
+            db_save_page_ocr_failure(page_id, GEMINI_MODEL, MODEL_TAG, str(exc))
         entries, raw_text = gemini_generate(image_bytes, context=context)
         for entry in entries:
             entry.setdefault("source_folder", folder)

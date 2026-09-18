@@ -266,39 +266,29 @@ MAX_ATTEMPTS_PER_PAGE = 2
 
 MAX_B2_FAILURES_PER_WORKER = int(os.environ.get("MAX_B2_FAILURES_PER_WORKER", "10"))
 
-_SOURCE_CAPPED_FILTER = """
-          AND EXISTS (
-            SELECT 1 FROM llm_extractions src
-            WHERE src.page_id = p.id
-              AND src.model_tag = %(source_model_tag)s
-              AND src.status = 'failed'
-              AND src.content_failure
-              AND src.attempt_count >= %(max_attempts)s
-          )
-""" if SOURCE_MODEL_TAG else ""
-
-# See extract_with_llm.py's own _SKIP_ALREADY_EXTRACTED_FILTER comment for
-# the full reasoning, including why this only ever gates the `le.id IS
-# NULL` (never-attempted) branch below, not a page this model_tag has
-# already claimed or failed on -- the same stale-claim-stranding bug a
-# Copilot review caught there applies here identically.
-_SKIP_ALREADY_EXTRACTED_FILTER = """
-                AND NOT EXISTS (
-                  SELECT 1 FROM llm_extractions any_le
-                  WHERE any_le.page_id = p.id AND any_le.status = 'success'
-                )""" if not ALLOW_ALREADY_EXTRACTED else ""
-
-# Built by plain concatenation, not str.format()/an f-string, even though
-# every spliced-in piece (_SKIP_ALREADY_EXTRACTED_FILTER,
-# _SOURCE_CAPPED_FILTER) is a hardcoded, import-time-fixed SQL fragment
-# with no request/user-controlled content anywhere near it -- a code-
-# scanning Bandit rule (B608) pattern-matches on string formatting applied
-# to SQL-keyword-shaped text specifically, with no awareness of what's
-# actually being substituted, so the earlier .format()-based version of
-# this query (and PENDING_EXISTS_SQL below) tripped it even though nothing
-# about the actual data flow changed. Real per-row values still go through
-# psycopg2's own %(name)s parameterization via the params dict passed to
-# cur.execute() in claim_next_page() -- never through this splicing.
+# Both queries below are fully static string literals -- no str.format(),
+# f-string, or concatenation of any kind, after an earlier version of each
+# (first .format()-based, then plain-concatenation-based) both tripped a
+# code-scanning Bandit rule (B608) that pattern-matches *any* dynamic
+# string construction flowing into SQL-keyword-shaped text, concatenation
+# included, regardless of whether what's spliced in is actually request/
+# user-controlled. Rather than keep chasing that pattern, the "is rescue
+# mode on" and "should an already-extracted-elsewhere page be skipped"
+# conditionals that used to select between two pre-built text fragments in
+# Python are now baked directly into the SQL as ordinary bind parameters
+# (%(source_model_tag)s, %(allow_already_extracted)s) with a leading
+# short-circuit check -- `%(source_model_tag)s IS NULL OR EXISTS (...)`
+# reproduces "only require the EXISTS when rescue mode is actually on"
+# exactly, since SOURCE_MODEL_TAG is None (-> SQL NULL) whenever rescue
+# mode is off; `%(allow_already_extracted)s OR NOT EXISTS (...)`
+# reproduces the skip-filter toggle the same way. Both params are always
+# passed by claim_next_page() below, so this isn't optional plumbing.
+#
+# The `le.id IS NULL AND (...)` grouping still scopes the skip-check to
+# only the never-attempted branch, not a page this model_tag has already
+# claimed or failed on -- see extract_with_llm.py's own
+# _SKIP_ALREADY_EXTRACTED_FILTER comment for why (the stale-claim-
+# stranding bug a Copilot review caught there applies here identically).
 CLAIM_NEXT_PAGE_SQL = """
     WITH candidate AS (
         SELECT p.id
@@ -308,14 +298,31 @@ CLAIM_NEXT_PAGE_SQL = """
         WHERE p.image_uploaded_at IS NOT NULL
           AND p.excluded_at IS NULL
           AND (
-            (le.id IS NULL""" + _SKIP_ALREADY_EXTRACTED_FILTER + """)
+            (le.id IS NULL
+             AND (
+               %(allow_already_extracted)s
+               OR NOT EXISTS (
+                 SELECT 1 FROM llm_extractions any_le
+                 WHERE any_le.page_id = p.id AND any_le.status = 'success'
+               )
+             ))
             OR (le.status = 'claimed'
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second')
             OR (le.status = 'failed'
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
-          """ + _SOURCE_CAPPED_FILTER + """
+          AND (
+            %(source_model_tag)s IS NULL
+            OR EXISTS (
+              SELECT 1 FROM llm_extractions src
+              WHERE src.page_id = p.id
+                AND src.model_tag = %(source_model_tag)s
+                AND src.status = 'failed'
+                AND src.content_failure
+                AND src.attempt_count >= %(max_attempts)s
+            )
+          )
         ORDER BY random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
@@ -344,8 +351,9 @@ CLAIM_NEXT_PAGE_SQL = """
     SELECT (SELECT page_id FROM inserted) AS page_id
 """
 
-# See CLAIM_NEXT_PAGE_SQL's own comment just above -- same concatenation-
-# not-format() reasoning, same two hardcoded fragments spliced in.
+# See CLAIM_NEXT_PAGE_SQL's own comment just above -- same fully-static,
+# bind-parameter-only construction, same two conditionals baked in the
+# same way.
 PENDING_EXISTS_SQL = """
     SELECT EXISTS (
         SELECT 1
@@ -355,12 +363,29 @@ PENDING_EXISTS_SQL = """
         WHERE p.image_uploaded_at IS NOT NULL
           AND p.excluded_at IS NULL
           AND (
-            (le.id IS NULL""" + _SKIP_ALREADY_EXTRACTED_FILTER + """)
+            (le.id IS NULL
+             AND (
+               %(allow_already_extracted)s
+               OR NOT EXISTS (
+                 SELECT 1 FROM llm_extractions any_le
+                 WHERE any_le.page_id = p.id AND any_le.status = 'success'
+               )
+             ))
             OR le.status = 'claimed'
             OR (le.status = 'failed'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
-          """ + _SOURCE_CAPPED_FILTER + """
+          AND (
+            %(source_model_tag)s IS NULL
+            OR EXISTS (
+              SELECT 1 FROM llm_extractions src
+              WHERE src.page_id = p.id
+                AND src.model_tag = %(source_model_tag)s
+                AND src.status = 'failed'
+                AND src.content_failure
+                AND src.attempt_count >= %(max_attempts)s
+            )
+          )
     )
 """
 
@@ -379,6 +404,7 @@ def claim_next_page():
         "claim_timeout": CLAIM_TIMEOUT_SECONDS,
         "max_attempts": MAX_ATTEMPTS_PER_PAGE,
         "source_model_tag": SOURCE_MODEL_TAG,
+        "allow_already_extracted": ALLOW_ALREADY_EXTRACTED,
     }
     with db_connection() as conn:
         for _ in range(CLAIM_MAX_ATTEMPTS):

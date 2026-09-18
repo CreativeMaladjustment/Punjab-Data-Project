@@ -7,11 +7,14 @@
 # at all, just Python calling a hosted API, and free-tier rate limits mean
 # more parallel callers would just mean more 429s, not more throughput.
 #
-# Default model is gemini-2.5-flash -- of the models offered here, the one
-# with the highest published free-tier daily image ceiling. Confirm current
-# numbers at https://ai.google.dev/gemini-api/docs/rate-limits before
-# assuming the pacing below (scripts/extract_with_gemini.py's
-# GEMINI_MODEL_PACING) still matches -- Google revises these.
+# Default model is gemini-3.6-flash. The generation this originally shipped
+# with (gemini-2.5-flash/-pro, gemini-1.5-flash/-pro) has since been retired
+# by Google (confirmed via a live 404: "This model ... is no longer
+# available to new users"); gemini-3.6-flash is the confirmed replacement.
+# Confirm current numbers at
+# https://ai.google.dev/gemini-api/docs/rate-limits before assuming the
+# pacing below (scripts/extract_with_gemini.py's GEMINI_MODEL_PACING)
+# still matches -- Google revises these.
 #
 # Rescue mode: set `source_model` to reprocess ONLY the pages that model
 # already gave up on (capped-out content failures) with `model` instead of
@@ -35,12 +38,9 @@ on:
       model:
         description: "Gemini model to run"
         type: choice
-        default: gemini-2.5-flash
+        default: gemini-3.6-flash
         options:
-          - gemini-2.5-flash
-          - gemini-1.5-flash
-          - gemini-2.5-pro
-          - gemini-1.5-pro
+          - gemini-3.6-flash
       source_model:
         description: >-
           Rescue mode (optional): only reprocess pages that this OTHER
@@ -53,10 +53,7 @@ on:
         default: "(none)"
         options:
           - "(none)"
-          - gemini-2.5-flash
-          - gemini-1.5-flash
-          - gemini-2.5-pro
-          - gemini-1.5-pro
+          - gemini-3.6-flash
           - glm-ocr
           - minicpm-v4.6
           - minicpm-v4.5
@@ -95,7 +92,7 @@ jobs:
       # for a schedule-triggered run, whose `inputs` context is empty (only
       # workflow_dispatch/workflow_call populate one) -- see
       # extract-pages.yml's own schedule trigger for the full reasoning.
-      GEMINI_MODEL: ${{ inputs.model || 'gemini-2.5-flash' }}
+      GEMINI_MODEL: ${{ inputs.model || 'gemini-3.6-flash' }}
       SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
       ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
     steps:

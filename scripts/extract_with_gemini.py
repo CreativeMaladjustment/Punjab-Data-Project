@@ -14,7 +14,7 @@ all -- its own per-minute and per-day free-tier rate limits that have no
 Ollama equivalent to design around. Keeping them separate means neither
 script's control flow has to carry conditionals for the other's concerns.
 
-Namespaced under model_tag = slugified GEMINI_MODEL (e.g. "gemini-2.5-
+Namespaced under model_tag = slugified GEMINI_MODEL (e.g. "gemini-3.6-
 flash") -- an ordinary peer in the same llm_extractions/model_tag bake-off
 as glm-ocr, minicpm-v4.6, etc., not a reserved namespace like
 HUMAN_MODEL_TAG or scripts/parse_ocr_text.py's "textparse:" prefix, since
@@ -71,7 +71,7 @@ from botocore.config import Config
 from psycopg2.extras import Json
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
 MODEL_TAG = re.sub(r"[^A-Za-z0-9._-]", "-", GEMINI_MODEL)
 
 # See the module docstring's "rate limits" section. Deliberately per-tier
@@ -79,11 +79,16 @@ MODEL_TAG = re.sub(r"[^A-Za-z0-9._-]", "-", GEMINI_MODEL)
 # free-tier request-per-minute ceiling for a given tier as of this writing.
 # A model not listed here (e.g. a new release) falls back to the
 # conservative "pro" pace rather than assuming a generous one.
+#
+# gemini-2.5-flash/-pro and gemini-1.5-flash/-pro have been retired by
+# Google (confirmed via a live 404 from the API itself: "This model ... is
+# no longer available to new users"); gemini-3.6-flash is the confirmed
+# replacement. Its exact published free-tier RPM isn't independently
+# confirmed as of this writing, so this keeps the old flash-tier pace as a
+# starting floor -- real protection is the 429-retry-with-backoff in
+# _gemini_post(), not this number.
 GEMINI_MODEL_PACING = {
-    "gemini-2.5-flash": 4.0,
-    "gemini-1.5-flash": 4.0,
-    "gemini-2.5-pro": 20.0,
-    "gemini-1.5-pro": 20.0,
+    "gemini-3.6-flash": 4.0,
 }
 PACE_SECONDS = float(os.environ.get("GEMINI_PACE_SECONDS", GEMINI_MODEL_PACING.get(GEMINI_MODEL, 20.0)))
 

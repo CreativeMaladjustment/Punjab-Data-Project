@@ -98,10 +98,15 @@ MODEL_ROLE_LABELS = {
     "qwen3-vl-2b": "general vision, 2B · smallest",
     # scripts/extract_with_gemini.py -- a hosted API, not a local Ollama
     # model, so it has no size/param-count of its own to note here.
-    "gemini-2.5-flash": "hosted API (Gemini), free tier · fastest quota",
-    "gemini-1.5-flash": "hosted API (Gemini), free tier",
-    "gemini-2.5-pro": "hosted API (Gemini), free tier · tightest quota",
-    "gemini-1.5-pro": "hosted API (Gemini), free tier",
+    "gemini-3.6-flash": "hosted API (Gemini), free tier · default",
+    # Retired by Google (confirmed via a live 404: "This model ... is no
+    # longer available to new users") -- kept here only so any rows already
+    # in llm_extractions under these tags still render a label instead of
+    # falling back to blank.
+    "gemini-2.5-flash": "hosted API (Gemini), free tier · retired",
+    "gemini-1.5-flash": "hosted API (Gemini), free tier · retired",
+    "gemini-2.5-pro": "hosted API (Gemini), free tier · retired",
+    "gemini-1.5-pro": "hosted API (Gemini), free tier · retired",
 }
 
 # pipeline/schema.md names this flag field "char", but the catalogue_entries

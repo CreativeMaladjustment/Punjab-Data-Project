@@ -96,6 +96,12 @@ MODEL_ROLE_LABELS = {
     "minicpm-v4.5": "general vision, 8B",
     "qwen3-vl-4b": "general vision, 4B",
     "qwen3-vl-2b": "general vision, 2B · smallest",
+    # scripts/extract_with_gemini.py -- a hosted API, not a local Ollama
+    # model, so it has no size/param-count of its own to note here.
+    "gemini-2.5-flash": "hosted API (Gemini), free tier · fastest quota",
+    "gemini-1.5-flash": "hosted API (Gemini), free tier",
+    "gemini-2.5-pro": "hosted API (Gemini), free tier · tightest quota",
+    "gemini-1.5-pro": "hosted API (Gemini), free tier",
 }
 
 # pipeline/schema.md names this flag field "char", but the catalogue_entries

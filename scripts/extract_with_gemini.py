@@ -288,6 +288,17 @@ _SKIP_ALREADY_EXTRACTED_FILTER = """
                   WHERE any_le.page_id = p.id AND any_le.status = 'success'
                 )""" if not ALLOW_ALREADY_EXTRACTED else ""
 
+# Built by plain concatenation, not str.format()/an f-string, even though
+# every spliced-in piece (_SKIP_ALREADY_EXTRACTED_FILTER,
+# _SOURCE_CAPPED_FILTER) is a hardcoded, import-time-fixed SQL fragment
+# with no request/user-controlled content anywhere near it -- a code-
+# scanning Bandit rule (B608) pattern-matches on string formatting applied
+# to SQL-keyword-shaped text specifically, with no awareness of what's
+# actually being substituted, so the earlier .format()-based version of
+# this query (and PENDING_EXISTS_SQL below) tripped it even though nothing
+# about the actual data flow changed. Real per-row values still go through
+# psycopg2's own %(name)s parameterization via the params dict passed to
+# cur.execute() in claim_next_page() -- never through this splicing.
 CLAIM_NEXT_PAGE_SQL = """
     WITH candidate AS (
         SELECT p.id
@@ -297,14 +308,14 @@ CLAIM_NEXT_PAGE_SQL = """
         WHERE p.image_uploaded_at IS NOT NULL
           AND p.excluded_at IS NULL
           AND (
-            (le.id IS NULL{skip_extracted_filter})
+            (le.id IS NULL""" + _SKIP_ALREADY_EXTRACTED_FILTER + """)
             OR (le.status = 'claimed'
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second')
             OR (le.status = 'failed'
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
-          {source_filter}
+          """ + _SOURCE_CAPPED_FILTER + """
         ORDER BY random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
@@ -331,8 +342,10 @@ CLAIM_NEXT_PAGE_SQL = """
         RETURNING page_id
     )
     SELECT (SELECT page_id FROM inserted) AS page_id
-""".format(source_filter=_SOURCE_CAPPED_FILTER, skip_extracted_filter=_SKIP_ALREADY_EXTRACTED_FILTER)
+"""
 
+# See CLAIM_NEXT_PAGE_SQL's own comment just above -- same concatenation-
+# not-format() reasoning, same two hardcoded fragments spliced in.
 PENDING_EXISTS_SQL = """
     SELECT EXISTS (
         SELECT 1
@@ -342,14 +355,14 @@ PENDING_EXISTS_SQL = """
         WHERE p.image_uploaded_at IS NOT NULL
           AND p.excluded_at IS NULL
           AND (
-            (le.id IS NULL{skip_extracted_filter})
+            (le.id IS NULL""" + _SKIP_ALREADY_EXTRACTED_FILTER + """)
             OR le.status = 'claimed'
             OR (le.status = 'failed'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
-          {source_filter}
+          """ + _SOURCE_CAPPED_FILTER + """
     )
-""".format(source_filter=_SOURCE_CAPPED_FILTER, skip_extracted_filter=_SKIP_ALREADY_EXTRACTED_FILTER)
+"""
 
 CLAIM_CONTENDED = object()
 

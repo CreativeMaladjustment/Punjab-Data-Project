@@ -21,19 +21,28 @@ different, and for a 7B model doing a handful of pages, likely more
 generous, constraint shape than Inference Providers' $0.10/month. See
 HF_EXTRACTION.md in the main repo for that pipeline's own tradeoffs.
 
-Deliberately NOT running a second full-page-OCR call per image the way
-extract_with_gemini.py/extract_with_hf.py do -- given how small the daily
-GPU-second budget is, doubling the calls per page would roughly halve how
-many pages fit in it, and there's no established real-world timing data
-yet for how many seconds one call actually costs. Revisit once that's
-measured.
+Runs a second full-page-OCR call per image too, mirroring
+extract_with_gemini.py's/extract_with_hf.py's own process_page() shape:
+independent of and unaffected by whether the structured extraction
+succeeds or fails, best-effort, returned alongside the entries in the
+same response rather than written anywhere directly -- this Space has no
+Postgres or B2 credentials of its own; whatever eventually calls it over
+gradio_client owns writing both results to the database, the same
+"Space just does inference, caller owns persistence" split every other
+piece of this pipeline uses. Doubling the calls per page does mean
+roughly double the GPU-seconds per page; accepted for the same reason it
+was accepted for the other two hosted-API pipelines -- see
+HF_EXTRACTION.md's and GEMINI_EXTRACTION.md's "What gets written"
+sections for that tradeoff discussion.
 
 Model loading and the `.to("cuda")` call happen at module level (Space
-startup), NOT inside the @spaces.GPU-decorated function -- this matches
-the pattern HF's own ZeroGPU example Spaces use; the `spaces` package
-handles making this safe to do before any GPU is actually attached to the
-process. Only the actual forward pass (extract() below) is decorated, so
-only its GPU time counts against the daily quota, not model loading.
+startup), NOT inside either @spaces.GPU-decorated function -- this
+matches the pattern HF's own ZeroGPU example Spaces use; the `spaces`
+package handles making this safe to do before any GPU is actually
+attached to the process. Only the two actual forward passes
+(_extract_entries()/_ocr_full_page() below, called from the public
+extract()) are decorated, so only their GPU time counts against the
+daily quota, not model loading.
 
 UNVERIFIED as of this writing: this hasn't been run against a live
 ZeroGPU allocation yet, so the exact per-call GPU-seconds cost, and
@@ -81,6 +90,17 @@ source. Output the JSON array only, no commentary, no markdown code fences.
 
 SCHEMA:
 """ + SCHEMA_PATH.read_text(encoding="utf-8")
+
+# Mirrors extract_with_llm.py's FULL_PAGE_OCR_PROMPT / extract_with_gemini.py's
+# GEMINI_OCR_PROMPT / extract_with_hf.py's HF_OCR_PROMPT exactly -- see
+# those for the full reasoning (a separate, unconstrained transcription
+# of everything on the page, not just the catalogue entries the schema-
+# constrained prompt above asks for).
+FULL_PAGE_OCR_PROMPT = """Transcribe every word of text visible on this page \
+image, exactly as printed, verbatim, preserving line breaks and reading \
+order top to bottom. Include running headers, page numbers, and any text \
+outside the catalogue entries -- not just the entries themselves. Output \
+plain text only: no JSON, no commentary, no markdown formatting."""
 
 # Deliberate duplicate of extract_with_llm.py's/extract_with_gemini.py's/
 # extract_with_hf.py's ENTRY_FIELD_NAMES/_looks_like_entry_list/
@@ -147,29 +167,27 @@ def _coerce_to_entry_list(parsed):
     return result
 
 
-MAX_NEW_TOKENS = 2048
+MAX_NEW_TOKENS_EXTRACT = 2048
+# Full-page OCR needs more headroom than the structured-entry JSON does --
+# a dense page's verbatim transcription can run considerably longer than
+# its compact JSON summary. Matches extract_with_hf.py's max_tokens=4096
+# for its own OCR call.
+MAX_NEW_TOKENS_OCR = 4096
 
 
-@spaces.GPU(duration=60)
-def extract(image):
-    """The only GPU-metered call in this app -- everything else (model
-    load, image decode) runs on CPU. Returns a dict: {"entries": [...],
-    "raw_text": "..."} on success, or {"error": "...", "raw_text": "..."}
-    if the model's output couldn't be parsed into the expected shape
-    (still returns the raw text so a caller can see what actually came
-    back, same as the other extraction scripts' content_failure path)."""
-    if image is None:
-        return {"error": "no image provided"}
-    if not isinstance(image, Image.Image):
-        image = Image.fromarray(image)
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": [
-            {"type": "image", "image": image},
-            {"type": "text", "text": "Output the JSON array for this page only."},
-        ]},
-    ]
+def _run_qwen(image, prompt, system_prompt=None, max_new_tokens=MAX_NEW_TOKENS_EXTRACT):
+    """Shared model-call core for both _extract_entries() and
+    _ocr_full_page() below -- same processor/model, just a different
+    prompt (and no system message for the OCR pass, mirroring the other
+    extraction scripts' own OCR call shape, which also skips a system
+    instruction there)."""
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": [
+        {"type": "image", "image": image},
+        {"type": "text", "text": prompt},
+    ]})
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     image_inputs, video_inputs = process_vision_info(messages)
     inputs = processor(
@@ -177,23 +195,66 @@ def extract(image):
         padding=True, return_tensors="pt",
     ).to("cuda")
 
-    generated_ids = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
+    generated_ids = model.generate(**inputs, max_new_tokens=max_new_tokens)
     generated_ids_trimmed = [
         out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
     ]
-    raw_text = processor.batch_decode(
+    return processor.batch_decode(
         generated_ids_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False,
     )[0]
 
+
+@spaces.GPU(duration=60)
+def _extract_entries(image):
+    return _run_qwen(
+        image, "Output the JSON array for this page only.",
+        system_prompt=SYSTEM_PROMPT, max_new_tokens=MAX_NEW_TOKENS_EXTRACT,
+    )
+
+
+@spaces.GPU(duration=90)
+def _ocr_full_page(image):
+    return _run_qwen(image, FULL_PAGE_OCR_PROMPT, max_new_tokens=MAX_NEW_TOKENS_OCR)
+
+
+def extract(image):
+    """The public Gradio endpoint. Two GPU-metered calls per invocation
+    (_ocr_full_page() then _extract_entries()) -- everything else (model
+    load, image decode, JSON parsing) runs on CPU. OCR is best-effort and
+    independent: its failure is captured in ocr_error rather than raising,
+    and never affects the returned entries, same as
+    extract_with_gemini.py's/extract_with_hf.py's process_page() treats
+    their own OCR call. Returns a dict:
+      {"entries": [...], "raw_text": "...", "ocr_text": "..." or None,
+       "ocr_error": "..." or None}
+    on a successful extraction, or
+      {"error": "...", "raw_text": "...", "ocr_text": ..., "ocr_error": ...}
+    if the model's structured-extraction output couldn't be parsed into
+    the expected shape (still returns the raw text so a caller can see
+    what actually came back, same as the other extraction scripts'
+    content_failure path)."""
+    if image is None:
+        return {"error": "no image provided"}
+    if not isinstance(image, Image.Image):
+        image = Image.fromarray(image)
+
+    ocr_text = None
+    ocr_error = None
+    try:
+        ocr_text = _ocr_full_page(image)
+    except Exception as exc:
+        ocr_error = str(exc)
+
+    raw_text = _extract_entries(image)
     text_clean = raw_text.strip()
     text_clean = re.sub(r"^```(json)?|```$", "", text_clean, flags=re.M).strip()
     try:
         parsed = json.loads(text_clean)
         entries = _coerce_to_entry_list(parsed)
     except Exception as exc:
-        return {"error": str(exc), "raw_text": raw_text}
+        return {"error": str(exc), "raw_text": raw_text, "ocr_text": ocr_text, "ocr_error": ocr_error}
 
-    return {"entries": entries, "raw_text": raw_text}
+    return {"entries": entries, "raw_text": raw_text, "ocr_text": ocr_text, "ocr_error": ocr_error}
 
 
 demo = gr.Interface(
@@ -204,8 +265,9 @@ demo = gr.Interface(
     description=(
         "Internal extraction endpoint for the Punjab Data Project pipeline. "
         "Takes one page image, returns structured catalogue entries following "
-        "pipeline/schema.md. Called both from this UI and headlessly via "
-        "gradio_client from a GitHub Actions workflow."
+        "pipeline/schema.md plus a full-page OCR transcription. Called both "
+        "from this UI and headlessly via gradio_client from a GitHub Actions "
+        "workflow."
     ),
 )
 

@@ -104,7 +104,6 @@ MODEL_ROLE_LABELS = {
     # Manual/rescue-only in extract-pages-gemini.yml, not scheduled -- see
     # that workflow's own comment. Each has a real but tight free-tier
     # daily quota (RPD 20, same tier as gemini-3.6-flash above).
-    "gemini-2.5-flash-lite": "hosted API (Gemini), free tier · very tight daily quota, manual only",
     "gemini-3.5-flash": "hosted API (Gemini), free tier · very tight daily quota, manual only",
     "gemini-3.7-flash": "hosted API (Gemini), free tier · very tight daily quota, manual only",
     "gemini-3.8-flash": "hosted API (Gemini), free tier · very tight daily quota, manual only",
@@ -127,6 +126,12 @@ MODEL_ROLE_LABELS = {
     "gemini-1.5-flash": "hosted API (Gemini), free tier · retired",
     "gemini-2.5-pro": "hosted API (Gemini), free tier · retired",
     "gemini-1.5-pro": "hosted API (Gemini), free tier · retired",
+    # Ran successfully for 112 pages under run 35462828707, then started
+    # returning a clean 404 ("... is no longer available to new users.
+    # Please update your code to use models/gemini-3.5-flash-lite") --
+    # Google's own retirement message, already merged into the fleet
+    # above as one of the two scheduled flash-lite models.
+    "gemini-2.5-flash-lite": "hosted API (Gemini), free tier · retired",
     # scripts/extract_with_hf.py -- a hosted API via Hugging Face's
     # Inference Providers router, budget-limited (a small monthly dollar
     # credit) rather than rate-limited, so "very small monthly budget" is

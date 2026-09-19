@@ -62,7 +62,6 @@ inputs:
 | `gemini-3.1-flash-lite` | ~4s between requests | Materially higher free-tier RPM/RPD than flash, per every source describing it. Scheduled twice a day (see above) |
 | `gemini-3.5-flash-lite` | ~4s between requests | Same free-tier ceiling as `3.1-flash-lite` per every source describing it. Scheduled the other two times a day, on its own independent daily quota |
 | `gemini-3.6-flash` | ~4s between requests | Offered for comparison, not currently scheduled; its free tier turned out much tighter than assumed — a full 5-hour run only cleared ~24 pages, almost entirely stuck retrying 429s |
-| `gemini-2.5-flash-lite` | fallback pace (unlisted in `GEMINI_MODEL_PACING`) | RPD 20, same tight tier as `3.6-flash`; manual/rescue only. Google has it slated to shut down 2026-10-16 |
 | `gemini-3.5-flash` | fallback pace | RPD 20; manual/rescue only |
 | `gemini-3.7-flash` | fallback pace | RPD 20; manual/rescue only |
 | `gemini-3.8-flash` | fallback pace | RPD 20; manual/rescue only |
@@ -70,14 +69,18 @@ inputs:
 | `gemma-4-31b-it` | 20s per worker, 8 workers (`extract-gemma-matrix` job) | Gemma hosted directly on the Gemini API (distinct from `google-gemma-4-31B-it` in `HF_EXTRACTION.md`, which reaches it via HF Inference Providers instead). RPM 30, RPD **14,400** confirmed on the account's own rate-limits page — the most generous quota of any tag here, hence the matrix — but TPM is only 16K (vs. 250K for the Gemini models above) and real per-page token cost against that hasn't been measured; if a run trips the daily-quota guard well short of 14,400 requests, suspect TPM |
 | `gemma-4-26b-a4b-it` | 20s per worker, 8 workers | Same as `gemma-4-31b-it` above — RPM 30, RPD 14,400, TPM 16K |
 
-The five RPD-20 models above aren't in `GEMINI_MODEL_PACING`, so they use the module's
+The four RPD-20 models above aren't in `GEMINI_MODEL_PACING`, so they use the module's
 conservative unlisted-model fallback pace rather than an explicit entry — deliberate, not an
 oversight, since a 20-request daily cap would exhaust in the first page or two of a normal
 run regardless of request pacing; they're offered for a one-off manual dispatch or rescue run,
-never the scheduled backlog. `gemini-2.5-flash` (no `-lite`) is *not* offered at all despite
-Google's own usage dashboard still showing it a nonzero quota row — it's the same generation
-already confirmed retired via the live 404 below; the dashboard quota row apparently persists
-after the model itself stops serving requests.
+never the scheduled backlog. Neither `gemini-2.5-flash` (no `-lite`) nor `gemini-2.5-flash-lite`
+is offered, despite Google's own usage dashboard showing a nonzero quota row for each — both are
+confirmed retired. `gemini-2.5-flash` is the same generation already confirmed retired via the
+live 404 below (the dashboard quota row apparently persists after a model itself stops serving
+requests). `gemini-2.5-flash-lite` was live-tested after being added here (run 35462828707): it
+processed 112 pages successfully, then started returning Google's own retirement 404 ("This
+model models/gemini-2.5-flash-lite is no longer available to new users. Please update your code
+to use models/gemini-3.5-flash-lite") — already one of the two scheduled flash-lite models above.
 
 Google retired the generation this workflow originally shipped with
 (`gemini-2.5-flash`/`-pro`, `gemini-1.5-flash`/`-pro`) — confirmed via a live 404 from the API

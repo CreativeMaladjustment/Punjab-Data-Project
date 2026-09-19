@@ -18,7 +18,7 @@ on:
   workflow_dispatch:
     inputs:
       candidate_limit:
-        description: "How many trending image-text-to-text catalog models to check (in addition to the pipeline's currently-configured HF_MODEL, always checked)"
+        description: "How many most-downloaded image-text-to-text catalog models to check (in addition to the pipeline's currently-configured HF_MODEL, always checked)"
         type: string
         default: "15"
 

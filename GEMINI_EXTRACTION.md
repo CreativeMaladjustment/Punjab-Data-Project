@@ -27,11 +27,18 @@ job itself is much lighter/faster to start than `extract-pages.yml`'s.
 
 ## Running it
 
-**Scheduled**: every 6 hours (`0 4,10,16,22 * * *` UTC), with `model=gemini-3.1-flash-lite`,
-`source_model=(none)`, `allow_already_extracted=false` — i.e. a normal run against whatever's
-still missing a successful extraction from any source. Like every workflow in this repo that
-uses the `b2-upload` environment, a scheduled run still queues for manual approval if required
-reviewers are configured there — the schedule makes runs *regularly requested*, not unattended.
+**Scheduled**: every 6 hours total, alternating between two models via two `cron:` entries —
+`0 4,16 * * *` runs `gemini-3.1-flash-lite`, `0 10,22 * * *` runs `gemini-3.5-flash-lite` (both
+UTC), each landing two of the four daily slots. The workflow's `env:` block picks the model by
+matching `github.event.schedule` (the exact cron string GitHub reports for whichever entry
+fired) against these two strings. Both models otherwise run with `source_model=(none)`,
+`allow_already_extracted=false` — a normal run against whatever's still missing a successful
+extraction from any source. Splitting the four daily slots across two models' independent
+free-tier daily quotas means roughly twice the pages/day get attempted before either model's
+own quota caps out for the day, versus one model spending its single quota bucket across all
+four slots. Like every workflow in this repo that uses the `b2-upload` environment, a scheduled
+run still queues for manual approval if required reviewers are configured there — the schedule
+makes runs *regularly requested*, not unattended.
 
 **Manual** (Actions → *Extract catalogue entries with Gemini* → Run workflow) takes three
 inputs:
@@ -46,8 +53,9 @@ inputs:
 
 | Model | Free-tier pace this workflow uses | Notes |
 |---|---|---|
-| `gemini-3.1-flash-lite` (default) | ~4s between requests | Materially higher free-tier RPM/RPD than flash, per every source describing it |
-| `gemini-3.6-flash` | ~4s between requests | Offered for comparison; its free tier turned out much tighter than assumed — a full 5-hour run only cleared ~24 pages, almost entirely stuck retrying 429s |
+| `gemini-3.1-flash-lite` | ~4s between requests | Materially higher free-tier RPM/RPD than flash, per every source describing it. Scheduled twice a day (see above) |
+| `gemini-3.5-flash-lite` | ~4s between requests | Same free-tier ceiling as `3.1-flash-lite` per every source describing it. Scheduled the other two times a day, on its own independent daily quota |
+| `gemini-3.6-flash` | ~4s between requests | Offered for comparison, not currently scheduled; its free tier turned out much tighter than assumed — a full 5-hour run only cleared ~24 pages, almost entirely stuck retrying 429s |
 
 Google retired the generation this workflow originally shipped with
 (`gemini-2.5-flash`/`-pro`, `gemini-1.5-flash`/`-pro`) — confirmed via a live 404 from the API

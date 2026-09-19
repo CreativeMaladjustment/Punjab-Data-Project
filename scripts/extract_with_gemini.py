@@ -92,6 +92,7 @@ MODEL_TAG = re.sub(r"[^A-Za-z0-9._-]", "-", GEMINI_MODEL)
 GEMINI_MODEL_PACING = {
     "gemini-3.1-flash-lite": 4.0,
     "gemini-3.6-flash": 4.0,
+    "gemini-3.5-flash-lite": 4.0,
 }
 PACE_SECONDS = float(os.environ.get("GEMINI_PACE_SECONDS", GEMINI_MODEL_PACING.get(GEMINI_MODEL, 20.0)))
 

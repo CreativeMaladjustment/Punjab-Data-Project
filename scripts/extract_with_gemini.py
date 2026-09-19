@@ -151,6 +151,12 @@ B2_ACCOUNTS = load_b2_accounts()
 
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; same runner guard as extract_with_llm.py
 RUNTIME_GUARD_EXIT_CODE = 42
+# Distinct from RUNTIME_GUARD_EXIT_CODE: both mean "stopped early on
+# purpose, not a bug, nothing to fix" to the calling workflow (see
+# .github/workflows/extract-pages-gemini.yml), but they're different
+# situations worth telling apart in the job summary -- one hit a runner
+# wall-clock cap, the other hit Gemini's own free-tier daily quota.
+GEMINI_RATE_LIMIT_EXIT_CODE = 43
 MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
 START_TIME = time.time()
 
@@ -273,6 +279,16 @@ CLAIM_MAX_ATTEMPTS = 5
 MAX_ATTEMPTS_PER_PAGE = 2
 
 MAX_B2_FAILURES_PER_WORKER = int(os.environ.get("MAX_B2_FAILURES_PER_WORKER", "10"))
+
+# Deliberately much lower than MAX_B2_FAILURES_PER_WORKER above: a single
+# page whose Gemini call survives GEMINI_MAX_RETRIES worth of backoff on a
+# 429 (up to ~12.5 minutes already spent per call, twice over if both the
+# OCR and extraction calls hit it) is strong evidence the free tier's
+# *daily* request quota is exhausted for the rest of the day, not a
+# one-off blip -- retrying more pages against it just repeats the same
+# wait for nothing while still paying a fresh B2 download each time. See
+# _gemini_post()'s .gemini_rate_limited comment.
+MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER = int(os.environ.get("MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER", "1"))
 
 # Both queries below are fully static string literals -- no str.format(),
 # f-string, or concatenation of any kind, after an earlier version of each
@@ -582,7 +598,22 @@ def _gemini_post(body, context):
             continue
         break
     else:
-        raise RuntimeError(f"Gemini kept returning {resp.status_code} after {GEMINI_MAX_RETRIES} retries")
+        exc = RuntimeError(f"Gemini kept returning {resp.status_code} after {GEMINI_MAX_RETRIES} retries")
+        if resp.status_code == 429:
+            # Distinct from a 5xx exhaustion: a 429 that survives
+            # GEMINI_MAX_RETRIES worth of exponential backoff (up to 300s
+            # per attempt) is Google's free-tier *daily* request quota,
+            # not a transient per-minute burst -- a burst clears within a
+            # retry or two, a daily cap doesn't clear until Pacific
+            # midnight (see the AI comment on the caller side). Tagged
+            # here, checked in process_page()/main(), so a whole run
+            # doesn't keep claiming pages (each costing a real B2
+            # download) against a quota that's already known to be dead
+            # for the rest of the day -- see the module docstring's
+            # "gemini-3.6-flash ... almost entirely stuck retrying 429s"
+            # note for what happens without this guard.
+            exc.gemini_rate_limited = True
+        raise exc
 
     if not resp.ok:
         # Anything other than a clean 200 (auth, bad request, 5xx) is
@@ -783,6 +814,13 @@ def process_page(clients, claim):
 
     print(f"  page {page_no}: b2 account={account} bucket={bucket} key={image_key}")
     raw_text = None
+    # Set from either the OCR call below or the extraction call further
+    # down (whichever hits Gemini's 429 first) -- surfaced to main() so a
+    # whole run stops claiming further pages once the daily quota looks
+    # dead, rather than paying a B2 download for each one only to retry
+    # into the same wall. See _gemini_post()'s .gemini_rate_limited
+    # comment for why only an exhausted 429 (not a 5xx) sets this.
+    ocr_rate_limited = False
     try:
         try:
             client = clients[account]
@@ -806,6 +844,7 @@ def process_page(clients, claim):
             page_text = gemini_ocr_full_page(image_bytes, context=context)
             db_save_page_ocr_text(page_id, GEMINI_MODEL, MODEL_TAG, page_text)
         except Exception as exc:
+            ocr_rate_limited = getattr(exc, "gemini_rate_limited", False)
             print(f"WARNING: full-page OCR failed for {context}: {exc}")
             db_save_page_ocr_failure(page_id, GEMINI_MODEL, MODEL_TAG, str(exc))
         entries, raw_text = gemini_generate(image_bytes, context=context)
@@ -818,14 +857,15 @@ def process_page(clients, claim):
         print(f"    saving {len(entries)} entries for {context}: {entries_json[:500]!r}")
         db_save_extraction_success(page_id, entries, raw_text)
         print(f"done: {context}")
-        return True, False
+        return True, False, ocr_rate_limited
     except Exception as exc:
         content_failure = is_content_failure(exc)
         b2_download_failure = getattr(exc, "b2_download_failure", False)
+        gemini_rate_limited = ocr_rate_limited or getattr(exc, "gemini_rate_limited", False)
         raw_text = getattr(exc, "raw_text", raw_text)
         print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")
         db_save_extraction_failure(page_id, str(exc), raw_text, content_failure)
-        return False, b2_download_failure
+        return False, b2_download_failure, gemini_rate_limited
 
 
 def count_capped_failures():
@@ -858,6 +898,8 @@ def main():
     contended = False
     b2_capped = False
     b2_failures = 0
+    gemini_rate_capped = False
+    gemini_rate_limit_failures = 0
     while True:
         if elapsed() > MAX_RUNTIME_SECONDS:
             print(f"runtime guard tripped after {elapsed():.0f}s; stopping before claiming another page")
@@ -874,20 +916,33 @@ def main():
             print("gave up after repeated claim contention, not confirmed exhaustion; other workers or a later run may still find pages")
             contended = True
             break
-        ok, b2_download_failure = process_page(clients, claim)
+        ok, b2_download_failure, gemini_rate_limited = process_page(clients, claim)
         if not ok:
             any_incomplete = True
             if b2_download_failure:
                 b2_failures += 1
+            if gemini_rate_limited:
+                gemini_rate_limit_failures += 1
         processed += 1
         print(f"count of pages processed so far: {processed}")
         if MAX_B2_FAILURES_PER_WORKER and b2_failures >= MAX_B2_FAILURES_PER_WORKER:
             print(f"{b2_failures} B2 download failures this run; stopping before claiming another page")
             b2_capped = True
             break
+        if MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER and gemini_rate_limit_failures >= MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER:
+            print(
+                f"{gemini_rate_limit_failures} page(s) exhausted retries on a Gemini 429 this run "
+                f"(MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER={MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER}); "
+                "treating this as the daily free-tier quota, not claiming another page"
+            )
+            gemini_rate_capped = True
+            break
 
     print(f"processed {processed} page(s) total; stopped for the reason logged above")
 
+    if gemini_rate_capped:
+        print("stopping now rather than exiting non-zero at the bottom: the daily Gemini quota, not a bug, is why pages are failing")
+        sys.exit(GEMINI_RATE_LIMIT_EXIT_CODE)
     if limited:
         print(f"limited run: stopped at MAX_PAGES_PER_WORKER ({MAX_PAGES_PER_WORKER}); whether more pages remain is unknown")
     elif contended:

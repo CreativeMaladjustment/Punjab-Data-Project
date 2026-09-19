@@ -145,6 +145,15 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Action needed:** the next scheduled run (every 6h) or a manual re-run with the same model (\`$GEMINI_MODEL\`) continues it." >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Flag daily Gemini quota exhaustion for manual resume
+        if: steps.run.outputs.exit_code == '43'
+        run: |
+          echo "### 🚦 Daily Gemini quota exhausted for \`$GEMINI_MODEL\` — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "A page's Gemini call kept returning 429 through every retry, which free-tier quotas only do once the day's request cap (not a transient burst) is spent. The run stopped claiming further pages rather than repeating the same B2 download + full retry cycle for nothing. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** none -- RPD quotas reset at midnight Pacific time, and the next scheduled run (every 6h) or a manual re-run with the same model (\`$GEMINI_MODEL\`) continues it automatically." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Fail job on unexpected script error
-        if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42'
+        if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42' && steps.run.outputs.exit_code != '43'
         run: exit 1

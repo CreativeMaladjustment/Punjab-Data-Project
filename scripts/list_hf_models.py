@@ -18,7 +18,8 @@ Two checks, in order:
 
 1. Hub API listing (huggingface.co/api/models) for image-text-to-text
    models, filtered to ones with at least one Inference Provider mapping,
-   sorted by trending, with each model's inferenceProviderMapping
+   sorted by download count (most-downloaded first -- the API rejects
+   "trending" as a sort key), with each model's inferenceProviderMapping
    expanded -- this is catalog metadata: which providers Hugging Face's
    own listing says serve a model. This alone isn't sufficient (see
    above), but it's a reasonable source of candidate model names.
@@ -62,7 +63,7 @@ HF_API_TIMEOUT_SECONDS = 30
 HF_ROUTER_URL = "https://router.huggingface.co/v1/chat/completions"
 HF_MODELS_API_URL = "https://huggingface.co/api/models"
 
-# How many trending image-text-to-text models (with at least one
+# How many most-downloaded image-text-to-text models (with at least one
 # inference-provider mapping per the Hub's own listing) to pull as
 # candidates for the live test below.
 CANDIDATE_LIMIT = int(os.environ.get("HF_CANDIDATE_LIMIT", "15"))
@@ -98,18 +99,25 @@ def _probe_pace():
 
 def fetch_candidates():
     """Query the Hub API for image-text-to-text models with an inference
-    provider mapping, sorted by trending. Returns a list of
-    (model_id, providers) tuples: providers is whatever the Hub's own
-    inferenceProviderMapping says currently serves each model (may be
-    empty even for a model returned by this filter -- the field's exact
-    shape isn't guaranteed stable, so this degrades to an empty list
-    rather than raising if it's missing or shaped differently than
-    expected)."""
+    provider mapping, sorted by download count (most-downloaded first).
+    Returns a list of (model_id, providers) tuples: providers is whatever
+    the Hub's own inferenceProviderMapping says currently serves each
+    model (may be empty even for a model returned by this filter -- the
+    field's exact shape isn't guaranteed stable, so this degrades to an
+    empty list rather than raising if it's missing or shaped differently
+    than expected).
+
+    "downloads", not "trending": the Hub API rejects "trending" with a 400
+    ("Invalid sort parameter") -- it's a website-only sort the raw API
+    doesn't expose the same way. "downloads" is a documented sort key on
+    huggingface_hub's ModelInfo and a reasonable proxy for "widely used,
+    likely still actively hosted"."""
     headers = {"Authorization": f"Bearer {HUGGING_FACE_API_KEY}"}
     params = {
         "pipeline_tag": "image-text-to-text",
         "inference_provider": "all",
-        "sort": "trending",
+        "sort": "downloads",
+        "direction": "-1",
         "limit": str(CANDIDATE_LIMIT),
         "expand[]": "inferenceProviderMapping",
     }
@@ -205,7 +213,7 @@ def test_model_live(model_id):
 
 
 def main():
-    print("Step 1: querying Hugging Face's model catalog for trending "
+    print("Step 1: querying Hugging Face's model catalog for the most-downloaded "
           f"image-text-to-text models with an inference-provider mapping (limit {CANDIDATE_LIMIT})...")
     candidates = fetch_candidates()
 
@@ -221,7 +229,7 @@ def main():
     if configured_model and configured_model not in seen:
         # Always test the pipeline's actual currently-configured model
         # too, even if the catalog query above didn't happen to surface
-        # it (e.g. it's not "trending", or the listing call failed).
+        # it (e.g. it's not among the most-downloaded, or the listing call failed).
         candidates.append((configured_model, []))
 
     if not candidates:

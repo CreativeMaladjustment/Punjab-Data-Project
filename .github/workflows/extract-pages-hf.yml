@@ -90,6 +90,7 @@ on:
           - qwen3-vl:4b
           - gemma4:e2b
           - gemini-3.1-flash-lite
+          - gemini-3.5-flash-lite
           - gemini-3.6-flash
       allow_already_extracted:
         description: >-

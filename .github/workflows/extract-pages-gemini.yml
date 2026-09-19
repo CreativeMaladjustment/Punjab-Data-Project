@@ -7,18 +7,30 @@
 # at all, just Python calling a hosted API, and free-tier rate limits mean
 # more parallel callers would just mean more 429s, not more throughput.
 #
-# Default model is gemini-3.1-flash-lite. The generation this workflow
-# originally shipped with (gemini-2.5-flash/-pro, gemini-1.5-flash/-pro) has
-# since been retired by Google (confirmed via a live 404: "This model ... is
-# no longer available to new users"); gemini-3.6-flash was tried next but
-# turned out to have a much tighter free-tier daily quota than assumed -- a
-# full 5-hour run only cleared ~24 pages, almost entirely stuck retrying
-# 429s (see scripts/extract_with_gemini.py's module docstring / git history
-# for that run's logs). gemini-3.1-flash-lite is offered as an alternate
-# choice for a deliberate comparison run. Confirm current numbers at
+# The generation this workflow originally shipped with (gemini-2.5-flash/
+# -pro, gemini-1.5-flash/-pro) has since been retired by Google (confirmed
+# via a live 404: "This model ... is no longer available to new users");
+# gemini-3.6-flash was tried next but turned out to have a much tighter
+# free-tier daily quota than assumed -- a full 5-hour run only cleared ~24
+# pages, almost entirely stuck retrying 429s (see
+# scripts/extract_with_gemini.py's module docstring / git history for that
+# run's logs). Confirm current numbers at
 # https://ai.google.dev/gemini-api/docs/rate-limits before assuming the
 # pacing below (scripts/extract_with_gemini.py's GEMINI_MODEL_PACING)
 # still matches -- Google revises these, sometimes sharply.
+#
+# Scheduled runs alternate between gemini-3.1-flash-lite and
+# gemini-3.5-flash-lite, two runs a day each (see the two `cron:` entries
+# below, matched at run time via github.event.schedule in the env: block).
+# Each has its own free-tier daily request quota (RPD) -- a single model
+# running all four daily slots spends its one quota bucket four times a
+# day and reaches RPD exhaustion (see extract_with_gemini.py's
+# MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER guard) sooner in the day, with
+# nothing else able to pick up slack until it resets at midnight Pacific.
+# Splitting the four daily slots across two models' independent quotas
+# means roughly twice the pages/day get attempted before either one caps
+# out, at the cost of each individual model's llm_extractions rows only
+# growing at half the previous rate.
 #
 # Rescue mode: set `source_model` to reprocess ONLY the pages that model
 # already gave up on (capped-out content failures) with `model` instead of
@@ -30,13 +42,21 @@
 name: Extract catalogue entries with Gemini
 
 on:
-  # Every 6 hours, same anchor as extract-pages.yml's own schedule (see that
-  # workflow for the run-35086378308 timing this was set from) -- both
-  # workflows queue independently for `b2-upload` approval, so running them
-  # on the same tick doesn't couple them, just means both show up for
+  # Every 6 hours total, same anchor as extract-pages.yml's own schedule
+  # (see that workflow for the run-35086378308 timing this was set from) --
+  # both workflows queue independently for `b2-upload` approval, so running
+  # them on the same tick doesn't couple them, just means both show up for
   # review at once.
+  #
+  # Two cron entries, not one with all four hours: each fires two of the
+  # four daily slots, twelve hours apart, and the env: block below picks
+  # the model by matching github.event.schedule against whichever of these
+  # two strings fired -- see the module comment above for why splitting
+  # models across slots this way (rather than one model in all four) is
+  # worth the added complexity here.
   schedule:
-    - cron: "0 4,10,16,22 * * *"
+    - cron: "0 4,16 * * *"   # gemini-3.1-flash-lite
+    - cron: "0 10,22 * * *"  # gemini-3.5-flash-lite
   workflow_dispatch:
     inputs:
       model:
@@ -45,6 +65,7 @@ on:
         default: gemini-3.1-flash-lite
         options:
           - gemini-3.1-flash-lite
+          - gemini-3.5-flash-lite
           - gemini-3.6-flash
       source_model:
         description: >-
@@ -59,6 +80,7 @@ on:
         options:
           - "(none)"
           - gemini-3.1-flash-lite
+          - gemini-3.5-flash-lite
           - gemini-3.6-flash
           - glm-ocr
           - minicpm-v4.6
@@ -98,7 +120,14 @@ jobs:
       # for a schedule-triggered run, whose `inputs` context is empty (only
       # workflow_dispatch/workflow_call populate one) -- see
       # extract-pages.yml's own schedule trigger for the full reasoning.
-      GEMINI_MODEL: ${{ inputs.model || 'gemini-3.1-flash-lite' }}
+      #
+      # GEMINI_MODEL's fallback isn't a single default here: a schedule-
+      # triggered run instead picks the model by matching
+      # github.event.schedule (the exact cron string that fired -- GitHub
+      # populates this only for schedule events) against the two `cron:`
+      # entries above, so the two daily slots each model owns actually run
+      # that model rather than both quietly falling back to the same one.
+      GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 10,22 * * *' && 'gemini-3.5-flash-lite' || 'gemini-3.1-flash-lite') }}
       SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
       ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
     steps:

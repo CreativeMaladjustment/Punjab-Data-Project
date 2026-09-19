@@ -49,10 +49,12 @@ jobs:
           PYTHONUNBUFFERED: "1"
           HUGGING_FACE_API_KEY: ${{ secrets.HUGGING_FACE_API_KEY }}
           HF_CANDIDATE_LIMIT: ${{ inputs.candidate_limit || '15' }}
-          # Same default extract-pages-hf.yml currently uses -- always
-          # included in the live test even if the catalog step doesn't
-          # happen to surface it, so this directly answers "does the
-          # pipeline's actual configured model still work".
-          HF_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
+          # HF_MODEL deliberately NOT set here -- scripts/list_hf_models.py
+          # falls back to scripts/hf_config.py's DEFAULT_HF_MODEL, the same
+          # single source of truth extract_with_hf.py's own default reads
+          # from, rather than this workflow carrying its own copy of that
+          # literal (a Copilot review finding on PR #57: a hardcoded value
+          # here could silently drift from extract-pages-hf.yml's real
+          # default the next time it changes).
         run: |
           python scripts/list_hf_models.py | tee "$GITHUB_STEP_SUMMARY"

@@ -83,8 +83,10 @@ import requests
 from botocore.config import Config
 from psycopg2.extras import Json
 
+from hf_config import DEFAULT_HF_MODEL
+
 HUGGING_FACE_API_KEY = os.environ["HUGGING_FACE_API_KEY"]
-HF_MODEL = os.environ.get("HF_MODEL", "Qwen/Qwen2.5-VL-7B-Instruct")
+HF_MODEL = os.environ.get("HF_MODEL", DEFAULT_HF_MODEL)
 MODEL_TAG = re.sub(r"[^A-Za-z0-9._-]", "-", HF_MODEL)
 
 # See the module docstring's "what's different" section -- this is a

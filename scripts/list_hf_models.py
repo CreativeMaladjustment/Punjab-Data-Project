@@ -22,15 +22,25 @@ Two checks, in order:
    expanded -- this is catalog metadata: which providers Hugging Face's
    own listing says serve a model. This alone isn't sufficient (see
    above), but it's a reasonable source of candidate model names.
-2. A live, minimal (text-only, no image, small max_tokens) chat-
-   completion call through the same router.huggingface.co endpoint
-   extract_with_hf.py actually uses, for each candidate from step 1 --
-   this is the authoritative check: if this succeeds, that (model, this
-   account's key) combination genuinely works right now. If it fails, the
-   exact error is reported (a 400 "not supported" means step 1's listing
-   doesn't reflect what's actually usable for this account; other errors
-   -- 401/403 in particular -- point at the token itself, or at needing
-   to enable a provider at huggingface.co/settings/inference-providers).
+2. A live, minimal chat-completion call through the same
+   router.huggingface.co endpoint and the same multimodal content shape
+   (an image_url data URI plus text, not a plain text message)
+   extract_with_hf.py actually sends -- this is the authoritative check:
+   if this succeeds, that (model, this account's key) combination
+   genuinely works right now for the same request shape the real
+   extraction calls use. A text-only probe isn't enough here -- a model/
+   provider can accept a plain-text request while rejecting the
+   image-bearing one the pipeline actually sends, which would make this
+   script recommend a model that then fails extraction anyway. If it
+   fails, the exact error is reported (a 400 "not supported" means step
+   1's listing doesn't reflect what's actually usable for this account;
+   other errors -- 401/403 in particular -- point at the token itself, or
+   at needing to enable a provider at
+   huggingface.co/settings/inference-providers). Calls are paced and a
+   429/5xx is retried a bounded number of times, same reasoning as
+   extract_with_hf.py's own pace()/_hf_post() -- back-to-back calls across
+   a batch of candidates could otherwise draw a rate limit that has
+   nothing to do with whether a given model actually works.
 
 Run manually via .github/workflows/list-hf-models.yml (workflow_dispatch
 only -- this is an on-demand diagnostic, not a pipeline stage, so it
@@ -40,8 +50,11 @@ to the job's log and step summary; nothing is written anywhere.
 import json
 import os
 import sys
+import time
 
 import requests
+
+from hf_config import DEFAULT_HF_MODEL
 
 HUGGING_FACE_API_KEY = os.environ["HUGGING_FACE_API_KEY"]
 
@@ -53,6 +66,34 @@ HF_MODELS_API_URL = "https://huggingface.co/api/models"
 # inference-provider mapping per the Hub's own listing) to pull as
 # candidates for the live test below.
 CANDIDATE_LIMIT = int(os.environ.get("HF_CANDIDATE_LIMIT", "15"))
+
+# A 1x1 transparent PNG, used only to exercise the same multimodal
+# image_url + text content shape extract_with_hf.py's real calls use (see
+# hf_generate()/hf_ocr_full_page() there) -- the pixel data itself is
+# irrelevant, what matters is the request shape matching, per the module
+# docstring's "why a text-only probe isn't enough" note.
+PROBE_IMAGE_DATA_URL = (
+    "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+# Same pace()/retry reasoning as extract_with_hf.py's own -- see there --
+# just with shorter backoff since this is a quick diagnostic scan across
+# a batch of candidates, not a long-running extraction run.
+PROBE_PACE_SECONDS = float(os.environ.get("HF_PROBE_PACE_SECONDS", "2.0"))
+PROBE_MAX_RETRIES = 3
+PROBE_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+_last_probe_at = [0.0]  # mutable single-element box, same pattern as
+# extract_with_hf.py's _LAST_CALL_AT -- this script's calls are all
+# sequential (no threads/workers), so a plain module global would need a
+# `global` statement at every call site otherwise.
+
+
+def _probe_pace():
+    wait = PROBE_PACE_SECONDS - (time.time() - _last_probe_at[0])
+    if wait > 0:
+        time.sleep(wait)
 
 
 def fetch_candidates():
@@ -72,7 +113,17 @@ def fetch_candidates():
         "limit": str(CANDIDATE_LIMIT),
         "expand[]": "inferenceProviderMapping",
     }
-    resp = requests.get(HF_MODELS_API_URL, headers=headers, params=params, timeout=HF_API_TIMEOUT_SECONDS)
+    try:
+        resp = requests.get(HF_MODELS_API_URL, headers=headers, params=params, timeout=HF_API_TIMEOUT_SECONDS)
+    except requests.RequestException as exc:
+        # A timeout/connection failure here must not prevent main() from
+        # still live-testing the pipeline's configured model below -- this
+        # step is catalog metadata only, not required for the
+        # authoritative check.
+        print(f"WARNING: Hub API model listing request failed: {exc}")
+        print("Falling back to no catalog candidates -- the live test below still runs against "
+              "the model this pipeline is currently configured for (HF_MODEL, if set).")
+        return []
     if not resp.ok:
         print(f"WARNING: Hub API model listing returned {resp.status_code}: {resp.text[:1000]}")
         print("Falling back to no catalog candidates -- the live test below still runs against "
@@ -97,14 +148,14 @@ def fetch_candidates():
 
 
 def test_model_live(model_id):
-    """The authoritative check: a minimal, text-only, no-image chat
-    completion through the exact router endpoint extract_with_hf.py uses.
-    Returns (ok, detail) -- detail is the response's message content on
-    success, or the error text (truncated) on failure. This only confirms
-    the router accepts (model_id, this account's key) for a basic text
-    call; it doesn't confirm vision support specifically -- a model
-    passing this check still needs to actually be a vision-capable model
-    (which the pipeline_tag filter above already selected for)."""
+    """The authoritative check: a minimal chat completion through the
+    exact router endpoint AND the exact multimodal content shape (image_url
+    + text) extract_with_hf.py's real calls use -- see the module
+    docstring for why a text-only probe isn't enough. Returns (ok, detail)
+    -- detail is the response's message content on success, or the error
+    text (truncated) on failure. Paced against PROBE_PACE_SECONDS and
+    retries a 429/5xx a bounded number of times before reporting it as a
+    (possibly false) failure -- see PROBE_MAX_RETRIES above."""
     headers = {
         "Authorization": f"Bearer {HUGGING_FACE_API_KEY}",
         "Content-Type": "application/json",
@@ -112,12 +163,35 @@ def test_model_live(model_id):
     body = {
         "model": model_id,
         "max_tokens": 5,
-        "messages": [{"role": "user", "content": "Say OK."}],
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": PROBE_IMAGE_DATA_URL}},
+                {"type": "text", "text": "Say OK."},
+            ],
+        }],
     }
-    try:
-        resp = requests.post(HF_ROUTER_URL, json=body, headers=headers, timeout=HF_API_TIMEOUT_SECONDS)
-    except requests.RequestException as exc:
-        return False, f"request failed: {exc}"
+
+    backoff = 5
+    for attempt in range(1, PROBE_MAX_RETRIES + 1):
+        _probe_pace()
+        try:
+            resp = requests.post(HF_ROUTER_URL, json=body, headers=headers, timeout=HF_API_TIMEOUT_SECONDS)
+        except requests.RequestException as exc:
+            return False, f"request failed: {exc}"
+        _last_probe_at[0] = time.time()
+        if resp.status_code in PROBE_RETRYABLE_STATUS_CODES:
+            if attempt < PROBE_MAX_RETRIES:
+                print(f"    {resp.status_code} from HF router for {model_id} "
+                      f"(attempt {attempt}/{PROBE_MAX_RETRIES}); retrying in {backoff}s")
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            return False, (
+                f"{resp.status_code} after {PROBE_MAX_RETRIES} attempts -- transient, "
+                f"inconclusive rather than a confirmed non-working model: {resp.text[:300]}"
+            )
+        break
 
     if not resp.ok:
         return False, f"{resp.status_code}: {resp.text[:300]}"
@@ -135,7 +209,14 @@ def main():
           f"image-text-to-text models with an inference-provider mapping (limit {CANDIDATE_LIMIT})...")
     candidates = fetch_candidates()
 
-    configured_model = os.environ.get("HF_MODEL", "").strip()
+    # Defaults to hf_config.DEFAULT_HF_MODEL -- the same single source of
+    # truth extract_with_hf.py's own HF_MODEL default reads from -- rather
+    # than requiring the workflow YAML to pass its own copy of that
+    # literal (a Copilot review finding on PR #57: a hardcoded value here
+    # could silently drift from extract-pages-hf.yml's real default the
+    # next time it changes). An explicit HF_MODEL env var still overrides,
+    # same as extract_with_hf.py's own.
+    configured_model = os.environ.get("HF_MODEL", DEFAULT_HF_MODEL).strip()
     seen = {model_id for model_id, _ in candidates}
     if configured_model and configured_model not in seen:
         # Always test the pipeline's actual currently-configured model
@@ -144,7 +225,7 @@ def main():
         candidates.append((configured_model, []))
 
     if not candidates:
-        print("No candidates found from the catalog and no HF_MODEL configured to fall back to; nothing to test.")
+        print("No candidates found from the catalog and no configured model to fall back to; nothing to test.")
         sys.exit(1)
 
     print(f"\nFound {len(candidates)} candidate(s). Catalog-reported providers (informational only -- "

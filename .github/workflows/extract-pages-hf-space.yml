@@ -54,6 +54,8 @@ on:
           - gemini-3-flash-preview
           - google-gemma-4-31B-it
           - google-gemma-4-26B-A4B-it
+          - gemma-4-31b-it
+          - gemma-4-26b-a4b-it
           - Qwen-Qwen3.6-27B
           - Qwen-Qwen3.6-35B-A3B
           - zai-org-GLM-5.3-Flash

@@ -97,6 +97,8 @@ on:
           - gemini-3.7-flash
           - gemini-3.8-flash
           - gemini-3-flash-preview
+          - gemma-4-31b-it
+          - gemma-4-26b-a4b-it
       allow_already_extracted:
         description: >-
           By default this run skips any page that already has a successful

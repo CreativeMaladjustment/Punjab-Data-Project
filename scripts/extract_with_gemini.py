@@ -298,13 +298,14 @@ MAX_ATTEMPTS_PER_PAGE = 2
 MAX_B2_FAILURES_PER_WORKER = int(os.environ.get("MAX_B2_FAILURES_PER_WORKER", "10"))
 
 # Deliberately much lower than MAX_B2_FAILURES_PER_WORKER above: a single
-# page whose Gemini call survives GEMINI_MAX_RETRIES worth of backoff on a
-# 429 (up to ~12.5 minutes already spent per call, twice over if both the
-# OCR and extraction calls hit it) is strong evidence the free tier's
-# *daily* request quota is exhausted for the rest of the day, not a
-# one-off blip -- retrying more pages against it just repeats the same
-# wait for nothing while still paying a fresh B2 download each time. See
-# _gemini_post()'s .gemini_rate_limited comment.
+# page whose Gemini call outlasts GEMINI_MAX_RETRIES worth of backoff (up
+# to ~12.5 minutes already spent per call, twice over if both the OCR and
+# extraction calls hit it) on a 429 *or* a retryable 5xx is strong
+# evidence the free tier's *daily* request quota is exhausted for the
+# rest of the day, not a one-off blip -- retrying more pages against it
+# just repeats the same wait for nothing while still paying a fresh B2
+# download each time. See _gemini_post()'s .gemini_rate_limited comment
+# for why 5xx counts here too, not just 429.
 MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER = int(os.environ.get("MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER", "1"))
 
 # Both queries below are fully static string literals -- no str.format(),
@@ -616,20 +617,27 @@ def _gemini_post(body, context):
         break
     else:
         exc = RuntimeError(f"Gemini kept returning {resp.status_code} after {GEMINI_MAX_RETRIES} retries")
-        if resp.status_code == 429:
-            # Distinct from a 5xx exhaustion: a 429 that survives
-            # GEMINI_MAX_RETRIES worth of exponential backoff (up to 300s
-            # per attempt) is Google's free-tier *daily* request quota,
-            # not a transient per-minute burst -- a burst clears within a
-            # retry or two, a daily cap doesn't clear until Pacific
-            # midnight (see the AI comment on the caller side). Tagged
-            # here, checked in process_page()/main(), so a whole run
-            # doesn't keep claiming pages (each costing a real B2
-            # download) against a quota that's already known to be dead
-            # for the rest of the day -- see the module docstring's
-            # "gemini-3.6-flash ... almost entirely stuck retrying 429s"
-            # note for what happens without this guard.
-            exc.gemini_rate_limited = True
+        # Originally only a 429 set this (the assumption being a 5xx is
+        # "This model is currently experiencing high demand" -- generic
+        # infra, not quota). A live run against gemini-3.7-flash (RPD 20)
+        # disproved that: once its daily quota actually hit 20/20, Google
+        # returned a *mix* of 429 and 503 for the same underlying
+        # exhaustion within the same retry loop (503, 429, 503, ...) --
+        # not a clean, consistent 429. So the status code alone can't
+        # distinguish "real quota exhaustion" from "genuine infra
+        # blip" here. What still can: GEMINI_MAX_RETRIES worth of
+        # exponential backoff (up to 300s per attempt, ~12.5 minutes
+        # cumulative) surviving intact. A real transient blip clears
+        # within a retry or two; nothing Google-side stays broken for
+        # 12+ minutes on every single attempt. So ANY status in
+        # GEMINI_RETRYABLE_STATUS_CODES exhausting all retries is now
+        # treated the same as a 429 -- tagged here, checked in
+        # process_page()/main(), so a whole run doesn't keep claiming
+        # pages (each costing a real B2 download) against a quota that's
+        # already known to be dead for the rest of the day. See the
+        # module docstring's "gemini-3.6-flash ... almost entirely stuck
+        # retrying 429s" note for what happens without this guard.
+        exc.gemini_rate_limited = True
         raise exc
 
     if not resp.ok:
@@ -832,11 +840,12 @@ def process_page(clients, claim):
     print(f"  page {page_no}: b2 account={account} bucket={bucket} key={image_key}")
     raw_text = None
     # Set from either the OCR call below or the extraction call further
-    # down (whichever hits Gemini's 429 first) -- surfaced to main() so a
-    # whole run stops claiming further pages once the daily quota looks
-    # dead, rather than paying a B2 download for each one only to retry
-    # into the same wall. See _gemini_post()'s .gemini_rate_limited
-    # comment for why only an exhausted 429 (not a 5xx) sets this.
+    # down (whichever exhausts its retries first, on a 429 or a 5xx) --
+    # surfaced to main() so a whole run stops claiming further pages once
+    # the daily quota looks dead, rather than paying a B2 download for
+    # each one only to retry into the same wall. See _gemini_post()'s
+    # .gemini_rate_limited comment for why a 5xx exhaustion counts the
+    # same as a 429 one.
     ocr_rate_limited = False
     try:
         try:
@@ -948,7 +957,7 @@ def main():
             break
         if MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER and gemini_rate_limit_failures >= MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER:
             print(
-                f"{gemini_rate_limit_failures} page(s) exhausted retries on a Gemini 429 this run "
+                f"{gemini_rate_limit_failures} page(s) exhausted retries on a Gemini 429/5xx this run "
                 f"(MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER={MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER}); "
                 "treating this as the daily free-tier quota, not claiming another page"
             )

@@ -92,21 +92,26 @@ jobs:
   extract:
     strategy:
       fail-fast: false
-      # 15 parallel workers -- each independently claims and processes pages
-      # (see scripts/extract_with_llm.py's claim_next_page()), so this fans
-      # a big backlog out across 15 runners without any of them stepping on
-      # each other's pages.
+      # 2 parallel workers -- each independently claims and processes pages
+      # (see scripts/extract_with_llm.py's claim_next_page()), so this
+      # fans the backlog out across 2 runners without either stepping on
+      # the other's pages. Still runs on the same 6-hour schedule below,
+      # just slower per run than before -- an accepted tradeoff for the
+      # concurrency headroom this frees up (see below), not a sign the
+      # backlog stopped mattering.
       #
       # GitHub-hosted ubuntu-latest runners share a single account-wide
       # concurrency cap of 20 jobs on the free tier -- a matrix bigger than
       # that just queues the excess (confirmed on run 34689840573: a 42-way
       # matrix ran 20 jobs and queued the other 22). Dropped from 18 to 15
-      # to leave more headroom for other workflows (process-pdfs.yml,
-      # extract-pages-gemini.yml, parse-ocr-text.yml) to have jobs in
-      # flight at the same time without queuing any of them, especially now
-      # that several of these run on overlapping 6-hour schedules.
+      # once already for headroom, then further to 2 specifically to make
+      # room for extract-pages-gemini.yml's extract-gemma-matrix job (8
+      # workers each for gemma-4-31b-it/gemma-4-26b-a4b-it, scheduled 4x/
+      # day) without either matrix queuing the other out when their
+      # schedules land close together -- see that workflow's own module
+      # comment for the exact hours each model runs.
       matrix:
-        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        worker: [1, 2]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload

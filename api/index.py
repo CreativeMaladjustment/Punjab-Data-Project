@@ -104,7 +104,6 @@ MODEL_ROLE_LABELS = {
     # Manual/rescue-only in extract-pages-gemini.yml, not scheduled -- see
     # that workflow's own comment. Each has a real but tight free-tier
     # daily quota (RPD 20, same tier as gemini-3.6-flash above).
-    "gemini-2.5-flash-lite": "hosted API (Gemini), free tier · very tight daily quota, manual only",
     "gemini-3.5-flash": "hosted API (Gemini), free tier · very tight daily quota, manual only",
     "gemini-3.7-flash": "hosted API (Gemini), free tier · very tight daily quota, manual only",
     "gemini-3.8-flash": "hosted API (Gemini), free tier · very tight daily quota, manual only",
@@ -112,12 +111,13 @@ MODEL_ROLE_LABELS = {
     # Gemma models Google hosts directly on the Gemini API (not the
     # separate google-gemma-4-*-it tags below, which go through HF
     # Inference Providers instead). RPD 14,400 confirmed on the account's
-    # rate-limits page -- far more generous than any tag above -- but TPM
-    # is only 16K there, tighter in absolute terms than the Gemini
-    # models' 250K, and untested against this pipeline's actual per-page
-    # token cost, hence manual only for now (see extract-pages-gemini.yml).
-    "gemma-4-31b-it": "hosted API (Gemini), free tier · high RPD, tight TPM, manual only",
-    "gemma-4-26b-a4b-it": "hosted API (Gemini), free tier · high RPD, tight TPM, manual only",
+    # rate-limits page -- far more generous than any tag above, hence
+    # scheduled 4x/day each, more often than either flash-lite model (see
+    # extract-pages-gemini.yml). TPM is only 16K there though, tighter in
+    # absolute terms than the Gemini models' 250K -- if either starts
+    # capping out well short of 14,400 requests/day, suspect TPM.
+    "gemma-4-31b-it": "hosted API (Gemini), free tier · high RPD, tight TPM, scheduled 4x/day",
+    "gemma-4-26b-a4b-it": "hosted API (Gemini), free tier · high RPD, tight TPM, scheduled 4x/day",
     # Retired by Google (confirmed via a live 404: "This model ... is no
     # longer available to new users") -- kept here only so any rows already
     # in llm_extractions under these tags still render a label instead of
@@ -126,6 +126,12 @@ MODEL_ROLE_LABELS = {
     "gemini-1.5-flash": "hosted API (Gemini), free tier · retired",
     "gemini-2.5-pro": "hosted API (Gemini), free tier · retired",
     "gemini-1.5-pro": "hosted API (Gemini), free tier · retired",
+    # Ran successfully for 112 pages under run 35462828707, then started
+    # returning a clean 404 ("... is no longer available to new users.
+    # Please update your code to use models/gemini-3.5-flash-lite") --
+    # Google's own retirement message, already merged into the fleet
+    # above as one of the two scheduled flash-lite models.
+    "gemini-2.5-flash-lite": "hosted API (Gemini), free tier · retired",
     # scripts/extract_with_hf.py -- a hosted API via Hugging Face's
     # Inference Providers router, budget-limited (a small monthly dollar
     # credit) rather than rate-limited, so "very small monthly budget" is

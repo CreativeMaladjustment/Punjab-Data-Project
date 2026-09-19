@@ -1,11 +1,7 @@
 # Runs Google's hosted Gemini API over the page images process-pdfs.yml
 # already uploaded to B2 (looked up via Postgres), writing schema.md-shaped
 # catalogue entries into Postgres (Supabase) -- see
-# scripts/extract_with_gemini.py for the full reasoning, especially why
-# this workflow's shape (single worker, no local model install/cache) is
-# so much lighter than extract-pages.yml's: there's no local inference here
-# at all, just Python calling a hosted API, and free-tier rate limits mean
-# more parallel callers would just mean more 429s, not more throughput.
+# scripts/extract_with_gemini.py for the full reasoning.
 #
 # The generation this workflow originally shipped with (gemini-2.5-flash/
 # -pro, gemini-1.5-flash/-pro) has since been retired by Google (confirmed
@@ -19,33 +15,63 @@
 # pacing below (scripts/extract_with_gemini.py's GEMINI_MODEL_PACING)
 # still matches -- Google revises these, sometimes sharply.
 #
-# Scheduled runs alternate between gemini-3.1-flash-lite and
-# gemini-3.5-flash-lite, two runs a day each (see the two `cron:` entries
-# below, matched at run time via github.event.schedule in the env: block).
-# Each has its own free-tier daily request quota (RPD) -- a single model
-# running all four daily slots spends its one quota bucket four times a
-# day and reaches RPD exhaustion (see extract_with_gemini.py's
-# MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER guard) sooner in the day, with
-# nothing else able to pick up slack until it resets at midnight Pacific.
-# Splitting the four daily slots across two models' independent quotas
-# means roughly twice the pages/day get attempted before either one caps
-# out, at the cost of each individual model's llm_extractions rows only
-# growing at half the previous rate.
+# Four models are scheduled, each on its own independent free-tier daily
+# quota (see the four `cron:` entries below, matched at run time via
+# github.event.schedule in each job's env: block):
+#
+#   - gemini-3.1-flash-lite: hours 4, 16 (twice a day, RPD 500) -- `extract` job, single worker
+#   - gemini-3.5-flash-lite: hours 10, 22 (twice a day, RPD 500) -- `extract` job, single worker
+#   - gemma-4-31b-it: hours 0, 6, 12, 18 (four times a day, RPD 14,400) -- `extract-gemma-matrix` job, 8 workers
+#   - gemma-4-26b-a4b-it: hours 1, 7, 13, 19 (four times a day, RPD 14,400) -- `extract-gemma-matrix` job, 8 workers
+#
+# None of the twelve resulting daily runs share a clock hour -- the two
+# Gemma models are offset from each other by one hour (0-vs-1, 6-vs-7,
+# etc.) and from both Gemini models' hours (4, 10, 16, 22) entirely --
+# keeping each run's own timing/approval history easy to tell apart in
+# the Actions log, and (see extract-pages.yml's own matrix-size comment)
+# leaving GitHub-hosted runner concurrency headroom against the account-
+# wide 20-job cap now that extract-gemma-matrix can put 8 jobs in flight
+# at once: extract-pages.yml's own matrix was trimmed from 15 to 2 workers
+# for exactly this reason.
+#
+# Why two separate jobs instead of one with a model-dependent matrix size:
+# GitHub Actions matrix sizes can be computed via an expression (see
+# process-pdfs.yml's dynamic `matrix: chunk: ${{ fromJSON(...) }}`), but
+# GEMINI_PACE_SECONDS (below) would then also need to be conditional on
+# the same schedule match, and a ternary that's conditionally an empty
+# string for the non-Gemma arm breaks float(os.environ.get(...)) in
+# extract_with_gemini.py outright -- two plain jobs, each hardcoding its
+# own unconditional values, avoids that trap entirely.
+#
+# Splitting slots across independent quotas means more pages/day get
+# attempted before any one model caps out (see extract_with_gemini.py's
+# MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER guard for what happens once
+# one does), at the cost of each individual model's llm_extractions rows
+# growing slower than if it ran every slot alone.
 #
 # Manual-only models: the `model`/`source_model` dropdowns below also
-# list gemini-2.5-flash-lite, gemini-3.5-flash, gemini-3.7-flash,
-# gemini-3.8-flash, and gemini-3-flash-preview -- each confirmed to
-# exist via ai.google.dev (not guessed), each with a real but tight
-# free-tier daily quota (RPD 20, same tier as gemini-3.6-flash's already-
-# documented one above), and none of them scheduled: a 20 RPD model
-# would cap out in the very first page or two of a normal run, so
-# they're offered for a deliberate one-off/comparison dispatch, not the
-# recurring backlog. gemini-2.5-flash (no "-lite") is deliberately NOT
-# listed despite showing a nonzero quota in Google's own dashboard -- it's
-# the same generation already confirmed retired by a live 404 above,
-# and a dashboard quota row apparently persists after a model itself
-# stops serving requests. gemini-2.5-flash-lite is also worth watching:
-# Google has it slated to shut down entirely on 2026-10-16.
+# list gemini-3.5-flash, gemini-3.7-flash, gemini-3.8-flash, and
+# gemini-3-flash-preview -- each confirmed to exist via ai.google.dev
+# (not guessed), each with a real but tight free-tier daily quota (RPD
+# 20, same tier as gemini-3.6-flash's already-documented one above), and
+# none of them scheduled: a 20 RPD model would cap out in the very first
+# page or two of a normal run, so they're offered for a deliberate
+# one-off/comparison dispatch, not the recurring backlog.
+#
+# gemini-2.5-flash (no "-lite") and gemini-2.5-flash-lite are both
+# deliberately NOT listed despite Google's own dashboard showing a
+# nonzero quota for each. gemini-2.5-flash is the same generation
+# already confirmed retired by a live 404 above, and a dashboard quota
+# row apparently persists after a model itself stops serving requests.
+# gemini-2.5-flash-lite was live-tested by run 35462828707 (dispatched
+# right after it was added here): it processed 112 pages successfully,
+# then started returning a clean 404 -- "This model models/gemini-2.5-
+# flash-lite is no longer available to new users. Please update your
+# code to use models/gemini-3.5-flash-lite" -- Google's own retirement
+# message, naming gemini-3.5-flash-lite (already scheduled above) as
+# the replacement. Removed on that evidence; kept only in
+# api/index.py's MODEL_ROLE_LABELS so the ~112 real rows it already
+# wrote to llm_extractions still render a label instead of blank.
 #
 # gemma-4-31b-it and gemma-4-26b-a4b-it: Google hosts these Gemma models
 # directly on this same generateContent API (distinct from the
@@ -53,12 +79,30 @@
 # same underlying models a different way, through HF Inference Providers
 # -- see extract-pages-hf.yml -- and so get their own separate model_tag
 # rows). The account's own AI Studio rate-limits page lists them under
-# "Other models" with RPD 14,400 -- by far the most generous quota of
-# anything in this file -- but TPM there is only 16K (vs. 250K for the
-# Gemini models above), tighter in absolute terms, and actual per-page
-# token cost against that hasn't been measured yet. Also manual/rescue-
-# only for now on that basis; worth revisiting for the schedule once a
-# real run shows it doesn't choke on TPM.
+# "Other models" with RPM 30, TPM 16,000, RPD 14,400 -- by far the most
+# generous RPD of anything in this file, hence four scheduled slots each
+# (via an 8-worker matrix, see extract-gemma-matrix below) rather than
+# two single-worker ones.
+#
+# Matrix pacing: GEMINI_MODEL_PACING's 2.0s floor for these two tags (=
+# 60/30 RPM) assumes exactly ONE caller. 8 *independent* matrix jobs each
+# have their own in-process pace()/_LAST_CALL_AT state -- nothing
+# coordinates across them -- so 8 workers each independently pacing at
+# 2.0s could let the combined request rate hit up to 8x that, 240 RPM
+# against a 30 RPM cap. The safe formula for N workers sharing a limit L:
+# each worker paces at N * 60/L seconds. For N=8, L=30 that floor is
+# 8 * 2.0 = 16.0s; GEMINI_PACE_SECONDS below is set to 20.0s for some
+# margin (combined ~24 RPM). TPM is the bigger unknown: at 16,000/min
+# combined, 8 workers get ~2,000 tokens/min each on average, and this
+# pipeline's actual per-request token cost (system prompt + image +
+# generation output) hasn't been measured -- if a real run trips
+# MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER (exit code 43) well short of
+# 14,400 requests/day, suspect TPM exhaustion, not RPD, and raise
+# GEMINI_PACE_SECONDS accordingly. Each of the 8 workers carries its own
+# independent MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER=1 guard, so even
+# if all 8 hit a shared TPM wall around the same moment, each stops
+# itself after its own first rate-limited page rather than all 8
+# grinding through repeated retry cycles in parallel.
 #
 # Rescue mode: set `source_model` to reprocess ONLY the pages that model
 # already gave up on (capped-out content failures) with `model` instead of
@@ -70,28 +114,30 @@
 name: Extract catalogue entries with Gemini
 
 on:
-  # Every 6 hours total, same anchor as extract-pages.yml's own schedule
-  # (see that workflow for the run-35086378308 timing this was set from) --
-  # both workflows queue independently for `b2-upload` approval, so running
-  # them on the same tick doesn't couple them, just means both show up for
-  # review at once.
+  # Hour 4 is the same anchor as extract-pages.yml's own schedule (see
+  # that workflow for the run-35086378308 timing this was set from) --
+  # both workflows queue independently for `b2-upload` approval, so
+  # running them in the same clock hour doesn't couple them, just means
+  # both show up for review at once.
   #
-  # Two cron entries, not one with all four hours: each fires two of the
-  # four daily slots, twelve hours apart, and the env: block below picks
-  # the model by matching github.event.schedule against whichever of these
-  # two strings fired -- see the module comment above for why splitting
-  # models across slots this way (rather than one model in all four) is
-  # worth the added complexity here.
+  # Four cron entries, one per model, each firing that model's own hours
+  # -- see the module comment above for the full hour-by-model breakdown
+  # and why none of the twelve resulting daily runs share an hour. Each
+  # job's env: block below picks its model (or, for extract-gemma-matrix,
+  # decides whether to run at all) by matching github.event.schedule
+  # against whichever of these four strings fired.
   schedule:
-    - cron: "0 4,16 * * *"   # gemini-3.1-flash-lite
-    - cron: "0 10,22 * * *"  # gemini-3.5-flash-lite
+    - cron: "0 4,16 * * *"      # gemini-3.1-flash-lite
+    - cron: "0 10,22 * * *"     # gemini-3.5-flash-lite
+    - cron: "0 0,6,12,18 * * *" # gemma-4-31b-it (8-worker matrix)
+    - cron: "0 1,7,13,19 * * *" # gemma-4-26b-a4b-it (8-worker matrix)
   workflow_dispatch:
     inputs:
       model:
         description: >-
-          Gemini model to run. Everything from gemini-2.5-flash-lite
-          through gemini-3-flash-preview has a real but tight free-tier
-          daily quota (RPD 20, vs. 500 for the two flash-lite models the
+          Gemini model to run. Everything from gemini-3.6-flash through
+          gemini-3-flash-preview has a real but tight free-tier daily
+          quota (RPD 20, vs. 500 for the two flash-lite models the
           schedule below actually uses) -- manual/rescue use only,
           deliberately not scheduled (see the module comment above).
           gemini-3-flash-preview is a preview model; expect it to be more
@@ -100,16 +146,16 @@ on:
           this same API (not the separate google-gemma-4-*-it tags,
           which go through HF Inference Providers instead) -- real RPD
           14,400 confirmed on the account's own rate-limits page, the
-          most generous quota of anything here, but also not yet
-          scheduled since actual per-page token cost against their much
-          tighter 16K TPM hasn't been measured.
+          most generous quota of anything here. Picking either one here
+          (scheduled or manual) runs the extract-gemma-matrix job (8
+          parallel workers) instead of this workflow's usual single
+          worker -- see that job's own comments for the rate-limit math.
         type: choice
         default: gemini-3.1-flash-lite
         options:
           - gemini-3.1-flash-lite
           - gemini-3.5-flash-lite
           - gemini-3.6-flash
-          - gemini-2.5-flash-lite
           - gemini-3.5-flash
           - gemini-3.7-flash
           - gemini-3.8-flash
@@ -133,7 +179,6 @@ on:
           - gemini-3.1-flash-lite
           - gemini-3.5-flash-lite
           - gemini-3.6-flash
-          - gemini-2.5-flash-lite
           - gemini-3.5-flash
           - gemini-3.7-flash
           - gemini-3.8-flash
@@ -167,7 +212,20 @@ jobs:
     # Single worker, not a matrix -- see extract_with_gemini.py's module
     # docstring: N parallel callers would each independently pace against
     # the SAME shared per-project Gemini rate limit, so more workers here
-    # buys 429s, not throughput.
+    # buys 429s, not throughput. (extract-gemma-matrix below is the
+    # exception: its two models' RPM/RPD are generous enough, and its
+    # GEMINI_PACE_SECONDS is set to account for N workers -- see its own
+    # comments.)
+    #
+    # Only runs for the two Gemini flash-lite models -- the exact negation
+    # of extract-gemma-matrix's `if:` below. Keep both conditions in sync:
+    # every trigger must match exactly one of the two jobs, never both,
+    # never neither.
+    if: >-
+      github.event.schedule != '0 0,6,12,18 * * *' &&
+      github.event.schedule != '0 1,7,13,19 * * *' &&
+      inputs.model != 'gemma-4-31b-it' &&
+      inputs.model != 'gemma-4-26b-a4b-it'
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload
@@ -184,9 +242,11 @@ jobs:
       # GEMINI_MODEL's fallback isn't a single default here: a schedule-
       # triggered run instead picks the model by matching
       # github.event.schedule (the exact cron string that fired -- GitHub
-      # populates this only for schedule events) against the two `cron:`
-      # entries above, so the two daily slots each model owns actually run
-      # that model rather than both quietly falling back to the same one.
+      # populates this only for schedule events) against this job's two
+      # `cron:` entries. gemini-3.1-flash-lite is both an explicit arm
+      # (its own cron string) and the final fallback, since this job's
+      # `if:` above already guarantees any schedule event reaching here
+      # fired one of only two possible strings.
       GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 10,22 * * *' && 'gemini-3.5-flash-lite' || 'gemini-3.1-flash-lite') }}
       SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
       ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
@@ -240,6 +300,106 @@ jobs:
           echo "### 🚦 Daily Gemini quota exhausted for \`$GEMINI_MODEL\` — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "A page's Gemini call kept getting rejected (429, or a 5xx from the same underlying cause -- Google doesn't always return a clean 429 once a tight daily quota hits zero) through every retry, which free-tier quotas only do once the day's request cap (not a transient burst) is spent. The run stopped claiming further pages rather than repeating the same B2 download + full retry cycle for nothing. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** none -- RPD quotas reset at midnight Pacific time, and the next scheduled run (every 6h) or a manual re-run with the same model (\`$GEMINI_MODEL\`) continues it automatically." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail job on unexpected script error
+        if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42' && steps.run.outputs.exit_code != '43'
+        run: exit 1
+
+  extract-gemma-matrix:
+    # 8 parallel workers -- safe here in a way it isn't for the Gemini
+    # models above because gemma-4-31b-it/gemma-4-26b-a4b-it's RPM (30)
+    # and especially RPD (14,400) have real headroom for it; see the
+    # module comment above for the full pacing derivation and the TPM
+    # caveat. Each worker independently claims and processes pages (see
+    # extract_with_gemini.py's claim_next_page(), built on
+    # `FOR UPDATE ... SKIP LOCKED`, the same safe-for-concurrent-workers
+    # pattern extract-pages.yml's own 15-worker matrix relies on), so this
+    # fans the backlog out across 8 runners without any of them stepping
+    # on each other's pages.
+    #
+    # Only runs for the two Gemma models -- the exact negation of
+    # extract's `if:` above. Keep both conditions in sync: every trigger
+    # must match exactly one of the two jobs, never both, never neither.
+    if: >-
+      github.event.schedule == '0 0,6,12,18 * * *' ||
+      github.event.schedule == '0 1,7,13,19 * * *' ||
+      inputs.model == 'gemma-4-31b-it' ||
+      inputs.model == 'gemma-4-26b-a4b-it'
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [1, 2, 3, 4, 5, 6, 7, 8]
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    environment: b2-upload
+    env:
+      # See the `extract` job's own comment on why ${{ inputs.* }} is
+      # routed through env vars rather than interpolated directly.
+      #
+      # Only two cron strings ever reach this job (this job's `if:`
+      # above guarantees it), so a schedule-triggered run needs only one
+      # match, with the other cron string implied by the fallback.
+      GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 0,6,12,18 * * *' && 'gemma-4-31b-it' || 'gemma-4-26b-a4b-it') }}
+      SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
+      ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run extraction
+        id: run
+        env:
+          PYTHONUNBUFFERED: "1"
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # 8 * 60/30 RPM = 16.0s is the bare floor for 8 workers to stay
+          # within gemma's real RPM cap without any one worker needing to
+          # know the others exist; 20.0s adds some margin (combined ~24
+          # RPM). See the module comment above for why TPM, not RPM, is
+          # the more uncertain constraint here.
+          GEMINI_PACE_SECONDS: "20.0"
+          MAX_PAGES_PER_WORKER: "2000"
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT_2: ${{ secrets.B2_ENDPOINT_2 }}
+          B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+          B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+          B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+        run: |
+          set +e
+          python scripts/extract_with_gemini.py
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Flag runtime guard trip for manual resume
+        if: steps.run.outputs.exit_code == '42'
+        run: |
+          echo "### ⏱️ Runtime guard tripped for \`$GEMINI_MODEL\` (worker ${{ matrix.worker }}) — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The extraction stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** the next scheduled run (every 6h) or a manual re-run with the same model (\`$GEMINI_MODEL\`) continues it." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Flag daily Gemini quota exhaustion for manual resume
+        if: steps.run.outputs.exit_code == '43'
+        run: |
+          echo "### 🚦 Daily Gemini quota exhausted for \`$GEMINI_MODEL\` (worker ${{ matrix.worker }}) — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "This worker's Gemini call kept getting rejected (429, or a 5xx from the same underlying cause) through every retry. With 8 workers sharing one quota, more than one may hit this around the same time -- each stops itself independently rather than all 8 grinding through repeated retry cycles. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Action needed:** none -- RPD quotas reset at midnight Pacific time, and the next scheduled run (every 6h) or a manual re-run with the same model (\`$GEMINI_MODEL\`) continues it automatically." >> "$GITHUB_STEP_SUMMARY"
 

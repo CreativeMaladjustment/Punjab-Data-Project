@@ -66,6 +66,17 @@ on:
 permissions:
   contents: read
 
+# Serializes runs of this workflow: GitHub allows multiple manual
+# dispatches to run concurrently, and single-worker-per-run alone doesn't
+# stop that -- two overlapping runs would each call the same Space,
+# drawing against its one shared daily ZeroGPU quota at the same time.
+# cancel-in-progress: false queues a second dispatch behind the first
+# rather than killing whichever run is already in flight (a Copilot
+# review finding on this PR).
+concurrency:
+  group: extract-pages-hf-space
+  cancel-in-progress: false
+
 jobs:
   extract:
     # Single worker, not a matrix -- see extract_with_hf_space.py's module

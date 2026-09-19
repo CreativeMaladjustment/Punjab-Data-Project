@@ -431,15 +431,24 @@ def call_hf_space(image_bytes, context=""):
     {"entries": [...], "raw_text": ..., "ocr_text": ..., "ocr_error": ...}
     or {"error": ..., "raw_text": ..., "ocr_text": ..., "ocr_error": ...}.
     Writes the image to a temp file first: gradio_client's Image-input
-    convention (handle_file()) expects a path or URL, not raw bytes."""
+    convention (handle_file()) expects a path or URL, not raw bytes.
+
+    Uses .submit() + Job.result(timeout=...) rather than the simpler
+    .predict() -- .predict() blocks with no way to bound how long it
+    waits, so a queued/hung Space call (a Copilot review finding on this
+    PR) would hang the whole worker instead of the failure being recorded
+    and the page retried next run. Job.result()'s timeout raises
+    concurrent.futures.TimeoutError, which process_page()'s generic
+    except Exception below catches the same as any other failure."""
     with tempfile.NamedTemporaryFile(suffix=".webp") as tmp:
         tmp.write(image_bytes)
         tmp.flush()
         started = time.time()
-        result = hf_space_client().predict(
+        job = hf_space_client().submit(
             handle_file(tmp.name),
             api_name="/predict",
         )
+        result = job.result(timeout=HF_SPACE_CALL_TIMEOUT_SECONDS)
         print(f"    HF Space response for {context} in {time.time() - started:.1f}s total")
     return result
 

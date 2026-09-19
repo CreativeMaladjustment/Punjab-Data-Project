@@ -1,0 +1,7 @@
+gradio
+spaces
+torch
+transformers
+accelerate
+qwen-vl-utils
+pillow

@@ -1,0 +1,75 @@
+# Mirrors hf_space/ (plus a fresh copy of pipeline/schema.md) into the
+# separate git repository backing the Hugging Face Space at
+# https://huggingface.co/spaces/floutenvy/Punjab-Data-Project, so that
+# repo never needs to be edited by hand -- this workflow is the only
+# thing that pushes to it. See hf_space/app.py's module docstring for
+# what the Space itself does and why schema.md is copied in rather than
+# committed twice by hand.
+#
+# A straightforward "clone, overwrite, commit, push" mirror rather than
+# `git subtree push` -- subtree's history-rewriting behavior is more
+# fragile in CI than just replacing the Space repo's working tree with
+# the current hf_space/ contents on every sync. The Space repo's own
+# history is just a log of syncs, not meant to be a meaningful commit
+# history in its own right.
+#
+# Auth: reuses the HUGGING_FACE_API_KEY secret (the same token
+# extract-pages-hf.yml and list-hf-models.yml use for the Inference
+# Providers router) on the understanding that it was the same token
+# whose scopes got extended to include "Write contents/settings of your
+# repos" for this specific Space -- if a separate token was created
+# instead, point HF_SPACE_TOKEN below at a new secret.
+name: Sync Hugging Face Space
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hf_space/**"
+      - "pipeline/schema.md"
+      - ".github/workflows/sync-hf-space.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: b2-upload
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 1
+
+      - name: Stage Space contents
+        run: |
+          set -e
+          mkdir -p /tmp/space-contents
+          cp -r hf_space/. /tmp/space-contents/
+          cp pipeline/schema.md /tmp/space-contents/schema.md
+
+      - name: Push to Hugging Face Space
+        env:
+          HF_SPACE_TOKEN: ${{ secrets.HUGGING_FACE_API_KEY }}
+          HF_SPACE_URL: https://huggingface.co/spaces/floutenvy/Punjab-Data-Project
+        run: |
+          set -e
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions"
+
+          auth_url=$(echo "$HF_SPACE_URL" | sed "s#https://#https://floutenvy:${HF_SPACE_TOKEN}@#")
+          git clone --depth 1 "$auth_url" /tmp/hf-space-clone
+
+          rsync -a --delete --exclude='.git' /tmp/space-contents/ /tmp/hf-space-clone/
+
+          cd /tmp/hf-space-clone
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes to sync"
+          else
+            git commit -m "Sync from CreativeMaladjustment/Punjab-Data-Project@${{ github.sha }}"
+            git push origin main
+          fi

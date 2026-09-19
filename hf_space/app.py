@@ -189,11 +189,18 @@ def _coerce_to_entry_list(parsed):
     return result
 
 
-MAX_NEW_TOKENS_EXTRACT = 2048
-# Full-page OCR needs more headroom than the structured-entry JSON does --
-# a dense page's verbatim transcription can run considerably longer than
-# its compact JSON summary. Matches extract_with_hf.py's max_tokens=4096
-# for its own OCR call.
+
+# Run 35455915280 on a real page (44) hit a JSON parse error --
+# "Unterminated string starting at: line 174 column 20 (char 6633)" --
+# with the raw output cut off mid-way through a second entry's `section`
+# field. The debug logging added after that run (see
+# scripts/extract_with_hf_space.py's _log_hf_space_result()) confirmed
+# it: the model's generation was running out of budget at 2048, not
+# producing malformed JSON. Matches extract_with_hf.py's
+# max_tokens=4096 for its own structured-extraction call over the same
+# kind of prompt -- 2048 was simply undersized for a dense page with
+# several entries.
+MAX_NEW_TOKENS_EXTRACT = 4096
 MAX_NEW_TOKENS_OCR = 4096
 
 

@@ -127,6 +127,14 @@ MODEL_ROLE_LABELS = {
     # rows already in llm_extractions under this tag from before that was
     # known still render a label instead of falling back to blank.
     "Qwen-Qwen2.5-VL-7B-Instruct": "hosted API (Hugging Face), pay-as-you-go · confirmed not supported for this account",
+    # scripts/extract_with_hf_space.py -- calls the HF Space at
+    # floutenvy/Punjab-Data-Project (hf_space/app.py), which runs its own
+    # model on that Space's free ZeroGPU hardware. Free but daily-GPU-
+    # second-quota-limited rather than dollar- or request-limited; a
+    # different constraint shape from every other row here. Fixed tag
+    # (not derived from a model name) since the model is a property of
+    # the Space's own code, not something this pipeline chooses per-call.
+    "hf-space-zerogpu": "self-hosted on HF Space (free ZeroGPU) · daily GPU-second quota",
 }
 
 # pipeline/schema.md names this flag field "char", but the catalogue_entries

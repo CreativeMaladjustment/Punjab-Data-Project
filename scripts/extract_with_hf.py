@@ -54,13 +54,16 @@ differs from extract_with_gemini.py's:
     worth having rather than re-spending a whole image call later just to
     get the same transcription from text already sitting in Postgres.
 
-Default model is Qwen/Qwen2.5-VL-7B-Instruct: a well-established, actively-
-hosted-by-multiple-providers vision-language model with strong published
-document/OCR benchmarks, not a brand-new or niche release -- the Gemini
-model-name churn already in this project's history is a reminder that a
-just-released or specialized model is exactly the kind of pick that can
-stop being hosted without much notice. HF_MODEL is an env var override for
-exactly that eventuality.
+Default model (see scripts/hf_config.py's DEFAULT_HF_MODEL) is chosen by
+actually testing candidates against this account's key with
+scripts/list_hf_models.py, not by reading a model's page or a third-party
+writeup -- the original pick (Qwen/Qwen2.5-VL-7B-Instruct) looked
+reasonable by every indirect signal available and still failed in
+production with "not supported by any provider you have enabled." See
+hf_config.py's own docstring for the specific run that confirmed the
+current default actually works. HF_MODEL is an env var override for
+whenever the confirmed-working model changes again -- re-run
+list-hf-models.yml periodically to check.
 
 Default candidate selection, rescue mode (SOURCE_MODEL), and
 ALLOW_ALREADY_EXTRACTED all work exactly like extract_with_llm.py's and

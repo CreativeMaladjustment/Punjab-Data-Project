@@ -450,7 +450,51 @@ def call_hf_space(image_bytes, context=""):
         )
         result = job.result(timeout=HF_SPACE_CALL_TIMEOUT_SECONDS)
         print(f"    HF Space response for {context} in {time.time() - started:.1f}s total")
+        _log_hf_space_result(result, context)
     return result
+
+
+def _log_hf_space_result(result, context):
+    """Prints a preview of everything the Space returned, unconditionally
+    -- not just on failure. Matches the other three extraction scripts'
+    own convention of logging a raw-response preview right when it comes
+    back (see extract_with_hf.py's hf_generate(), for example), which
+    this script didn't have: previously, a failure only surfaced the
+    parse-error message itself (e.g. "Unterminated string starting at:
+    line 255 column 18"), not the actual text that failed to parse, so
+    diagnosing *why* required a separate database query instead of just
+    reading the job log."""
+    if not isinstance(result, dict):
+        print(f"    HF Space result for {context} was not a dict: {result!r}")
+        return
+
+    raw_text = result.get("raw_text")
+    if raw_text:
+        print(f"    HF Space raw_text for {context}: {len(raw_text)} chars")
+        print(f"      head: {raw_text[:500]!r}")
+        if len(raw_text) > 500:
+            # The tail matters at least as much as the head here: a
+            # truncated/cut-off model response (e.g. from hitting
+            # max_new_tokens mid-generation) shows up as an abrupt,
+            # not-well-formed ending -- exactly what "unterminated string"
+            # parse errors look like -- and the head alone can't show that.
+            print(f"      tail: {raw_text[-500:]!r}")
+    else:
+        print(f"    HF Space raw_text for {context}: (none)")
+
+    if "error" in result:
+        print(f"    HF Space reported a structured-extraction error for {context}: {result['error']!r}")
+
+    ocr_text = result.get("ocr_text")
+    ocr_error = result.get("ocr_error")
+    if ocr_text:
+        print(f"    HF Space ocr_text for {context}: {len(ocr_text)} chars, {ocr_text[:300]!r}")
+    if ocr_error:
+        print(f"    HF Space ocr_error for {context}: {ocr_error!r}")
+
+    entries = result.get("entries")
+    if isinstance(entries, list):
+        print(f"    HF Space entries for {context}: {len(entries)} entrie(s)")
 
 
 def _text(entry, key):

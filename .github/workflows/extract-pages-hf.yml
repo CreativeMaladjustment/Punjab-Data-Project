@@ -60,7 +60,6 @@ on:
         default: "(none)"
         options:
           - "(none)"
-          - Qwen/Qwen2.5-VL-7B-Instruct
           - glm-ocr
           - minicpm-v4.6
           - minicpm-v4.5

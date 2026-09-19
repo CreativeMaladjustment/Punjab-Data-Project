@@ -575,11 +575,17 @@ def _hf_post(body, context):
                 f"HF Inference Providers credit exhausted (402) for {context}: {resp.text[:500]}"
             )
         if resp.status_code in HF_RETRYABLE_STATUS_CODES:
-            retry_after = resp.headers.get("Retry-After")
-            wait = float(retry_after) if retry_after else backoff
-            print(f"    {resp.status_code} from HF router for {context} (attempt {attempt}/{HF_MAX_RETRIES}); waiting {wait:.0f}s")
-            time.sleep(wait)
-            backoff = min(backoff * 2, 300)
+            if attempt < HF_MAX_RETRIES:
+                # Only sleep/back off when another attempt will actually
+                # follow -- on the last attempt there's no attempt+1 to
+                # wait for, so sleeping here would just delay recording
+                # this as a failure for no benefit (a Copilot review
+                # finding on this PR).
+                retry_after = resp.headers.get("Retry-After")
+                wait = float(retry_after) if retry_after else backoff
+                print(f"    {resp.status_code} from HF router for {context} (attempt {attempt}/{HF_MAX_RETRIES}); waiting {wait:.0f}s")
+                time.sleep(wait)
+                backoff = min(backoff * 2, 300)
             continue
         break
     else:

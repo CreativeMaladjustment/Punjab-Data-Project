@@ -1,0 +1,60 @@
+# On-demand diagnostic only -- workflow_dispatch, no schedule. Reports
+# which image-text-to-text (vision-language) models are actually callable
+# through Hugging Face's Inference Providers router for the account that
+# owns HUGGING_FACE_API_KEY, right now -- see scripts/list_hf_models.py's
+# module docstring for the full reasoning (this exists because
+# extract-pages-hf.yml's default model 400'd in production with "not
+# supported by any provider you have enabled", and secondhand/indirect
+# research can't reliably tell whether a model is unhosted vs. hosted-but-
+# not-enabled-for-this-account).
+#
+# Never touches B2 or Postgres -- it's a pure API round-trip, so this
+# workflow is much lighter than any of the three extraction workflows: no
+# B2 secrets, no SUPABASE_DB_URL, nothing written anywhere. Output is the
+# job log and step summary only.
+name: List available Hugging Face models
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_limit:
+        description: "How many trending image-text-to-text catalog models to check (in addition to the pipeline's currently-configured HF_MODEL, always checked)"
+        type: string
+        default: "15"
+
+permissions:
+  contents: read
+
+jobs:
+  list-models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: b2-upload
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install requests
+
+      - name: List and test available models
+        env:
+          PYTHONUNBUFFERED: "1"
+          HUGGING_FACE_API_KEY: ${{ secrets.HUGGING_FACE_API_KEY }}
+          HF_CANDIDATE_LIMIT: ${{ inputs.candidate_limit || '15' }}
+          # HF_MODEL deliberately NOT set here -- scripts/list_hf_models.py
+          # falls back to scripts/hf_config.py's DEFAULT_HF_MODEL, the same
+          # single source of truth extract_with_hf.py's own default reads
+          # from, rather than this workflow carrying its own copy of that
+          # literal (a Copilot review finding on PR #57: a hardcoded value
+          # here could silently drift from extract-pages-hf.yml's real
+          # default the next time it changes).
+        run: |
+          python scripts/list_hf_models.py | tee "$GITHUB_STEP_SUMMARY"

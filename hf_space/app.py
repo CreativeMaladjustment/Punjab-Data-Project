@@ -52,6 +52,7 @@ once the Space actually builds and a real call is made through it (e.g.
 via the Space's own Gradio UI, or gradio_client).
 """
 import json
+import os
 import pathlib
 import re
 
@@ -64,8 +65,29 @@ from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
 
 MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-processor = AutoProcessor.from_pretrained(MODEL_ID)
-model = Qwen2_5_VLForConditionalGeneration.from_pretrained(MODEL_ID, torch_dtype=torch.bfloat16)
+# Pinned to an immutable commit rather than the floating "main" branch --
+# an unpinned from_pretrained() means a future push to the upstream repo
+# (compromised or not) gets pulled in silently on the next cold start,
+# which is exactly what Bandit/CodeQL flagged on this PR. Get the current
+# commit SHA from https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct ->
+# "Files and versions" (the hash shown at the top of the commit list), or
+# by running, anywhere with network access to huggingface.co:
+#   python -c "from huggingface_hub import HfApi; print(HfApi().model_info('Qwen/Qwen2.5-VL-7B-Instruct').sha)"
+# and set it as this Space's MODEL_REVISION variable (Settings ->
+# Variables and secrets). Falls back to "main" only so the Space isn't
+# dead on arrival before that's set -- "main" is NOT a real pin (it's
+# still a moving branch ref) and this finding isn't actually resolved
+# until a real commit SHA is set.
+MODEL_REVISION = os.environ.get("MODEL_REVISION", "main")  # TODO: set a pinned
+# commit SHA as this Space's MODEL_REVISION variable -- see above. Reads
+# from the environment (not hardcoded) specifically so that can be done
+# without another code change/sync: Settings -> Variables and secrets ->
+# add MODEL_REVISION, then restart the Space.
+
+processor = AutoProcessor.from_pretrained(MODEL_ID, revision=MODEL_REVISION)
+model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    MODEL_ID, revision=MODEL_REVISION, torch_dtype=torch.bfloat16,
+)
 model.to("cuda")
 model.eval()
 

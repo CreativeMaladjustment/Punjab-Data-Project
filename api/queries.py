@@ -512,18 +512,28 @@ CATALOGUE_ENTRY_INT_FIELDS = {"pdf_page", "printed_page", "serial"}
 CATALOGUE_ENTRY_BOOL_FIELDS = {"title_native"}
 CATALOGUE_ENTRY_JSON_FIELDS = {"flags"}
 
-# Backs the QC page's "needs review only" filter (?needs_review=1): true
-# when this page has at least one non-human extraction that's either a
+# The five queries below all embed the same "needs review" clause -- true
+# when a page has at least one non-human extraction that's either a
 # successful extraction with no qc_reviews verdict yet, or a capped
 # content failure (the same "needs a person" bucket fetch_dashboard_data()
-# reports as content_failed_capped) -- either way, a person hasn't looked
-# at it yet. Spliced into the queries below as `NOT %(needs_review)s OR
-# <this>`, the same short-circuit-on-a-bind-parameter idiom
+# reports as content_failed_capped) -- spliced in as `NOT %(needs_review)s
+# OR EXISTS (...)`, the same short-circuit-on-a-bind-parameter idiom
 # extract_with_gemini.py's CLAIM_NEXT_PAGE_SQL uses for
-# allow_already_extracted, so needs_review=False always matches without a
-# second copy of each query's SQL text -- static SQL only, no
-# interpolation of anything but this one literal fragment.
-NEEDS_REVIEW_EXISTS_SQL = """EXISTS (
+# allow_already_extracted, so needs_review=False always matches. Each
+# query below is its own fully static string literal repeating that
+# clause verbatim, rather than one shared fragment joined in with `+` --
+# extract_with_gemini.py's own CLAIM_NEXT_PAGE_SQL comment explains why:
+# an earlier version of that file's queries built this same way (first
+# .format()-based, then plain-concatenation-based) tripped a code-
+# scanning Bandit rule (B608) that pattern-matches *any* dynamic string
+# construction flowing into SQL-keyword-shaped text, concatenation
+# included, regardless of whether what's spliced in is actually request/
+# user-controlled -- confirmed again here (PR #76 review comments) when
+# NEEDS_REVIEW_EXISTS_SQL was first written as a `+`-joined fragment.
+QC_FIRST_ID_SQL = """
+    SELECT min(id) FROM pages p
+    WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL
+      AND (NOT %(needs_review)s OR EXISTS (
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
@@ -533,24 +543,39 @@ NEEDS_REVIEW_EXISTS_SQL = """EXISTS (
             ))
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
           )
-    )"""
-
-QC_FIRST_ID_SQL = """
-    SELECT min(id) FROM pages p
-    WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL
-      AND (NOT %(needs_review)s OR """ + NEEDS_REVIEW_EXISTS_SQL + """)
+      ))
 """
 
 QC_NEXT_ID_SQL = """
     SELECT min(id) FROM pages p
     WHERE id > %(page_id)s AND image_uploaded_at IS NOT NULL AND excluded_at IS NULL
-      AND (NOT %(needs_review)s OR """ + NEEDS_REVIEW_EXISTS_SQL + """)
+      AND (NOT %(needs_review)s OR EXISTS (
+        SELECT 1 FROM llm_extractions le
+        WHERE le.page_id = p.id
+          AND le.model_tag <> %(human_tag)s
+          AND (
+            (le.status = 'success' AND NOT EXISTS (
+                SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
+            ))
+            OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
+          )
+      ))
 """
 
 QC_PREV_ID_SQL = """
     SELECT max(id) FROM pages p
     WHERE id < %(page_id)s AND image_uploaded_at IS NOT NULL AND excluded_at IS NULL
-      AND (NOT %(needs_review)s OR """ + NEEDS_REVIEW_EXISTS_SQL + """)
+      AND (NOT %(needs_review)s OR EXISTS (
+        SELECT 1 FROM llm_extractions le
+        WHERE le.page_id = p.id
+          AND le.model_tag <> %(human_tag)s
+          AND (
+            (le.status = 'success' AND NOT EXISTS (
+                SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
+            ))
+            OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
+          )
+      ))
 """
 
 # rank/total in one round trip (rank counts pages with id <= page_id,
@@ -564,7 +589,17 @@ QC_POSITION_SQL = """
         count(*) AS total
     FROM pages p
     WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL
-      AND (NOT %(needs_review)s OR """ + NEEDS_REVIEW_EXISTS_SQL + """)
+      AND (NOT %(needs_review)s OR EXISTS (
+        SELECT 1 FROM llm_extractions le
+        WHERE le.page_id = p.id
+          AND le.model_tag <> %(human_tag)s
+          AND (
+            (le.status = 'success' AND NOT EXISTS (
+                SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
+            ))
+            OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
+          )
+      ))
 """
 
 # Backs the "go to page N" jump: N is the same 1-indexed rank
@@ -574,7 +609,17 @@ QC_POSITION_SQL = """
 QC_ID_AT_RANK_SQL = """
     SELECT id FROM pages p
     WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL
-      AND (NOT %(needs_review)s OR """ + NEEDS_REVIEW_EXISTS_SQL + """)
+      AND (NOT %(needs_review)s OR EXISTS (
+        SELECT 1 FROM llm_extractions le
+        WHERE le.page_id = p.id
+          AND le.model_tag <> %(human_tag)s
+          AND (
+            (le.status = 'success' AND NOT EXISTS (
+                SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
+            ))
+            OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
+          )
+      ))
     ORDER BY id
     OFFSET %(offset)s LIMIT 1
 """
@@ -678,7 +723,7 @@ def fetch_qc_page(conn, page_id, model_tag=None, needs_review=False):
         # filter on excluded_at -- so re-including it is always reachable.
         # needs_review, when set, additionally skips past any page that's
         # already been reviewed (or has nothing yet needing a verdict) --
-        # see NEEDS_REVIEW_EXISTS_SQL.
+        # see QC_NEXT_ID_SQL/QC_PREV_ID_SQL's own "needs review" clause.
         nav_params = {
             "page_id": page_id,
             "needs_review": needs_review,
@@ -708,7 +753,7 @@ def fetch_qc_page(conn, page_id, model_tag=None, needs_review=False):
 
 def fetch_qc_first_id(conn, needs_review=False):
     """id of the first image-available, non-excluded page (optionally
-    restricted to needs_review, see NEEDS_REVIEW_EXISTS_SQL) -- backs
+    restricted to needs_review, see QC_FIRST_ID_SQL) -- backs
     qc_index()'s redirect to a real page to land on. Returns None if
     nothing matches (an empty backlog, or an all-caught-up
     needs_review=True filter)."""
@@ -732,9 +777,9 @@ def fetch_qc_position(conn, page_id, needs_review=False):
     not a data problem.
 
     needs_review, when set, restricts both rank and total to the same
-    "needs a person" subset prev/next walk (see NEEDS_REVIEW_EXISTS_SQL)
-    -- QC_POSITION_SQL computes both in one round trip so they can't drift
-    out of sync with each other."""
+    "needs a person" subset prev/next walk (see QC_POSITION_SQL's own
+    "needs review" clause) -- computed in one round trip so they can't
+    drift out of sync with each other."""
     with conn.cursor() as cur:
         cur.execute(
             QC_POSITION_SQL,

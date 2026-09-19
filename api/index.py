@@ -678,7 +678,7 @@ def qc_index():
         # NULL: skip straight past a page someone's already pulled out of
         # processing, same as prev/next do. needs_review, when set,
         # additionally restricts to pages with something still needing a
-        # verdict (see NEEDS_REVIEW_EXISTS_SQL) -- lands on None (a 404
+        # verdict (see queries.py's QC_FIRST_ID_SQL) -- lands on None (a 404
         # below) once that queue is actually empty, rather than silently
         # falling back to the unfiltered first page.
         first_id = fetch_qc_first_id(conn, needs_review=needs_review)

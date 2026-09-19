@@ -178,8 +178,16 @@ MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
 START_TIME = time.time()
 
 GEMINI_CONNECT_TIMEOUT_SECONDS = 10
-GEMINI_READ_TIMEOUT_SECONDS = 120  # a hosted API; generous but nowhere near
-# the CPU-inference timeouts extract_with_llm.py needs for local Ollama.
+# Raised from 120 to 240 after live gemma-4-31b-it/gemma-4-26b-a4b-it runs
+# showed the full-page OCR call timing out at 120s on most pages, while
+# calls that *did* complete (OCR and generateContent alike) routinely took
+# 90-160s -- close enough to the old ceiling that ordinary slow-but-alive
+# responses were being cut off and counted as transient failures, not just
+# genuinely dead connections. Still nowhere near the CPU-inference timeouts
+# extract_with_llm.py needs for local Ollama -- this is a hosted API, just
+# one that's evidently much slower per request for these two Gemma tags
+# than the Gemini flash-lite models this constant was originally tuned for.
+GEMINI_READ_TIMEOUT_SECONDS = 240
 
 SCHEMA_PATH = pathlib.Path(__file__).resolve().parent.parent / "pipeline" / "schema.md"
 

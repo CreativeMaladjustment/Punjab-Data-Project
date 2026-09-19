@@ -420,7 +420,7 @@ def hf_space_client():
     private (see hf_space/README.md)."""
     global _hf_space_client
     if _hf_space_client is None:
-        _hf_space_client = Client(HF_SPACE_ID, hf_token=HUGGING_FACE_API_KEY)
+        _hf_space_client = Client(HF_SPACE_ID, token=HUGGING_FACE_API_KEY)
     return _hf_space_client
 
 

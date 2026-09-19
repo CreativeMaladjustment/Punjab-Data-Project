@@ -101,6 +101,14 @@ MODEL_ROLE_LABELS = {
     "gemini-3.1-flash-lite": "hosted API (Gemini), free tier · scheduled 2x/day",
     "gemini-3.5-flash-lite": "hosted API (Gemini), free tier · scheduled 2x/day",
     "gemini-3.6-flash": "hosted API (Gemini), free tier · very tight daily quota",
+    # Manual/rescue-only in extract-pages-gemini.yml, not scheduled -- see
+    # that workflow's own comment. Each has a real but tight free-tier
+    # daily quota (RPD 20, same tier as gemini-3.6-flash above).
+    "gemini-2.5-flash-lite": "hosted API (Gemini), free tier · very tight daily quota, manual only",
+    "gemini-3.5-flash": "hosted API (Gemini), free tier · very tight daily quota, manual only",
+    "gemini-3.7-flash": "hosted API (Gemini), free tier · very tight daily quota, manual only",
+    "gemini-3.8-flash": "hosted API (Gemini), free tier · very tight daily quota, manual only",
+    "gemini-3-flash-preview": "hosted API (Gemini), free tier · very tight daily quota, preview model, manual only",
     # Retired by Google (confirmed via a live 404: "This model ... is no
     # longer available to new users") -- kept here only so any rows already
     # in llm_extractions under these tags still render a label instead of

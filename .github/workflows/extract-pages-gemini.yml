@@ -32,6 +32,21 @@
 # out, at the cost of each individual model's llm_extractions rows only
 # growing at half the previous rate.
 #
+# Manual-only models: the `model`/`source_model` dropdowns below also
+# list gemini-2.5-flash-lite, gemini-3.5-flash, gemini-3.7-flash,
+# gemini-3.8-flash, and gemini-3-flash-preview -- each confirmed to
+# exist via ai.google.dev (not guessed), each with a real but tight
+# free-tier daily quota (RPD 20, same tier as gemini-3.6-flash's already-
+# documented one above), and none of them scheduled: a 20 RPD model
+# would cap out in the very first page or two of a normal run, so
+# they're offered for a deliberate one-off/comparison dispatch, not the
+# recurring backlog. gemini-2.5-flash (no "-lite") is deliberately NOT
+# listed despite showing a nonzero quota in Google's own dashboard -- it's
+# the same generation already confirmed retired by a live 404 above,
+# and a dashboard quota row apparently persists after a model itself
+# stops serving requests. gemini-2.5-flash-lite is also worth watching:
+# Google has it slated to shut down entirely on 2026-10-16.
+#
 # Rescue mode: set `source_model` to reprocess ONLY the pages that model
 # already gave up on (capped-out content failures) with `model` instead of
 # running `model` against the full backlog -- same mechanic as
@@ -60,13 +75,25 @@ on:
   workflow_dispatch:
     inputs:
       model:
-        description: "Gemini model to run"
+        description: >-
+          Gemini model to run. Everything below gemini-3.6-flash in this
+          list has a real but tight free-tier daily quota (RPD 20, vs.
+          500 for the two flash-lite models the schedule below actually
+          uses) -- manual/rescue use only, deliberately not scheduled
+          (see the module comment above). gemini-3-flash-preview is a
+          preview model; expect it to be more volatile than the
+          non-preview tags.
         type: choice
         default: gemini-3.1-flash-lite
         options:
           - gemini-3.1-flash-lite
           - gemini-3.5-flash-lite
           - gemini-3.6-flash
+          - gemini-2.5-flash-lite
+          - gemini-3.5-flash
+          - gemini-3.7-flash
+          - gemini-3.8-flash
+          - gemini-3-flash-preview
       source_model:
         description: >-
           Rescue mode (optional): only reprocess pages that this OTHER
@@ -82,6 +109,11 @@ on:
           - gemini-3.1-flash-lite
           - gemini-3.5-flash-lite
           - gemini-3.6-flash
+          - gemini-2.5-flash-lite
+          - gemini-3.5-flash
+          - gemini-3.7-flash
+          - gemini-3.8-flash
+          - gemini-3-flash-preview
           - glm-ocr
           - minicpm-v4.6
           - minicpm-v4.5

@@ -77,6 +77,8 @@ from queries import (
     apply_qc_verdict,
     fetch_corpus_stats,
     fetch_dashboard_data,
+    fetch_qc_first_id,
+    fetch_qc_id_at_rank,
     fetch_qc_page,
     fetch_qc_position,
     fetch_table_page,
@@ -660,24 +662,31 @@ def table_view(table_name):
     )
 
 
+def _parse_needs_review():
+    return request.args.get("needs_review") in ("1", "true", "yes")
+
+
 @app.route("/qc")
 @login_required
 def qc_index():
+    needs_review = _parse_needs_review()
     conn = db_connect()
     try:
-        with conn.cursor() as cur:
-            # image_uploaded_at IS NOT NULL: a placeholder page with no
-            # image yet has nothing for a reviewer to look at (same
-            # predicate fetch_qc_page()'s own lookup and prev/next use).
-            # excluded_at IS NULL: skip straight past a page someone's
-            # already pulled out of processing, same as prev/next do.
-            cur.execute("SELECT min(id) FROM pages WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL")
-            (first_id,) = cur.fetchone()
+        # image_uploaded_at IS NOT NULL: a placeholder page with no image
+        # yet has nothing for a reviewer to look at (same predicate
+        # fetch_qc_page()'s own lookup and prev/next use). excluded_at IS
+        # NULL: skip straight past a page someone's already pulled out of
+        # processing, same as prev/next do. needs_review, when set,
+        # additionally restricts to pages with something still needing a
+        # verdict (see NEEDS_REVIEW_EXISTS_SQL) -- lands on None (a 404
+        # below) once that queue is actually empty, rather than silently
+        # falling back to the unfiltered first page.
+        first_id = fetch_qc_first_id(conn, needs_review=needs_review)
     finally:
         conn.close()
     if first_id is None:
         abort(404)
-    return redirect(url_for("qc_page", page_id=first_id))
+    return redirect(url_for("qc_page", page_id=first_id, needs_review=("1" if needs_review else None)))
 
 
 def _entries_for_display(entries):
@@ -723,11 +732,12 @@ def _entries_for_display(entries):
 @login_required
 def qc_page(page_id):
     model_tag = request.args.get("model_tag") or None
+    needs_review = _parse_needs_review()
     conn = db_connect()
     try:
-        data = fetch_qc_page(conn, page_id, model_tag)
+        data = fetch_qc_page(conn, page_id, model_tag, needs_review=needs_review)
         if data is not None:
-            page_rank, total_pages_available = fetch_qc_position(conn, page_id)
+            page_rank, total_pages_available = fetch_qc_position(conn, page_id, needs_review=needs_review)
     finally:
         conn.close()
     if data is None:
@@ -766,12 +776,37 @@ def qc_page(page_id):
         flagged_entry_count=flagged_entry_count,
         page_rank=page_rank,
         total_pages_available=total_pages_available,
+        needs_review=needs_review,
         catalogue_fields=CATALOGUE_ENTRY_FIELDS,
         bool_fields=CATALOGUE_ENTRY_BOOL_FIELDS,
         json_fields=CATALOGUE_ENTRY_JSON_FIELDS,
         flag_field_aliases=FLAG_FIELD_ALIASES,
         extra_blank_rows=EXTRA_BLANK_EDIT_ROWS,
     )
+
+
+@app.route("/qc/goto")
+@login_required
+def qc_goto():
+    """Backs the QC page's "go to page N" jump -- N is the same 1-indexed
+    rank the "page N of M" counter shows (see fetch_qc_position()), under
+    whichever needs_review filter is currently active, so typing the
+    number already on screen for a *different* page (e.g. after the
+    filter changed how many pages are in the count) still lands somewhere
+    sensible rather than on an unrelated id."""
+    needs_review = _parse_needs_review()
+    try:
+        rank = int(request.args.get("n", ""))
+    except ValueError:
+        abort(400)
+    conn = db_connect()
+    try:
+        page_id = fetch_qc_id_at_rank(conn, rank, needs_review=needs_review)
+    finally:
+        conn.close()
+    if page_id is None:
+        abort(404)
+    return redirect(url_for("qc_page", page_id=page_id, needs_review=("1" if needs_review else None)))
 
 
 @app.route("/image/<int:page_id>")

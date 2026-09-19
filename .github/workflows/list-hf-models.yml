@@ -1,0 +1,58 @@
+# On-demand diagnostic only -- workflow_dispatch, no schedule. Reports
+# which image-text-to-text (vision-language) models are actually callable
+# through Hugging Face's Inference Providers router for the account that
+# owns HUGGING_FACE_API_KEY, right now -- see scripts/list_hf_models.py's
+# module docstring for the full reasoning (this exists because
+# extract-pages-hf.yml's default model 400'd in production with "not
+# supported by any provider you have enabled", and secondhand/indirect
+# research can't reliably tell whether a model is unhosted vs. hosted-but-
+# not-enabled-for-this-account).
+#
+# Never touches B2 or Postgres -- it's a pure API round-trip, so this
+# workflow is much lighter than any of the three extraction workflows: no
+# B2 secrets, no SUPABASE_DB_URL, nothing written anywhere. Output is the
+# job log and step summary only.
+name: List available Hugging Face models
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_limit:
+        description: "How many trending image-text-to-text catalog models to check (in addition to the pipeline's currently-configured HF_MODEL, always checked)"
+        type: string
+        default: "15"
+
+permissions:
+  contents: read
+
+jobs:
+  list-models:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: b2-upload
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install requests
+
+      - name: List and test available models
+        env:
+          PYTHONUNBUFFERED: "1"
+          HUGGING_FACE_API_KEY: ${{ secrets.HUGGING_FACE_API_KEY }}
+          HF_CANDIDATE_LIMIT: ${{ inputs.candidate_limit || '15' }}
+          # Same default extract-pages-hf.yml currently uses -- always
+          # included in the live test even if the catalog step doesn't
+          # happen to surface it, so this directly answers "does the
+          # pipeline's actual configured model still work".
+          HF_MODEL: Qwen/Qwen2.5-VL-7B-Instruct
+        run: |
+          python scripts/list_hf_models.py | tee "$GITHUB_STEP_SUMMARY"

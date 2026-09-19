@@ -152,7 +152,15 @@ where model_tag = 'Qwen-Qwen2.5-VL-7B-Instruct'
   for that `(page_id, model_tag)`; a capped content failure (`content_failure=true`,
   `attempt_count >= 2`) needs a person to look at it (QC page) or a different model
   (`source_model` rescue), not another automatic retry.
-- **`model` you picked 404s or never returns** — that model isn't actually deployed by any
-  Inference Provider right now (a model page existing on Hugging Face doesn't guarantee
-  provider hosting). Check the model's page for provider badges, or try a different, more
-  widely-hosted model.
+- **`model` fails every page with `HF router returned 400: ... "not supported by any provider
+  you have enabled"`** — this happened in production with the original default,
+  `Qwen/Qwen2.5-VL-7B-Instruct` (see `.github/workflows/list-hf-models.yml` below). Two
+  different causes produce the exact same message: the model genuinely isn't deployed by any
+  Inference Provider right now, *or* it is, but your account hasn't enabled that provider (check
+  `huggingface.co/settings/inference-providers`) — a model page existing on Hugging Face
+  doesn't guarantee either. Run **Actions → *List available Hugging Face models*** (manual
+  dispatch, `scripts/list_hf_models.py`) to get an authoritative answer instead of guessing from
+  the model's page: it live-tests a batch of trending vision-language models against this
+  account's actual key through the same router endpoint the extraction pipeline uses, and
+  reports which ones genuinely work right now. Set `HF_MODEL` in `extract-pages-hf.yml` to
+  whichever one it confirms.

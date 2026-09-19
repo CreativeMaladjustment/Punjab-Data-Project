@@ -27,7 +27,7 @@ job itself is much lighter/faster to start than `extract-pages.yml`'s.
 
 ## Running it
 
-**Scheduled**: every 6 hours (`0 4,10,16,22 * * *` UTC), with `model=gemini-3.6-flash`,
+**Scheduled**: every 6 hours (`0 4,10,16,22 * * *` UTC), with `model=gemini-3.1-flash-lite`,
 `source_model=(none)`, `allow_already_extracted=false` — i.e. a normal run against whatever's
 still missing a successful extraction from any source. Like every workflow in this repo that
 uses the `b2-upload` environment, a scheduled run still queues for manual approval if required
@@ -38,7 +38,7 @@ inputs:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `model` | `gemini-3.6-flash` | Which Gemini model to run (see "Model choices" below) |
+| `model` | `gemini-3.1-flash-lite` | Which Gemini model to run (see "Model choices" below) |
 | `source_model` | `(none)` | Rescue mode — see below |
 | `allow_already_extracted` | off | Check this only for a deliberate model comparison run |
 
@@ -46,21 +46,24 @@ inputs:
 
 | Model | Free-tier pace this workflow uses | Notes |
 |---|---|---|
-| `gemini-3.6-flash` (default) | ~4s between requests | Only model currently offered |
+| `gemini-3.1-flash-lite` (default) | ~4s between requests | Materially higher free-tier RPM/RPD than flash, per every source describing it |
+| `gemini-3.6-flash` | ~4s between requests | Offered for comparison; its free tier turned out much tighter than assumed — a full 5-hour run only cleared ~24 pages, almost entirely stuck retrying 429s |
 
 Google retired the generation this workflow originally shipped with
 (`gemini-2.5-flash`/`-pro`, `gemini-1.5-flash`/`-pro`) — confirmed via a live 404 from the API
-itself ("This model ... is no longer available to new users"). `gemini-3.6-flash` is the
-confirmed replacement; its exact published free-tier RPM isn't independently confirmed as of
-this writing, so the pacing above is carried over from the old flash tier as a starting floor,
-not a guarantee. Check
+itself ("This model ... is no longer available to new users"). `gemini-3.6-flash` was tried
+next as the confirmed replacement, but its free-tier daily quota turned out to be far
+stricter than the old flash tier this pacing was originally sized for — see the note above.
+`gemini-3.1-flash-lite` is the current default instead. Numbers still vary noticeably by
+source, so treat the pacing above as a conservative starting floor, not a guarantee. Check
 [ai.google.dev/gemini-api/docs/rate-limits](https://ai.google.dev/gemini-api/docs/rate-limits)
 for what Google currently publishes before assuming the pacing above is still accurate; the
 pacing in `scripts/extract_with_gemini.py`'s `GEMINI_MODEL_PACING` is a floor, not the real
-protection — the script also retries a real `429` with backoff (honoring `Retry-After` when
-Google sends one), so a stale pacing number doesn't break the run outright, just makes it
-less efficient in either direction. If Google retires `gemini-3.6-flash` too, the API's own
-error message names its replacement — that's how this workflow's default was fixed last time.
+protection — the script also retries a real `429` **or `5xx`** with backoff (honoring
+`Retry-After` when Google sends one), so a stale pacing number doesn't break the run outright,
+just makes it less efficient in either direction. If Google retires `gemini-3.1-flash-lite`
+too, the API's own error message names its replacement — that's how this workflow's default
+was fixed last time.
 
 This workflow deliberately runs **one worker, not a matrix**: every worker would pace against
 the *same* shared per-project Gemini quota, so more workers here means more `429`s, not more
@@ -75,7 +78,7 @@ that model's own tag — instead of running `model` against the whole backlog. T
 **across providers**: `source_model` can name an Ollama model (`glm-ocr`, `minicpm-v4.6`, …)
 just as easily as another Gemini model, since what makes a page rescuable is entirely about its
 `model_tag` history in Postgres, not which script produced it. For example, `source_model:
-glm-ocr` with `model: gemini-3.6-flash` sends exactly the pages `glm-ocr` capped out on to
+glm-ocr` with `model: gemini-3.1-flash-lite` sends exactly the pages `glm-ocr` capped out on to
 Gemini, without also re-running Gemini against everything `glm-ocr` already succeeded on.
 
 ## Coverage vs. comparison (`allow_already_extracted`)
@@ -92,7 +95,7 @@ behavior for that one run.
 ## What gets written
 
 Two things per page, both namespaced under `model_tag` = the slugified `model` input (e.g.
-`gemini-3.6-flash`, unchanged since it's already tag-safe):
+`gemini-3.1-flash-lite`, unchanged since it's already tag-safe):
 
 - **`llm_extractions`** / **`catalogue_entries`** — the structured extraction, same shape as
   every other model's output, reviewable on the QC page and counted on the Progress page
@@ -121,7 +124,7 @@ to one model, run a query like:
 ```sql
 select count(*) filter (where status in ('success', 'failed')) as processed_last_24h
 from llm_extractions
-where model_tag = 'gemini-3.6-flash'
+where model_tag = 'gemini-3.1-flash-lite'
   and created_at >= now() - interval '24 hours';
 ```
 
@@ -131,10 +134,13 @@ where model_tag = 'gemini-3.6-flash'
 
 - **Every page fails immediately with a 401/403** — `GEMINI_API_KEY` is missing, wrong, or
   the environment approval was declined; check Settings → Environments → `b2-upload`.
-- **Frequent `429` lines in the log, run still finishes** — expected occasionally; the script
-  retries with backoff. If it's constant, the model's actual current rate limit may be lower
-  than `GEMINI_MODEL_PACING` assumes — check Google's current published numbers and consider
-  running with a slower model (`*-pro`) or filing a bump to the pacing constant.
+- **Frequent `429`/`503` lines in the log, run still finishes** — expected occasionally; the
+  script retries both with backoff. If it's *constant* — every page taking several minutes of
+  retries, only a handful of pages clearing in a full 5-hour run — the model's actual free-tier
+  quota is likely much lower than `GEMINI_MODEL_PACING` assumes (this happened with
+  `gemini-3.6-flash`; see "Model choices" above). Check Google's current published numbers and
+  consider switching `model` to a more generous tier rather than just raising the pacing
+  constant.
 - **A page keeps failing with the same error every run** — check `llm_extractions.error_message`
   for that `(page_id, model_tag)`; a capped content failure (`content_failure=true`,
   `attempt_count >= 2`) needs a person to look at it (QC page) or a different model

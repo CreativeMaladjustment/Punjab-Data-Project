@@ -98,7 +98,8 @@ MODEL_ROLE_LABELS = {
     "qwen3-vl-2b": "general vision, 2B · smallest",
     # scripts/extract_with_gemini.py -- a hosted API, not a local Ollama
     # model, so it has no size/param-count of its own to note here.
-    "gemini-3.6-flash": "hosted API (Gemini), free tier · default",
+    "gemini-3.1-flash-lite": "hosted API (Gemini), free tier · default",
+    "gemini-3.6-flash": "hosted API (Gemini), free tier · very tight daily quota",
     # Retired by Google (confirmed via a live 404: "This model ... is no
     # longer available to new users") -- kept here only so any rows already
     # in llm_extractions under these tags still render a label instead of

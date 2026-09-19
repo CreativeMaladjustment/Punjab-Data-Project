@@ -14,8 +14,8 @@ all -- its own per-minute and per-day free-tier rate limits that have no
 Ollama equivalent to design around. Keeping them separate means neither
 script's control flow has to carry conditionals for the other's concerns.
 
-Namespaced under model_tag = slugified GEMINI_MODEL (e.g. "gemini-3.6-
-flash") -- an ordinary peer in the same llm_extractions/model_tag bake-off
+Namespaced under model_tag = slugified GEMINI_MODEL (e.g. "gemini-3.1-
+flash-lite") -- an ordinary peer in the same llm_extractions/model_tag bake-off
 as glm-ocr, minicpm-v4.6, etc., not a reserved namespace like
 HUMAN_MODEL_TAG or scripts/parse_ocr_text.py's "textparse:" prefix, since
 this genuinely is another model's own attempt at the same structured
@@ -30,9 +30,9 @@ extract_with_llm.py beyond swapping Ollama for Gemini:
     https://ai.google.dev/gemini-api/docs/rate-limits before relying on
     them, Google revises these over time and this script deliberately
     doesn't try to auto-detect them. This is a *floor*, not the actual
-    protection -- request() below still handles a real 429 with backoff
-    (honoring Retry-After when Google sends one) regardless of pacing,
-    since the pacing number can drift stale in either direction.
+    protection -- _gemini_post() below still handles a real 429 or 5xx
+    with backoff (honoring Retry-After when Google sends one) regardless
+    of pacing, since the pacing number can drift stale in either direction.
   - Single worker, not a matrix (see .github/workflows/extract-pages-
     gemini.yml) -- unlike Ollama's per-runner CPU inference, N parallel
     Gemini callers would each independently pace against the SAME shared
@@ -44,9 +44,9 @@ extract_with_llm.py beyond swapping Ollama for Gemini:
     reaches. Accepted deliberately: page_ocr_text is worth having rather
     than re-spending a whole image call through scripts/parse_ocr_text.py
     later just to get the same transcription from text already sitting in
-    Postgres. Both calls share the same pace()/429 handling below, so the
-    accounting for "how much quota does one page cost" already reflects
-    two calls, not one.
+    Postgres. Both calls share the same pace()/retry handling below, so
+    the accounting for "how much quota does one page cost" already
+    reflects two calls, not one.
 
 Default candidate selection, rescue mode (SOURCE_MODEL), and
 ALLOW_ALREADY_EXTRACTED all work exactly like extract_with_llm.py's own --
@@ -71,23 +71,26 @@ from botocore.config import Config
 from psycopg2.extras import Json
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
 MODEL_TAG = re.sub(r"[^A-Za-z0-9._-]", "-", GEMINI_MODEL)
 
-# See the module docstring's "rate limits" section. Deliberately per-tier
-# (flash vs. pro), not per-exact-model -- both generations share the same
-# free-tier request-per-minute ceiling for a given tier as of this writing.
-# A model not listed here (e.g. a new release) falls back to the
-# conservative "pro" pace rather than assuming a generous one.
+# See the module docstring's "rate limits" section. A model not listed here
+# (e.g. a new release) falls back to the conservative pace below rather than
+# assuming a generous one.
 #
 # gemini-2.5-flash/-pro and gemini-1.5-flash/-pro have been retired by
 # Google (confirmed via a live 404 from the API itself: "This model ... is
-# no longer available to new users"); gemini-3.6-flash is the confirmed
-# replacement. Its exact published free-tier RPM isn't independently
-# confirmed as of this writing, so this keeps the old flash-tier pace as a
-# starting floor -- real protection is the 429-retry-with-backoff in
+# no longer available to new users"). gemini-3.6-flash was tried next but
+# turned out to have a much tighter free-tier daily quota than assumed --
+# a 5-hour run only cleared ~24 pages, almost entirely stuck retrying 429s
+# (see git history for that run's logs). gemini-3.1-flash-lite is the
+# current default instead: every source describing its free tier reports a
+# materially higher RPM/RPD ceiling than flash. Numbers still vary
+# noticeably by source, so this pace is a conservative starting floor, not
+# a guarantee -- real protection is the 429/5xx-retry-with-backoff in
 # _gemini_post(), not this number.
 GEMINI_MODEL_PACING = {
+    "gemini-3.1-flash-lite": 4.0,
     "gemini-3.6-flash": 4.0,
 }
 PACE_SECONDS = float(os.environ.get("GEMINI_PACE_SECONDS", GEMINI_MODEL_PACING.get(GEMINI_MODEL, 20.0)))
@@ -541,11 +544,18 @@ def pace():
         time.sleep(wait)
 
 
-GEMINI_MAX_429_RETRIES = 5
+GEMINI_MAX_RETRIES = 5
+
+# 503 ("This model is currently experiencing high demand ... try again
+# later") and the other 5xx codes are explicitly transient by Google's own
+# wording, same as a 429 -- retried with the same backoff instead of
+# burning an attempt_count immediately. 500/502/504 aren't observed in
+# practice as of this writing but are included on the same reasoning.
+GEMINI_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 
 
 def _gemini_post(body, context):
-    """Shared POST-with-pace-and-429-retry core for both gemini_generate()
+    """Shared POST-with-pace-and-retry core for both gemini_generate()
     and gemini_ocr_full_page() below -- pacing and backoff apply per HTTP
     call, not per logical operation, and both make one call each, so they
     share this rather than each keeping its own copy of the retry loop.
@@ -556,23 +566,23 @@ def _gemini_post(body, context):
     headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
 
     backoff = 30
-    for attempt in range(1, GEMINI_MAX_429_RETRIES + 1):
+    for attempt in range(1, GEMINI_MAX_RETRIES + 1):
         pace()
         resp = requests.post(
             url, json=body, headers=headers,
             timeout=(GEMINI_CONNECT_TIMEOUT_SECONDS, GEMINI_READ_TIMEOUT_SECONDS),
         )
         _LAST_CALL_AT[0] = time.time()
-        if resp.status_code == 429:
+        if resp.status_code in GEMINI_RETRYABLE_STATUS_CODES:
             retry_after = resp.headers.get("Retry-After")
             wait = float(retry_after) if retry_after else backoff
-            print(f"    429 from Gemini for {context} (attempt {attempt}/{GEMINI_MAX_429_RETRIES}); waiting {wait:.0f}s")
+            print(f"    {resp.status_code} from Gemini for {context} (attempt {attempt}/{GEMINI_MAX_RETRIES}); waiting {wait:.0f}s")
             time.sleep(wait)
             backoff = min(backoff * 2, 300)
             continue
         break
     else:
-        raise RuntimeError(f"Gemini kept returning 429 after {GEMINI_MAX_429_RETRIES} retries")
+        raise RuntimeError(f"Gemini kept returning {resp.status_code} after {GEMINI_MAX_RETRIES} retries")
 
     if not resp.ok:
         # Anything other than a clean 200 (auth, bad request, 5xx) is

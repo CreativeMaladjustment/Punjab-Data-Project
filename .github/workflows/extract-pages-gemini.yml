@@ -47,6 +47,19 @@
 # stops serving requests. gemini-2.5-flash-lite is also worth watching:
 # Google has it slated to shut down entirely on 2026-10-16.
 #
+# gemma-4-31b-it and gemma-4-26b-a4b-it: Google hosts these Gemma models
+# directly on this same generateContent API (distinct from the
+# google-gemma-4-31B-it/google-gemma-4-26B-A4B-it tags, which reach the
+# same underlying models a different way, through HF Inference Providers
+# -- see extract-pages-hf.yml -- and so get their own separate model_tag
+# rows). The account's own AI Studio rate-limits page lists them under
+# "Other models" with RPD 14,400 -- by far the most generous quota of
+# anything in this file -- but TPM there is only 16K (vs. 250K for the
+# Gemini models above), tighter in absolute terms, and actual per-page
+# token cost against that hasn't been measured yet. Also manual/rescue-
+# only for now on that basis; worth revisiting for the schedule once a
+# real run shows it doesn't choke on TPM.
+#
 # Rescue mode: set `source_model` to reprocess ONLY the pages that model
 # already gave up on (capped-out content failures) with `model` instead of
 # running `model` against the full backlog -- same mechanic as
@@ -76,13 +89,20 @@ on:
     inputs:
       model:
         description: >-
-          Gemini model to run. Everything below gemini-3.6-flash in this
-          list has a real but tight free-tier daily quota (RPD 20, vs.
-          500 for the two flash-lite models the schedule below actually
-          uses) -- manual/rescue use only, deliberately not scheduled
-          (see the module comment above). gemini-3-flash-preview is a
-          preview model; expect it to be more volatile than the
-          non-preview tags.
+          Gemini model to run. Everything from gemini-2.5-flash-lite
+          through gemini-3-flash-preview has a real but tight free-tier
+          daily quota (RPD 20, vs. 500 for the two flash-lite models the
+          schedule below actually uses) -- manual/rescue use only,
+          deliberately not scheduled (see the module comment above).
+          gemini-3-flash-preview is a preview model; expect it to be more
+          volatile than the non-preview tags. gemma-4-31b-it/
+          gemma-4-26b-a4b-it are Gemma models Google hosts directly on
+          this same API (not the separate google-gemma-4-*-it tags,
+          which go through HF Inference Providers instead) -- real RPD
+          14,400 confirmed on the account's own rate-limits page, the
+          most generous quota of anything here, but also not yet
+          scheduled since actual per-page token cost against their much
+          tighter 16K TPM hasn't been measured.
         type: choice
         default: gemini-3.1-flash-lite
         options:
@@ -94,6 +114,8 @@ on:
           - gemini-3.7-flash
           - gemini-3.8-flash
           - gemini-3-flash-preview
+          - gemma-4-31b-it
+          - gemma-4-26b-a4b-it
       source_model:
         description: >-
           Rescue mode (optional): only reprocess pages that this OTHER
@@ -124,6 +146,8 @@ on:
           - gemma4:e2b
           - google-gemma-4-31B-it
           - google-gemma-4-26B-A4B-it
+          - gemma-4-31b-it
+          - gemma-4-26b-a4b-it
       allow_already_extracted:
         description: >-
           By default this run skips any page that already has a successful

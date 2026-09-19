@@ -61,6 +61,8 @@ inputs:
 | `gemini-3.7-flash` | fallback pace | RPD 20; manual/rescue only |
 | `gemini-3.8-flash` | fallback pace | RPD 20; manual/rescue only |
 | `gemini-3-flash-preview` | fallback pace | RPD 20; manual/rescue only; a preview model, so expect more volatility than the non-preview tags |
+| `gemma-4-31b-it` | ~2s between requests | Gemma hosted directly on the Gemini API (distinct from `google-gemma-4-31B-it` in `HF_EXTRACTION.md`, which reaches it via HF Inference Providers instead). RPD **14,400** confirmed on the account's own rate-limits page — the most generous quota of any tag here — but TPM is only 16K (vs. 250K for the Gemini models above); manual/rescue only until real per-page token cost against that is measured |
+| `gemma-4-26b-a4b-it` | ~2s between requests | Same as `gemma-4-31b-it` above — RPD 14,400, TPM 16K, manual/rescue only |
 
 The five RPD-20 models above aren't in `GEMINI_MODEL_PACING`, so they use the module's
 conservative unlisted-model fallback pace rather than an explicit entry — deliberate, not an

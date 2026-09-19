@@ -93,6 +93,22 @@ GEMINI_MODEL_PACING = {
     "gemini-3.1-flash-lite": 4.0,
     "gemini-3.6-flash": 4.0,
     "gemini-3.5-flash-lite": 4.0,
+    # gemma-4-31b-it/gemma-4-26b-a4b-it: served through this same
+    # generateContent endpoint (Google hosts Gemma directly on the Gemini
+    # API, not via HF Inference Providers -- see the distinct
+    # google-gemma-4-*-it tags for that other path), confirmed via the
+    # account's own AI Studio rate-limits page under "Other models": RPM
+    # 30, RPD 14,400 -- by far the most generous RPD of anything in this
+    # table. 2.0s = 60/30 matches this file's usual floor-from-RPM
+    # derivation. TPM there is only 16K though (vs. 250K for the Gemini
+    # text-out models above), tighter than RPM in absolute terms -- a
+    # single page's system prompt + image + generation output could
+    # plausibly bump into that TPM ceiling before RPM does, so treat this
+    # pace as even less of a guarantee than usual; the retry-with-backoff
+    # in _gemini_post() is still what actually protects a run, not this
+    # floor.
+    "gemma-4-31b-it": 2.0,
+    "gemma-4-26b-a4b-it": 2.0,
 }
 PACE_SECONDS = float(os.environ.get("GEMINI_PACE_SECONDS", GEMINI_MODEL_PACING.get(GEMINI_MODEL, 20.0)))
 

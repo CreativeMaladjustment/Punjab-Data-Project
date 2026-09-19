@@ -947,8 +947,19 @@ def main():
             any_incomplete = True
             if b2_download_failure:
                 b2_failures += 1
-            if gemini_rate_limited:
-                gemini_rate_limit_failures += 1
+        # Deliberately NOT nested under `if not ok:` above -- the OCR call
+        # is best-effort (see process_page()'s own comment) and its
+        # failure never flips a page to ok=False, so a page whose OCR
+        # call exhausted retries on a 429/5xx but whose extraction call
+        # then succeeded anyway still reports gemini_rate_limited=True on
+        # the ok=True path. Nesting this here missed exactly that case in
+        # production (run 35461856969: page 95's OCR exhausted retries,
+        # extraction succeeded two retries later, the page counted as a
+        # success, and the guard below never tripped -- the run ground on
+        # for another ~140 minutes and 70+ pages against an already-dead
+        # daily quota until someone cancelled it by hand).
+        if gemini_rate_limited:
+            gemini_rate_limit_failures += 1
         processed += 1
         print(f"count of pages processed so far: {processed}")
         if MAX_B2_FAILURES_PER_WORKER and b2_failures >= MAX_B2_FAILURES_PER_WORKER:

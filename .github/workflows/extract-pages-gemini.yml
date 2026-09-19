@@ -101,7 +101,9 @@ on:
           "content failed" pages after 2 attempts) -- instead of the normal
           full backlog for "model" above. Leave as "(none)" for a normal
           run. Must differ from "model". Cross-provider: an Ollama model's
-          tag works here too.
+          or a Hugging Face-hosted model's tag works here too -- this only
+          selects which rows to rescue, it never calls that other
+          provider's API.
         type: choice
         default: "(none)"
         options:
@@ -120,6 +122,8 @@ on:
           - qwen3-vl:2b
           - qwen3-vl:4b
           - gemma4:e2b
+          - google-gemma-4-31B-it
+          - google-gemma-4-26B-A4B-it
       allow_already_extracted:
         description: >-
           By default this run skips any page that already has a successful

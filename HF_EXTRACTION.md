@@ -41,10 +41,12 @@ anything model-sized locally.
 
 ## Running it
 
-**Scheduled**: every 6 hours (`0 4,10,16,22 * * *` UTC), same anchor as the other two
-extraction workflows. Most scheduled runs after the monthly credit is spent exit within
-seconds on the first 402 — see "What to expect" below — so this doesn't cost meaningful
-runner time even with nothing left to spend.
+**Scheduled**: once a week, Mondays at 04:00 UTC (`0 4 * * 1`) — same anchor hour as the
+other two extraction workflows, but weekly rather than every 6 hours, since the monthly
+credit is small enough that running more often just means more runs finding no credit
+left, not more pages processed. Most scheduled runs after the monthly credit is spent
+exit within seconds on the first 402 — see "What to expect" below — so this doesn't cost
+meaningful runner time even with nothing left to spend.
 
 **Manual** (Actions → *Extract catalogue entries with Hugging Face* → Run workflow) takes
 three inputs:
@@ -117,7 +119,7 @@ Two things per page, both namespaced under `model_tag` = the slugified `model` i
 Once the month's `$0.10` (or `$2` on Pro) is spent, the Inference Providers router returns
 HTTP 402. Unlike a 429 (rate limit, worth retrying) this won't clear up by waiting, so
 `extract_with_hf.py` stops the run immediately instead of retrying or burning the rest of the
-5-hour window — this is expected behavior, not a bug, and the workflow's job summary says so
+2-hour window — this is expected behavior, not a bug, and the workflow's job summary says so
 explicitly (exit code 43, distinct from the runtime guard's 42) rather than showing as a
 failure. The in-flight page's claim just goes stale (same `CLAIM_TIMEOUT_SECONDS` mechanism
 every extraction script uses) and gets retried automatically once the credit renews next
@@ -129,8 +131,10 @@ actual per-day request quota.
 
 ## Runtime guard
 
-Same 5-hour cap as every other extraction workflow in this repo, for the (unlikely, given the
-credit constraint) case where the credit is large enough for a run to actually approach it: the
+A 2-hour cap — shorter than the other extraction workflows' 5-hour guard, since this
+pipeline's tiny monthly credit exhausts in well under an hour once it's actually spent, so
+there's no benefit to a longer window. For the (unlikely, given the credit constraint) case
+where the credit is large enough for a run to actually approach it: the
 script checks its own elapsed time every iteration and exits `42` (flagged in the job's
 summary) rather than risking a mid-page cutoff from the GitHub Actions runner's own hard
 limit.

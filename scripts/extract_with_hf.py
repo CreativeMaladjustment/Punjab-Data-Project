@@ -36,8 +36,9 @@ differs from extract_with_gemini.py's:
     won't clear up by waiting or backing off, so _hf_post() raises
     InsufficientCreditError for it immediately instead of retrying, and
     main() stops the whole run right there (exit code
-    CREDIT_EXHAUSTED_EXIT_CODE) rather than spending the rest of a 5-hour
-    runner window hammering an account that has nothing left to spend.
+    CREDIT_EXHAUSTED_EXIT_CODE) rather than spending the rest of the
+    2-hour runner window hammering an account that has nothing left to
+    spend.
     PACE_SECONDS below is a light courtesy floor against ordinary
     per-minute provider throttling, not sized against a real published
     free-tier number the way Gemini's pacing is -- there isn't one to
@@ -153,7 +154,10 @@ def load_b2_accounts():
 
 B2_ACCOUNTS = load_b2_accounts()
 
-MAX_RUNTIME_SECONDS = 18000  # 5 hours; same runner guard as the other extraction scripts
+MAX_RUNTIME_SECONDS = 7200  # 2 hours -- shorter than the other extraction scripts'
+# 5-hour guard: this pipeline's tiny monthly credit exhausts in well under
+# an hour once it's actually spent (see InsufficientCreditError), so
+# there's no benefit to a long runtime window here.
 RUNTIME_GUARD_EXIT_CODE = 42
 # Distinct from RUNTIME_GUARD_EXIT_CODE: this run stopped because the
 # monthly Inference Providers credit is spent, not because it ran long --
@@ -538,7 +542,7 @@ class InsufficientCreditError(RuntimeError):
     _hf_post()'s loop and NOT treated as a per-page content failure by
     process_page(): it means every subsequent call will fail the same way
     until the credit renews, so main() catches this once and stops the
-    whole run instead of burning the rest of the 5-hour window on calls
+    whole run instead of burning the rest of the 2-hour window on calls
     that can't succeed."""
 
 

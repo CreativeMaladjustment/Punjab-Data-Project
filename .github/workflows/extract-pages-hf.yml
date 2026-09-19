@@ -11,7 +11,7 @@
 # free HF account as of this writing; see HF_EXTRACTION.md). Once it's
 # spent, the router returns 402 and the script stops the run immediately
 # (exit code 43, flagged below) rather than retrying or burning the rest of
-# the 5-hour window -- see extract_with_hf.py's InsufficientCreditError.
+# the 2-hour window -- see extract_with_hf.py's InsufficientCreditError.
 #
 # Default model is google/gemma-4-31B-it -- chosen by actually testing
 # candidates against this account's key (scripts/list_hf_models.py,
@@ -37,16 +37,17 @@
 name: Extract catalogue entries with Hugging Face
 
 on:
-  # Every 6 hours, same anchor as extract-pages.yml's and
-  # extract-pages-gemini.yml's own schedules -- all three workflows queue
-  # independently for `b2-upload` approval, so running them on the same
-  # tick doesn't couple them, just means they all show up for review at
-  # once. Most scheduled runs after the monthly credit is spent will exit
-  # within seconds on the first 402 (see the module docstring above), so
-  # this doesn't cost meaningful runner time even when there's no credit
-  # left to use.
+  # Once a week (Mondays at 04:00 UTC, same anchor hour as
+  # extract-pages.yml's and extract-pages-gemini.yml's own schedules)
+  # rather than every 6 hours like the other two extraction workflows --
+  # the monthly credit here is tiny enough ($0.10 free tier) that running
+  # more often than weekly just means more runs finding no credit left,
+  # not more pages processed. Most scheduled runs after the monthly
+  # credit is spent will exit within seconds on the first 402 (see the
+  # module docstring above), so this doesn't cost meaningful runner time
+  # even when there's no credit left to use.
   schedule:
-    - cron: "0 4,10,16,22 * * *"
+    - cron: "0 4 * * 1"
   workflow_dispatch:
     inputs:
       model:
@@ -111,7 +112,11 @@ jobs:
     # monthly credit, so more workers here just spends it faster, not more
     # pages processed for it.
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    # 20-minute buffer over extract_with_hf.py's own 2-hour
+    # (MAX_RUNTIME_SECONDS) internal runtime guard, same proportional
+    # buffer the other extraction workflows leave over their own script's
+    # guard.
+    timeout-minutes: 140
     environment: b2-upload
     env:
       # Routed through env vars rather than interpolating ${{ inputs.* }}
@@ -169,9 +174,9 @@ jobs:
         run: |
           echo "### ⏱️ Runtime guard tripped for \`$HF_MODEL\` — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "The extraction stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "The extraction stopped after ~2 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Action needed:** the next scheduled run (every 6h) or a manual re-run with the same model (\`$HF_MODEL\`) continues it." >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** the next scheduled run (weekly, Mondays) or a manual re-run with the same model (\`$HF_MODEL\`) continues it." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Flag credit exhaustion for visibility
         if: steps.run.outputs.exit_code == '43'

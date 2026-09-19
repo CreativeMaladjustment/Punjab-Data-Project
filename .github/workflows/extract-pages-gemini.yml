@@ -21,18 +21,26 @@
 #
 #   - gemini-3.1-flash-lite: hours 4, 16 (twice a day, RPD 500) -- `extract` job, single worker
 #   - gemini-3.5-flash-lite: hours 10, 22 (twice a day, RPD 500) -- `extract` job, single worker
-#   - gemma-4-31b-it: hours 0, 6, 12, 18 (four times a day, RPD 14,400) -- `extract-gemma-matrix` job, 8 workers
-#   - gemma-4-26b-a4b-it: hours 1, 7, 13, 19 (four times a day, RPD 14,400) -- `extract-gemma-matrix` job, 8 workers
+#   - gemma-4-31b-it: hours 0, 6, 12, 18 (four times a day, RPD 14,400) -- `extract-gemma-matrix` job, 1 worker
+#   - gemma-4-26b-a4b-it: hours 1, 7, 13, 19 (four times a day, RPD 14,400) -- `extract-gemma-matrix` job, 1 worker
 #
 # None of the twelve resulting daily runs share a clock hour -- the two
 # Gemma models are offset from each other by one hour (0-vs-1, 6-vs-7,
 # etc.) and from both Gemini models' hours (4, 10, 16, 22) entirely --
 # keeping each run's own timing/approval history easy to tell apart in
-# the Actions log, and (see extract-pages.yml's own matrix-size comment)
-# leaving GitHub-hosted runner concurrency headroom against the account-
-# wide 20-job cap now that extract-gemma-matrix can put 8 jobs in flight
-# at once: extract-pages.yml's own matrix was trimmed from 15 to 2 workers
-# for exactly this reason.
+# the Actions log.
+#
+# extract-gemma-matrix was originally an 8-worker matrix (RPM 30/RPD
+# 14,400 have real headroom for it -- see the pacing math this comment
+# block used to carry, still in git history). Scaled back to 1 worker
+# after live runs showed both Gemma tags failing almost every page with
+# 500/503 from Google's generateContent endpoint while sitting well
+# under 50% of every quota dimension (AI Studio's own rate-limits page:
+# ~13/30 RPM, ~460/14,400 RPD for 31B at the time) -- not a quota or
+# pacing problem this pipeline's retry/backoff can fix, so running 8
+# concurrent callers against a backend that unreliable just burned 8x
+# the runner minutes for the same trickle of successes. Revisit if a
+# later run shows the error rate has improved.
 #
 # Why two separate jobs instead of one with a model-dependent matrix size:
 # GitHub Actions matrix sizes can be computed via an expression (see
@@ -81,28 +89,13 @@
 # rows). The account's own AI Studio rate-limits page lists them under
 # "Other models" with RPM 30, TPM 16,000, RPD 14,400 -- by far the most
 # generous RPD of anything in this file, hence four scheduled slots each
-# (via an 8-worker matrix, see extract-gemma-matrix below) rather than
-# two single-worker ones.
+# via extract-gemma-matrix below (currently a 1-worker matrix -- see the
+# module comment above for why it was scaled back from 8).
 #
-# Matrix pacing: GEMINI_MODEL_PACING's 2.0s floor for these two tags (=
-# 60/30 RPM) assumes exactly ONE caller. 8 *independent* matrix jobs each
-# have their own in-process pace()/_LAST_CALL_AT state -- nothing
-# coordinates across them -- so 8 workers each independently pacing at
-# 2.0s could let the combined request rate hit up to 8x that, 240 RPM
-# against a 30 RPM cap. The safe formula for N workers sharing a limit L:
-# each worker paces at N * 60/L seconds. For N=8, L=30 that floor is
-# 8 * 2.0 = 16.0s; GEMINI_PACE_SECONDS below is set to 20.0s for some
-# margin (combined ~24 RPM). TPM is the bigger unknown: at 16,000/min
-# combined, 8 workers get ~2,000 tokens/min each on average, and this
-# pipeline's actual per-request token cost (system prompt + image +
-# generation output) hasn't been measured -- if a real run trips
-# MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER (exit code 43) well short of
-# 14,400 requests/day, suspect TPM exhaustion, not RPD, and raise
-# GEMINI_PACE_SECONDS accordingly. Each of the 8 workers carries its own
-# independent MAX_GEMINI_RATE_LIMIT_FAILURES_PER_WORKER=1 guard, so even
-# if all 8 hit a shared TPM wall around the same moment, each stops
-# itself after its own first rate-limited page rather than all 8
-# grinding through repeated retry cycles in parallel.
+# extract-gemma-matrix doesn't override GEMINI_PACE_SECONDS: with a
+# single worker, GEMINI_MODEL_PACING's own 2.0s floor for these two tags
+# (= 60/30 RPM) already applies directly, same as the `extract` job above
+# for its own single-worker models.
 #
 # Rescue mode: set `source_model` to reprocess ONLY the pages that model
 # already gave up on (capped-out content failures) with `model` instead of
@@ -308,16 +301,18 @@ jobs:
         run: exit 1
 
   extract-gemma-matrix:
-    # 8 parallel workers -- safe here in a way it isn't for the Gemini
-    # models above because gemma-4-31b-it/gemma-4-26b-a4b-it's RPM (30)
-    # and especially RPD (14,400) have real headroom for it; see the
-    # module comment above for the full pacing derivation and the TPM
-    # caveat. Each worker independently claims and processes pages (see
-    # extract_with_gemini.py's claim_next_page(), built on
-    # `FOR UPDATE ... SKIP LOCKED`, the same safe-for-concurrent-workers
-    # pattern extract-pages.yml's own 15-worker matrix relies on), so this
-    # fans the backlog out across 8 runners without any of them stepping
-    # on each other's pages.
+    # 1 worker -- was 8 (RPM 30/RPD 14,400 would have real headroom for
+    # it; see the module comment above for the full pacing derivation and
+    # the TPM caveat), scaled back after live runs showed both Gemma tags
+    # failing almost every page with 500/503 from Google's own backend
+    # while sitting well under 50% of every quota dimension -- see the
+    # module comment above for the details. Each worker independently
+    # claims and processes pages (see extract_with_gemini.py's
+    # claim_next_page(), built on `FOR UPDATE ... SKIP LOCKED`, the same
+    # safe-for-concurrent-workers pattern extract-pages.yml's own matrix
+    # relies on), so the matrix strategy is kept even at size 1 -- bumping
+    # back up later (if Google's reliability for these two tags improves)
+    # is then just widening the `worker:` list below.
     #
     # Only runs for the two Gemma models -- the exact negation of
     # extract's `if:` above. Keep both conditions in sync: every trigger
@@ -330,7 +325,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker: [1, 2, 3, 4, 5, 6, 7, 8]
+        worker: [1]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload
@@ -363,12 +358,6 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # 8 * 60/30 RPM = 16.0s is the bare floor for 8 workers to stay
-          # within gemma's real RPM cap without any one worker needing to
-          # know the others exist; 20.0s adds some margin (combined ~24
-          # RPM). See the module comment above for why TPM, not RPM, is
-          # the more uncertain constraint here.
-          GEMINI_PACE_SECONDS: "20.0"
           MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}

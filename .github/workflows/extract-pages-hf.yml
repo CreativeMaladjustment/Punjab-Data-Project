@@ -1,0 +1,166 @@
+# Runs Hugging Face's Inference Providers router over the page images
+# process-pdfs.yml already uploaded to B2 (looked up via Postgres), writing
+# schema.md-shaped catalogue entries into Postgres (Supabase) -- see
+# scripts/extract_with_hf.py for the full reasoning, especially why this
+# workflow's shape (single worker, no local model install/cache) is so much
+# lighter than extract-pages.yml's: there's no local inference here at all,
+# just Python calling a hosted API.
+#
+# Unlike extract-pages-gemini.yml, the binding constraint here isn't a
+# request-rate ceiling -- it's a small monthly dollar credit ($0.10 for a
+# free HF account as of this writing; see HF_EXTRACTION.md). Once it's
+# spent, the router returns 402 and the script stops the run immediately
+# (exit code 43, flagged below) rather than retrying or burning the rest of
+# the 5-hour window -- see extract_with_hf.py's InsufficientCreditError.
+#
+# Default model is Qwen/Qwen2.5-VL-7B-Instruct: a well-established vision-
+# language model with strong document/OCR benchmarks, actively hosted by
+# multiple Inference Providers (not a brand-new or niche model likely to
+# stop being hosted without notice -- see extract_with_hf.py's module
+# docstring for why that mattered here).
+#
+# Rescue mode: set `source_model` to reprocess ONLY the pages that model
+# already gave up on (capped-out content failures) with `model` instead of
+# running `model` against the full backlog -- same mechanic as
+# extract-pages.yml's and extract-pages-gemini.yml's own, and
+# cross-provider: source_model can name an Ollama or Gemini model tag here
+# too (model_tag alone decides what's rescuable). See
+# extract_with_hf.py's module docstring for the exact definition of
+# "already gave up on".
+name: Extract catalogue entries with Hugging Face
+
+on:
+  # Every 6 hours, same anchor as extract-pages.yml's and
+  # extract-pages-gemini.yml's own schedules -- all three workflows queue
+  # independently for `b2-upload` approval, so running them on the same
+  # tick doesn't couple them, just means they all show up for review at
+  # once. Most scheduled runs after the monthly credit is spent will exit
+  # within seconds on the first 402 (see the module docstring above), so
+  # this doesn't cost meaningful runner time even when there's no credit
+  # left to use.
+  schedule:
+    - cron: "0 4,10,16,22 * * *"
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Hugging Face model to run (as it appears on huggingface.co, e.g. org/name)"
+        type: choice
+        default: Qwen/Qwen2.5-VL-7B-Instruct
+        options:
+          - Qwen/Qwen2.5-VL-7B-Instruct
+      source_model:
+        description: >-
+          Rescue mode (optional): only reprocess pages that this OTHER
+          model already gave up on (capped-out content failures, i.e. its
+          "content failed" pages after 2 attempts) -- instead of the normal
+          full backlog for "model" above. Leave as "(none)" for a normal
+          run. Must differ from "model". Cross-provider: an Ollama or
+          Gemini model's tag works here too.
+        type: choice
+        default: "(none)"
+        options:
+          - "(none)"
+          - Qwen/Qwen2.5-VL-7B-Instruct
+          - glm-ocr
+          - minicpm-v4.6
+          - minicpm-v4.5
+          - qwen3-vl:2b
+          - qwen3-vl:4b
+          - gemma4:e2b
+          - gemini-3.1-flash-lite
+          - gemini-3.6-flash
+      allow_already_extracted:
+        description: >-
+          By default this run skips any page that already has a successful
+          extraction from ANY source (another model, the textparse:* OCR-
+          text backfill, or a human correction) -- the goal is coverage,
+          not spending this month's tiny HF credit on a page that already
+          has data. Check this box only for a deliberate model bake-off/
+          comparison run.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  extract:
+    # Single worker, not a matrix -- see extract_with_hf.py's module
+    # docstring: N parallel workers would all draw against the SAME shared
+    # monthly credit, so more workers here just spends it faster, not more
+    # pages processed for it.
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    environment: b2-upload
+    env:
+      # Routed through env vars rather than interpolating ${{ inputs.* }}
+      # directly into run: scripts (Semgrep: yaml.github-actions.security.
+      # run-shell-injection), same pattern the other extraction workflows
+      # use.
+      #
+      # `|| 'default'` fallbacks reapply each input's own declared default
+      # for a schedule-triggered run, whose `inputs` context is empty (only
+      # workflow_dispatch/workflow_call populate one) -- see
+      # extract-pages.yml's own schedule trigger for the full reasoning.
+      HF_MODEL: ${{ inputs.model || 'Qwen/Qwen2.5-VL-7B-Instruct' }}
+      SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
+      ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.x"
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run extraction
+        id: run
+        env:
+          PYTHONUNBUFFERED: "1"
+          HUGGING_FACE_API_KEY: ${{ secrets.HUGGING_FACE_API_KEY }}
+          # Lower than the other extraction workflows' cap -- the monthly
+          # credit runs out long before this would bind in practice, but
+          # it's still a sane ceiling for a single run.
+          MAX_PAGES_PER_WORKER: "200"
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
+          B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+          B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+          B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+          B2_ENDPOINT_2: ${{ secrets.B2_ENDPOINT_2 }}
+          B2_KEY_ID_2: ${{ secrets.B2_KEY_ID_2 }}
+          B2_APPLICATION_KEY_2: ${{ secrets.B2_APPLICATION_KEY_2 }}
+          B2_BUCKET_NAME_2: ${{ secrets.B2_BUCKET_NAME_2 }}
+        run: |
+          set +e
+          python scripts/extract_with_hf.py
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Flag runtime guard trip for manual resume
+        if: steps.run.outputs.exit_code == '42'
+        run: |
+          echo "### ⏱️ Runtime guard tripped for \`$HF_MODEL\` — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The extraction stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** the next scheduled run (every 6h) or a manual re-run with the same model (\`$HF_MODEL\`) continues it." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Flag credit exhaustion for visibility
+        if: steps.run.outputs.exit_code == '43'
+        run: |
+          echo "### 💳 HF Inference Providers credit exhausted for \`$HF_MODEL\` this month" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "This month's Inference Providers credit is spent. This is expected, not a failure -- the in-flight page's claim will go stale and be retried automatically once the credit renews next month." >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**No action needed** unless you want more headroom sooner: see HF_EXTRACTION.md for upgrading to a Pro account for a larger monthly credit." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Fail job on unexpected script error
+        if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42' && steps.run.outputs.exit_code != '43'
+        run: exit 1

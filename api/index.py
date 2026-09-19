@@ -108,6 +108,11 @@ MODEL_ROLE_LABELS = {
     "gemini-1.5-flash": "hosted API (Gemini), free tier · retired",
     "gemini-2.5-pro": "hosted API (Gemini), free tier · retired",
     "gemini-1.5-pro": "hosted API (Gemini), free tier · retired",
+    # scripts/extract_with_hf.py -- a hosted API via Hugging Face's
+    # Inference Providers router, budget-limited (a small monthly dollar
+    # credit) rather than rate-limited, so "very small monthly budget" is
+    # the operative caveat here, not a request quota.
+    "Qwen-Qwen2.5-VL-7B-Instruct": "hosted API (Hugging Face), pay-as-you-go · tiny monthly free credit",
 }
 
 # pipeline/schema.md names this flag field "char", but the catalogue_entries

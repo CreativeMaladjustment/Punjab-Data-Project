@@ -15,6 +15,12 @@
   .nav-btn.disabled { color: var(--muted-2); cursor: default; }
   .nav-btn.disabled:hover { background: var(--panel); }
   .pos-count { font: 400 12px/1 "IBM Plex Mono", monospace; color: var(--muted); white-space: nowrap; }
+  .nav-btn.active { background: var(--dark); color: var(--panel); }
+  .goto-form { display: flex; align-items: center; gap: 6px; }
+  .goto-input {
+    width: 72px; font: 400 13px/1 "IBM Plex Mono", monospace; color: var(--ink); background: var(--input-bg);
+    padding: 8px 10px; border: 1px solid var(--input-border);
+  }
 
   .qc-layout { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.25fr); gap: 24px; align-items: start; }
   @media (max-width: 900px) { .qc-layout { grid-template-columns: 1fr; } }
@@ -151,9 +157,16 @@
       <div class="subtitle">{{ data.page.pcloud_folder }}/{{ data.page.pcloud_name }} &middot; page {{ data.page.page_no }} &middot; page id {{ data.page.id }}</div>
     </div>
     <div class="qc-nav">
-      {% if data.prev_id %}<a class="nav-btn" href="{{ url_for('qc_page', page_id=data.prev_id, model_tag=data.selected_tag) }}">&larr; Prev</a>{% else %}<span class="nav-btn disabled">&larr; Prev</span>{% endif %}
-      <span class="pos-count">page {{ page_rank }} of {{ total_pages_available }} with images</span>
-      {% if data.next_id %}<a class="nav-btn" href="{{ url_for('qc_page', page_id=data.next_id, model_tag=data.selected_tag) }}">Next &rarr;</a>{% else %}<span class="nav-btn disabled">Next &rarr;</span>{% endif %}
+      {% if data.prev_id %}<a class="nav-btn" href="{{ url_for('qc_page', page_id=data.prev_id, model_tag=data.selected_tag, needs_review=('1' if needs_review else None)) }}">&larr; Prev</a>{% else %}<span class="nav-btn disabled">&larr; Prev</span>{% endif %}
+      <span class="pos-count">page {{ page_rank }} of {{ total_pages_available }}{% if needs_review %} needing review{% else %} with images{% endif %}</span>
+      {% if data.next_id %}<a class="nav-btn" href="{{ url_for('qc_page', page_id=data.next_id, model_tag=data.selected_tag, needs_review=('1' if needs_review else None)) }}">Next &rarr;</a>{% else %}<span class="nav-btn disabled">Next &rarr;</span>{% endif %}
+      <form class="goto-form" method="get" action="{{ url_for('qc_goto') }}">
+        {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
+        {% if data.selected_tag %}<input type="hidden" name="model_tag" value="{{ data.selected_tag }}">{% endif %}
+        <input class="goto-input" type="number" name="n" min="1" max="{{ total_pages_available }}" placeholder="page #" required>
+        <button type="submit" class="nav-btn">Go</button>
+      </form>
+      <a class="nav-btn {{ 'active' if needs_review else '' }}" href="{{ url_for('qc_page', page_id=data.page.id, model_tag=data.selected_tag, needs_review=(None if needs_review else '1')) }}" title="Show only pages with a successful extraction still awaiting a verdict, or a capped content failure">{% if needs_review %}&check; {% endif %}Needs review only</a>
     </div>
   </div>
 
@@ -179,6 +192,7 @@
           <form method="post" action="{{ url_for('qc_exclude') }}">
             <input type="hidden" name="page_id" value="{{ data.page.id }}">
             <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
+            {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
             <input type="hidden" name="action" value="include">
             <button type="submit" class="btn-outline">Re-include in processing</button>
           </form>
@@ -188,6 +202,7 @@
           <form method="post" action="{{ url_for('qc_exclude') }}">
             <input type="hidden" name="page_id" value="{{ data.page.id }}">
             <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
+            {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
             <input type="hidden" name="action" value="exclude">
             <textarea class="verdict-note" name="note" rows="2" placeholder="Optional note — why this page shouldn't be processed (duplicate, blank, unusable scan, ...)"></textarea>
             <button type="submit" class="btn-reprocess">Exclude from processing</button>
@@ -207,7 +222,7 @@
       <div class="card">
         <div class="tab-row">
           {% for tag in data.model_tags %}
-            <a href="{{ url_for('qc_page', page_id=data.page.id, model_tag=tag) }}" class="{{ 'active' if tag == data.selected_tag else '' }}">{{ tag }}</a>
+            <a href="{{ url_for('qc_page', page_id=data.page.id, model_tag=tag, needs_review=('1' if needs_review else None)) }}" class="{{ 'active' if tag == data.selected_tag else '' }}">{{ tag }}</a>
           {% else %}
             <span class="attempt-meta">No extraction attempts yet for this page.</span>
           {% endfor %}
@@ -267,6 +282,7 @@
         {% else %}
         <form method="post" action="{{ url_for('qc_verdict') }}">
           <input type="hidden" name="extraction_id" value="{{ data.extraction.id }}">
+          {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
           <textarea class="verdict-note" name="note" rows="2" placeholder="Optional note — what's wrong, and where"></textarea>
           <div class="verdict-actions">
             {% if data.extraction.status == 'success' %}
@@ -290,6 +306,7 @@
         <form method="post" action="{{ url_for('qc_save_edit') }}">
           <input type="hidden" name="page_id" value="{{ data.page.id }}">
           <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
+          {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
           <input type="hidden" name="total_rows" value="{{ prefill_entries | length + extra_blank_rows }}">
           {% for i in range(prefill_entries | length + extra_blank_rows) %}
           {% set entry = prefill_entries[i] if i < prefill_entries | length else {} %}

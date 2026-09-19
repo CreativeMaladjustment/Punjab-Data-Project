@@ -663,7 +663,11 @@ def table_view(table_name):
 
 
 def _parse_needs_review():
-    return request.args.get("needs_review") in ("1", "true", "yes")
+    # request.values (not .args): the three QC routes below read this off
+    # a GET query string, but qc_verdict()/qc_exclude()/qc_save_edit() are
+    # POSTs whose forms carry it as a hidden field instead -- one helper
+    # covers both without duplicating the same three-string check.
+    return request.values.get("needs_review") in ("1", "true", "yes")
 
 
 @app.route("/qc")
@@ -793,8 +797,11 @@ def qc_goto():
     whichever needs_review filter is currently active, so typing the
     number already on screen for a *different* page (e.g. after the
     filter changed how many pages are in the count) still lands somewhere
-    sensible rather than on an unrelated id."""
+    sensible rather than on an unrelated id. model_tag, when present, is
+    forwarded to the redirect unchanged -- same as Prev/Next -- so jumping
+    doesn't silently reset back to the default extraction tab."""
     needs_review = _parse_needs_review()
+    model_tag = request.args.get("model_tag") or None
     try:
         rank = int(request.args.get("n", ""))
     except ValueError:
@@ -806,7 +813,9 @@ def qc_goto():
         conn.close()
     if page_id is None:
         abort(404)
-    return redirect(url_for("qc_page", page_id=page_id, needs_review=("1" if needs_review else None)))
+    return redirect(
+        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None))
+    )
 
 
 @app.route("/image/<int:page_id>")
@@ -837,6 +846,7 @@ def qc_verdict():
     extraction_id = request.form.get("extraction_id", type=int)
     verdict = request.form.get("verdict")
     note = request.form.get("note", "").strip()
+    needs_review = _parse_needs_review()
     if extraction_id is None or verdict not in ("approved", "needs_reprocessing"):
         abort(400)
 
@@ -874,7 +884,9 @@ def qc_verdict():
         # signing off on -- a failed or (stale-)claimed row has nothing
         # to approve.
         abort(400)
-    return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
+    return redirect(
+        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None))
+    )
 
 
 @app.route("/qc/exclude", methods=["POST"])
@@ -884,6 +896,7 @@ def qc_exclude():
     submitted_model_tag = request.form.get("model_tag") or None
     action = request.form.get("action")
     note = request.form.get("note", "").strip()
+    needs_review = _parse_needs_review()
     if submitted_page_id is None or action not in ("exclude", "include"):
         abort(400)
 
@@ -927,7 +940,9 @@ def qc_exclude():
         # data.any_claimed in qc.html), so reaching this is a narrow
         # timing window, not the expected path.
         abort(409)
-    return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
+    return redirect(
+        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None))
+    )
 
 
 @app.route("/qc/save_edit", methods=["POST"])
@@ -935,6 +950,7 @@ def qc_exclude():
 def qc_save_edit():
     submitted_page_id = request.form.get("page_id", type=int)
     submitted_model_tag = request.form.get("model_tag") or None
+    needs_review = _parse_needs_review()
     # `... or 0` would treat a missing or malformed total_rows the same as
     # an explicit, legitimate 0 (which does mean something real: "save
     # this correction with every entry deleted") -- silently running the
@@ -1042,7 +1058,9 @@ def qc_save_edit():
         save_human_edit(conn, page_id, entries)
     finally:
         conn.close()
-    return redirect(url_for("qc_page", page_id=page_id, model_tag=model_tag))
+    return redirect(
+        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None))
+    )
 
 
 @app.route("/healthz")

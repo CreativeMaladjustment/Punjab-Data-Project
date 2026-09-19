@@ -162,6 +162,7 @@
       {% if data.next_id %}<a class="nav-btn" href="{{ url_for('qc_page', page_id=data.next_id, model_tag=data.selected_tag, needs_review=('1' if needs_review else None)) }}">Next &rarr;</a>{% else %}<span class="nav-btn disabled">Next &rarr;</span>{% endif %}
       <form class="goto-form" method="get" action="{{ url_for('qc_goto') }}">
         {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
+        {% if data.selected_tag %}<input type="hidden" name="model_tag" value="{{ data.selected_tag }}">{% endif %}
         <input class="goto-input" type="number" name="n" min="1" max="{{ total_pages_available }}" placeholder="page #" required>
         <button type="submit" class="nav-btn">Go</button>
       </form>
@@ -191,6 +192,7 @@
           <form method="post" action="{{ url_for('qc_exclude') }}">
             <input type="hidden" name="page_id" value="{{ data.page.id }}">
             <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
+            {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
             <input type="hidden" name="action" value="include">
             <button type="submit" class="btn-outline">Re-include in processing</button>
           </form>
@@ -200,6 +202,7 @@
           <form method="post" action="{{ url_for('qc_exclude') }}">
             <input type="hidden" name="page_id" value="{{ data.page.id }}">
             <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
+            {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
             <input type="hidden" name="action" value="exclude">
             <textarea class="verdict-note" name="note" rows="2" placeholder="Optional note — why this page shouldn't be processed (duplicate, blank, unusable scan, ...)"></textarea>
             <button type="submit" class="btn-reprocess">Exclude from processing</button>
@@ -219,7 +222,7 @@
       <div class="card">
         <div class="tab-row">
           {% for tag in data.model_tags %}
-            <a href="{{ url_for('qc_page', page_id=data.page.id, model_tag=tag) }}" class="{{ 'active' if tag == data.selected_tag else '' }}">{{ tag }}</a>
+            <a href="{{ url_for('qc_page', page_id=data.page.id, model_tag=tag, needs_review=('1' if needs_review else None)) }}" class="{{ 'active' if tag == data.selected_tag else '' }}">{{ tag }}</a>
           {% else %}
             <span class="attempt-meta">No extraction attempts yet for this page.</span>
           {% endfor %}
@@ -279,6 +282,7 @@
         {% else %}
         <form method="post" action="{{ url_for('qc_verdict') }}">
           <input type="hidden" name="extraction_id" value="{{ data.extraction.id }}">
+          {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
           <textarea class="verdict-note" name="note" rows="2" placeholder="Optional note — what's wrong, and where"></textarea>
           <div class="verdict-actions">
             {% if data.extraction.status == 'success' %}
@@ -302,6 +306,7 @@
         <form method="post" action="{{ url_for('qc_save_edit') }}">
           <input type="hidden" name="page_id" value="{{ data.page.id }}">
           <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
+          {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
           <input type="hidden" name="total_rows" value="{{ prefill_entries | length + extra_blank_rows }}">
           {% for i in range(prefill_entries | length + extra_blank_rows) %}
           {% set entry = prefill_entries[i] if i < prefill_entries | length else {} %}

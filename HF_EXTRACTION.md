@@ -51,25 +51,34 @@ three inputs:
 
 | Input | Default | Meaning |
 |---|---|---|
-| `model` | `Qwen/Qwen2.5-VL-7B-Instruct` | Which HF model to run |
+| `model` | `google/gemma-4-31B-it` | Which HF model to run |
 | `source_model` | `(none)` | Rescue mode — see below |
 | `allow_already_extracted` | off | Check this only for a deliberate model comparison run |
 
 ## Model choice
 
-The default is **`Qwen/Qwen2.5-VL-7B-Instruct`**: a well-established vision-language model
-with strong published document/OCR benchmarks, actively hosted by multiple Inference
-Providers (DeepInfra, Together, and others) rather than a brand-new or niche release. That
-matters here specifically because this project already hit a model getting pulled out from
-under it once (Gemini's `gemini-2.5-flash` retirement — see `GEMINI_EXTRACTION.md`); a
-well-established, multiply-hosted model is less likely to disappear the same way.
+**Don't pick a model from its Hugging Face page or a third-party writeup and trust it'll
+work.** This pipeline's original default, `Qwen/Qwen2.5-VL-7B-Instruct`, looked reasonable by
+every indirect signal available (well-established, benchmarked, "actively hosted by multiple
+providers" per third-party pricing writeups) and still failed on every page in production with
+`"not supported by any provider you have enabled"`. A model's page existing on Hugging Face
+does not mean your account's Inference Providers configuration can actually call it.
 
-The full catalogue of `image-text-to-text` models on Hugging Face is much larger (300+) —
-[huggingface.co/models?pipeline_tag=image-text-to-text&inference_provider=all](https://huggingface.co/models?pipeline_tag=image-text-to-text&inference_provider=all) —
-but most aren't actually deployed by any Inference Provider (a model page existing doesn't
-mean it's callable this way; check for provider badges on the model's page, or that calling it
-doesn't 404). `HF_MODEL` is an env var override if you want to try a different one — update
-the workflow's `model` choice list to match.
+Instead, run **Actions → *List available Hugging Face models*** (`scripts/list_hf_models.py`)
+whenever you need to pick or re-verify a model — it live-tests real candidates against this
+account's actual key through the same router endpoint the extraction pipeline uses, and
+reports which ones genuinely work right now. The current default, **`google/gemma-4-31B-it`**,
+was chosen this way (run 35446611937): of 6 models that passed the live test, it's the one that
+also returned real, non-empty response content under the probe, not just a bare 200. The
+workflow's `model` choice list offers all 6 confirmed-working candidates from that run —
+`google/gemma-4-31B-it`, `google/gemma-4-26B-A4B-it`, `Qwen/Qwen3.6-27B`,
+`Qwen/Qwen3.6-35B-A3B`, `zai-org/GLM-5.3-Flash`, `moonshotai/Kimi-K3` — see
+`scripts/hf_config.py`'s docstring for the full detail on why the other 5 are offered as
+alternates rather than the default.
+
+`HF_MODEL` is an env var override (falls back to `scripts/hf_config.py`'s `DEFAULT_HF_MODEL`
+when unset) if you want to try a model not in the dropdown — update the workflow's `model`
+choice list to match once you've confirmed it actually works.
 
 ## Rescue mode (`source_model`)
 
@@ -94,7 +103,7 @@ run on pages another model has already succeeded on.
 ## What gets written
 
 Two things per page, both namespaced under `model_tag` = the slugified `model` input (e.g.
-`Qwen/Qwen2.5-VL-7B-Instruct` → `Qwen-Qwen2.5-VL-7B-Instruct`):
+`google/gemma-4-31B-it` → `google-gemma-4-31B-it`):
 
 - **`llm_extractions`** / **`catalogue_entries`** — the structured extraction, same shape as
   every other model's output, reviewable on the QC page and counted on the Progress page.
@@ -136,7 +145,7 @@ specific to this model, run a query like:
 ```sql
 select count(*) filter (where status in ('success', 'failed')) as processed_last_30d
 from llm_extractions
-where model_tag = 'Qwen-Qwen2.5-VL-7B-Instruct'
+where model_tag = 'google-gemma-4-31B-it'
   and created_at >= now() - interval '30 days';
 ```
 
@@ -154,13 +163,15 @@ where model_tag = 'Qwen-Qwen2.5-VL-7B-Instruct'
   (`source_model` rescue), not another automatic retry.
 - **`model` fails every page with `HF router returned 400: ... "not supported by any provider
   you have enabled"`** — this happened in production with the original default,
-  `Qwen/Qwen2.5-VL-7B-Instruct` (see `.github/workflows/list-hf-models.yml` below). Two
-  different causes produce the exact same message: the model genuinely isn't deployed by any
-  Inference Provider right now, *or* it is, but your account hasn't enabled that provider (check
+  `Qwen/Qwen2.5-VL-7B-Instruct`, and every one of the current dropdown's options was verified
+  by actually clearing this exact check, not by reading a model's page. Two different causes
+  produce the exact same message: the model genuinely isn't deployed by any Inference Provider
+  right now, *or* it is, but your account hasn't enabled that provider (check
   `huggingface.co/settings/inference-providers`) — a model page existing on Hugging Face
-  doesn't guarantee either. Run **Actions → *List available Hugging Face models*** (manual
-  dispatch, `scripts/list_hf_models.py`) to get an authoritative answer instead of guessing from
-  the model's page: it live-tests a batch of trending vision-language models against this
+  doesn't guarantee either. If this happens again (Inference Providers can stop hosting a model
+  with no more notice than Google gave for `gemini-2.5-flash`), run **Actions → *List available
+  Hugging Face models*** (manual dispatch, `scripts/list_hf_models.py`) to get an authoritative
+  answer instead of guessing from the model's page: it live-tests real candidates against this
   account's actual key through the same router endpoint the extraction pipeline uses, and
-  reports which ones genuinely work right now. Set `HF_MODEL` in `extract-pages-hf.yml` to
-  whichever one it confirms.
+  reports which ones genuinely work right now. Set `HF_MODEL` in `extract-pages-hf.yml` (and
+  `scripts/hf_config.py`'s `DEFAULT_HF_MODEL`) to whichever one it confirms.

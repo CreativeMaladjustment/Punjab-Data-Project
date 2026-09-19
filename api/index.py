@@ -111,8 +111,22 @@ MODEL_ROLE_LABELS = {
     # scripts/extract_with_hf.py -- a hosted API via Hugging Face's
     # Inference Providers router, budget-limited (a small monthly dollar
     # credit) rather than rate-limited, so "very small monthly budget" is
-    # the operative caveat here, not a request quota.
-    "Qwen-Qwen2.5-VL-7B-Instruct": "hosted API (Hugging Face), pay-as-you-go · tiny monthly free credit",
+    # the operative caveat here, not a request quota. All 6 below were
+    # confirmed working against the real account key by
+    # scripts/list_hf_models.py (run 35446611937) -- see
+    # scripts/hf_config.py's docstring for why gemma-4-31B-it is the
+    # pipeline's default among them.
+    "google-gemma-4-31B-it": "hosted API (Hugging Face), pay-as-you-go · tiny monthly free credit · default",
+    "google-gemma-4-26B-A4B-it": "hosted API (Hugging Face), pay-as-you-go · tiny monthly free credit",
+    "Qwen-Qwen3.6-27B": "hosted API (Hugging Face), pay-as-you-go · tiny monthly free credit",
+    "Qwen-Qwen3.6-35B-A3B": "hosted API (Hugging Face), pay-as-you-go · tiny monthly free credit",
+    "zai-org-GLM-5.3-Flash": "hosted API (Hugging Face), pay-as-you-go · tiny monthly free credit",
+    "moonshotai-Kimi-K3": "hosted API (Hugging Face), pay-as-you-go · tiny monthly free credit",
+    # Confirmed NOT supported by any provider this account has enabled
+    # (a live 400 from the router, not a guess) -- kept here only so any
+    # rows already in llm_extractions under this tag from before that was
+    # known still render a label instead of falling back to blank.
+    "Qwen-Qwen2.5-VL-7B-Instruct": "hosted API (Hugging Face), pay-as-you-go · confirmed not supported for this account",
 }
 
 # pipeline/schema.md names this flag field "char", but the catalogue_entries

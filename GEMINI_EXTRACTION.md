@@ -56,6 +56,20 @@ inputs:
 | `gemini-3.1-flash-lite` | ~4s between requests | Materially higher free-tier RPM/RPD than flash, per every source describing it. Scheduled twice a day (see above) |
 | `gemini-3.5-flash-lite` | ~4s between requests | Same free-tier ceiling as `3.1-flash-lite` per every source describing it. Scheduled the other two times a day, on its own independent daily quota |
 | `gemini-3.6-flash` | ~4s between requests | Offered for comparison, not currently scheduled; its free tier turned out much tighter than assumed — a full 5-hour run only cleared ~24 pages, almost entirely stuck retrying 429s |
+| `gemini-2.5-flash-lite` | fallback pace (unlisted in `GEMINI_MODEL_PACING`) | RPD 20, same tight tier as `3.6-flash`; manual/rescue only. Google has it slated to shut down 2026-10-16 |
+| `gemini-3.5-flash` | fallback pace | RPD 20; manual/rescue only |
+| `gemini-3.7-flash` | fallback pace | RPD 20; manual/rescue only |
+| `gemini-3.8-flash` | fallback pace | RPD 20; manual/rescue only |
+| `gemini-3-flash-preview` | fallback pace | RPD 20; manual/rescue only; a preview model, so expect more volatility than the non-preview tags |
+
+The five RPD-20 models above aren't in `GEMINI_MODEL_PACING`, so they use the module's
+conservative unlisted-model fallback pace rather than an explicit entry — deliberate, not an
+oversight, since a 20-request daily cap would exhaust in the first page or two of a normal
+run regardless of request pacing; they're offered for a one-off manual dispatch or rescue run,
+never the scheduled backlog. `gemini-2.5-flash` (no `-lite`) is *not* offered at all despite
+Google's own usage dashboard still showing it a nonzero quota row — it's the same generation
+already confirmed retired via the live 404 below; the dashboard quota row apparently persists
+after the model itself stops serving requests.
 
 Google retired the generation this workflow originally shipped with
 (`gemini-2.5-flash`/`-pro`, `gemini-1.5-flash`/`-pro`) — confirmed via a live 404 from the API

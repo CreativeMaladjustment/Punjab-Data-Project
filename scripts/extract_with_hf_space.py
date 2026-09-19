@@ -446,7 +446,7 @@ def call_hf_space(image_bytes, context=""):
         started = time.time()
         job = hf_space_client().submit(
             handle_file(tmp.name),
-            api_name="/predict",
+            api_name="/extract",
         )
         result = job.result(timeout=HF_SPACE_CALL_TIMEOUT_SECONDS)
         print(f"    HF Space response for {context} in {time.time() - started:.1f}s total")

@@ -147,7 +147,7 @@ The model runs **locally on the GitHub Actions runner** via [Ollama](https://oll
 external API, no API key; inference itself stays on-runner, with only page images fetched
 from B2 and extraction results written to Supabase (Postgres) leaving the runner.
 GitHub-hosted runners have no GPU, so this is CPU inference and will be slow per page; the
-job runs as a fixed matrix of 9 parallel workers, each independently claiming and processing
+job runs as a fixed matrix of 2 parallel workers, each independently claiming and processing
 one page at a time from a shared backlog (`claim_next_page()` in
 `scripts/extract_with_llm.py` — see `ARCHITECTURE.md` for the atomic-claiming details). Each
 worker checks its own runtime budget every iteration and exits

@@ -28,7 +28,6 @@ on:
       - "hf_space/**"
       - "pipeline/schema.md"
       - ".github/workflows/sync-hf-space.yml"
-  workflow_dispatch: {}
 
 permissions:
   contents: read

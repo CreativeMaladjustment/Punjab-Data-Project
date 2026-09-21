@@ -16,6 +16,12 @@
 # -- theirs too) just sat in page_ocr_text unused between manual runs.
 # Scheduled 4x/day now so it actually keeps up with what extract-pages.yml
 # and extract-pages-gemini.yml are producing.
+#
+# Runs on a self-hosted runner, not GitHub-hosted -- was a 5-worker matrix
+# on ubuntu-latest, but a self-hosted runner is a single machine you
+# control, not GitHub's shared/ephemeral pool: a 5-job matrix against it
+# would just queue sequentially on one box (or contend for the same Ollama
+# server/GPU) for no benefit, so this is a single, unmatrixed job instead.
 name: Parse structured entries from OCR text
 
 on:
@@ -43,19 +49,13 @@ permissions:
 
 jobs:
   parse:
-    strategy:
-      fail-fast: false
-      # 5 workers -- down from 15. This backlog is now fed continuously by
-      # a 4x/day schedule instead of being a one-off manual catch-up run,
-      # so there's no longer a large standing backlog to clear in one go;
-      # 5 workers keeps each scheduled run quick without holding onto a
-      # disproportionate share of GitHub's 20-job account-wide concurrency
-      # cap against extract-pages.yml's 10 and extract-pages-gemini.yml's
-      # 1 (gemini) + 1 (gemma matrix) -- see extract-pages.yml's own
-      # matrix-size comment for the cap math.
-      matrix:
-        worker: [1, 2, 3, 4, 5]
-    runs-on: ubuntu-latest
+    # self-hosted: no `matrix:` -- see the module comment above for why a
+    # matrix doesn't make sense against one self-owned machine. If you ever
+    # register more than one self-hosted runner for this repo and want to
+    # target a specific one, add its custom label here (e.g.
+    # `[self-hosted, gpu-box]`) -- plain `self-hosted` matches any
+    # registered self-hosted runner, which is fine with just one.
+    runs-on: self-hosted
     timeout-minutes: 350
     environment: b2-upload  # where SUPABASE_DB_URL lives; no B2 secrets are
     # actually used here -- see the module docstring in parse_ocr_text.py.
@@ -70,17 +70,11 @@ jobs:
       TEXT_MODEL_INPUT: ${{ inputs.text_model || 'llama3.1:8b' }}
       OLLAMA_VERSION: "0.34.0"  # keep in sync with extract-pages.yml
     steps:
-      - name: Free runner disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/.ghcup
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          sudo rm -rf /usr/local/share/boost
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          df -h
-
+      # No "free runner disk space" step here -- that only exists in
+      # extract-pages.yml/extract-pages-gemini.yml to clear GitHub-hosted
+      # ubuntu-latest's pre-installed toolchain bloat (a shared, ephemeral
+      # image you don't control); a self-hosted runner is your own machine,
+      # so you manage its disk directly.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -166,7 +160,7 @@ jobs:
       - name: Flag runtime guard trip for manual resume
         if: steps.run.outputs.exit_code == '42'
         run: |
-          echo "### ⏱️ Runtime guard tripped for \`$TEXT_MODEL_INPUT\` (worker ${{ matrix.worker }}) — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ⏱️ Runtime guard tripped for \`$TEXT_MODEL_INPUT\` — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "The run stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"

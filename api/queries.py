@@ -56,6 +56,19 @@ HUMAN_MODEL_TAG = "human:review"
 # as canonical rather than just a cosmetic label.
 PRIMARY_MODEL_TAG = "glm-ocr"
 
+# Mirrors scripts/extract_with_gemini.py's GEMMA_OCR_ONLY_TAGS -- not
+# imported, same rationale as this module's other duplicated constants
+# (that script does real work at import time -- requiring GEMINI_API_KEY --
+# this read-only dashboard has no reason to need). These two tags' 'success'
+# rows are an OCR-completion marker with zero catalogue_entries, never a
+# real extraction verdict: excluded below from PAGES_ANY_EXTRACTED_SQL (a
+# page Gemma merely OCR'd shouldn't count as "has data extracted" until
+# something has actually extracted structured data from it) and from the
+# QC page's needs_review queries further down (an empty entry list has
+# nothing for a person to review). Keep in sync if either script's own set
+# changes.
+GEMMA_OCR_ONLY_TAGS = ("gemma-4-31b-it", "gemma-4-26b-a4b-it")
+
 # One row per model that has ever been run against extract_with_llm.py's
 # structured-entry extraction. status/content_failure mirror the same
 # columns claim_next_page() and process_page() write -- see
@@ -188,6 +201,7 @@ PAGES_ANY_EXTRACTED_SQL = """
     FROM llm_extractions le
     JOIN pages p ON p.id = le.page_id
     WHERE le.status = 'success'
+      AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
       AND p.image_uploaded_at IS NOT NULL
       AND p.excluded_at IS NULL
 """
@@ -200,7 +214,7 @@ def fetch_dashboard_data(conn):
         cur.execute(TOTAL_PAGES_SQL)
         (total_pages,) = cur.fetchone()
 
-        cur.execute(PAGES_ANY_EXTRACTED_SQL)
+        cur.execute(PAGES_ANY_EXTRACTED_SQL, {"gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS)})
         (any_extracted_pages,) = cur.fetchone()
 
         cur.execute(
@@ -538,7 +552,7 @@ QC_FIRST_ID_SQL = """
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
           AND (
-            (le.status = 'success' AND NOT EXISTS (
+            (le.status = 'success' AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s) AND NOT EXISTS (
                 SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
             ))
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
@@ -554,7 +568,7 @@ QC_NEXT_ID_SQL = """
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
           AND (
-            (le.status = 'success' AND NOT EXISTS (
+            (le.status = 'success' AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s) AND NOT EXISTS (
                 SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
             ))
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
@@ -570,7 +584,7 @@ QC_PREV_ID_SQL = """
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
           AND (
-            (le.status = 'success' AND NOT EXISTS (
+            (le.status = 'success' AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s) AND NOT EXISTS (
                 SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
             ))
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
@@ -594,7 +608,7 @@ QC_POSITION_SQL = """
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
           AND (
-            (le.status = 'success' AND NOT EXISTS (
+            (le.status = 'success' AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s) AND NOT EXISTS (
                 SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
             ))
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
@@ -614,7 +628,7 @@ QC_ID_AT_RANK_SQL = """
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
           AND (
-            (le.status = 'success' AND NOT EXISTS (
+            (le.status = 'success' AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s) AND NOT EXISTS (
                 SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
             ))
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
@@ -729,6 +743,7 @@ def fetch_qc_page(conn, page_id, model_tag=None, needs_review=False):
             "needs_review": needs_review,
             "human_tag": HUMAN_MODEL_TAG,
             "max_attempts": MAX_ATTEMPTS_PER_PAGE,
+            "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
         }
         cur.execute(QC_NEXT_ID_SQL, nav_params)
         (next_id,) = cur.fetchone()
@@ -760,7 +775,12 @@ def fetch_qc_first_id(conn, needs_review=False):
     with conn.cursor() as cur:
         cur.execute(
             QC_FIRST_ID_SQL,
-            {"needs_review": needs_review, "human_tag": HUMAN_MODEL_TAG, "max_attempts": MAX_ATTEMPTS_PER_PAGE},
+            {
+                "needs_review": needs_review,
+                "human_tag": HUMAN_MODEL_TAG,
+                "max_attempts": MAX_ATTEMPTS_PER_PAGE,
+                "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
+            },
         )
         (first_id,) = cur.fetchone()
     return first_id
@@ -788,6 +808,7 @@ def fetch_qc_position(conn, page_id, needs_review=False):
                 "needs_review": needs_review,
                 "human_tag": HUMAN_MODEL_TAG,
                 "max_attempts": MAX_ATTEMPTS_PER_PAGE,
+                "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
             },
         )
         (rank, total) = cur.fetchone()
@@ -808,6 +829,7 @@ def fetch_qc_id_at_rank(conn, rank, needs_review=False):
                 "needs_review": needs_review,
                 "human_tag": HUMAN_MODEL_TAG,
                 "max_attempts": MAX_ATTEMPTS_PER_PAGE,
+                "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
                 "offset": rank - 1,
             },
         )

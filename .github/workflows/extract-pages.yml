@@ -105,14 +105,17 @@ jobs:
       # room for extract-pages-gemini.yml's extract-gemma-matrix job, which
       # at the time ran 8 workers each for gemma-4-31b-it/gemma-4-26b-a4b-it
       # (scheduled 4x/day) -- without either matrix queuing the other out
-      # when their schedules land close together. That job has since been
-      # cut to 1 worker (see its own module comment: both Gemma tags were
-      # failing almost every page against Google's backend regardless of
-      # worker count), freeing enough of the 20-job cap back up to raise
-      # this to 10 -- 10 + gemini's own single-worker `extract` job + gemma-
-      # matrix's now-1 worker stays comfortably under 20 even when all three
-      # workflows' schedules overlap. See extract-pages-gemini.yml's own
-      # module comment for the exact hours each model runs.
+      # when their schedules land close together. That job was cut to 1
+      # worker (see its own module comment: both Gemma tags were failing
+      # almost every page against Google's backend regardless of worker
+      # count), freeing enough of the 20-job cap back up to raise this to
+      # 10, then raised back to 5 once the same module comment's fix
+      # (dropping the JSON-mode call, OCR-only now) gave reason to expect
+      # better throughput -- 10 + gemini's own single-worker `extract` job
+      # + gemma-matrix's 5 workers is 16, still comfortably under 20 even
+      # when all three workflows' schedules overlap. See
+      # extract-pages-gemini.yml's own module comment for the exact hours
+      # each model runs.
       matrix:
         worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     runs-on: ubuntu-latest

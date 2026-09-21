@@ -96,6 +96,17 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 OLLAMA_MODEL = os.environ["OLLAMA_MODEL"]
 MODEL_TAG = re.sub(r"[^A-Za-z0-9._-]", "-", OLLAMA_MODEL)
 
+# Mirrors extract_with_gemini.py's GEMMA_OCR_ONLY_TAGS -- not imported, same
+# rationale as this module's other duplicated constants (importing
+# extract_with_gemini.py would require GEMINI_API_KEY at import time, which
+# this Ollama-only script has no reason to need). These two tags' 'success'
+# rows are an OCR-completion marker with zero catalogue_entries, never a
+# real extraction verdict -- see _SKIP_ALREADY_EXTRACTED_FILTER below, which
+# excludes them so a page Gemma has merely OCR'd (but nothing has actually
+# extracted structured data from yet) doesn't look "already covered" to
+# every other model's default run.
+GEMMA_OCR_ONLY_TAGS = ("gemma-4-31b-it", "gemma-4-26b-a4b-it")
+
 # See the module docstring's "rescue mode" section. Slugified the same way
 # as MODEL_TAG so it matches whatever tag that source model's own run
 # actually wrote to llm_extractions.model_tag.
@@ -433,6 +444,7 @@ _SKIP_ALREADY_EXTRACTED_FILTER = """
                 AND NOT EXISTS (
                   SELECT 1 FROM llm_extractions any_le
                   WHERE any_le.page_id = p.id AND any_le.status = 'success'
+                    AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
                 )""" if not ALLOW_ALREADY_EXTRACTED else ""
 
 CLAIM_NEXT_PAGE_SQL = """
@@ -566,6 +578,9 @@ def claim_next_page(model, model_tag, claim_timeout_seconds):
         # Unused (and harmless) when _SOURCE_CAPPED_FILTER is "" -- psycopg2
         # ignores named params the query text doesn't reference.
         "source_model_tag": SOURCE_MODEL_TAG,
+        # Same "harmless when unreferenced" rule -- unused when
+        # ALLOW_ALREADY_EXTRACTED made _SKIP_ALREADY_EXTRACTED_FILTER "".
+        "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
     }
     with db_connection() as conn:
         for _ in range(CLAIM_MAX_ATTEMPTS):

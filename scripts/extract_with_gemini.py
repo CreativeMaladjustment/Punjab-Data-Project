@@ -375,6 +375,7 @@ CLAIM_NEXT_PAGE_SQL = """
                OR NOT EXISTS (
                  SELECT 1 FROM llm_extractions any_le
                  WHERE any_le.page_id = p.id AND any_le.status = 'success'
+                   AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
                )
              ))
             OR (le.status = 'claimed'
@@ -440,6 +441,7 @@ PENDING_EXISTS_SQL = """
                OR NOT EXISTS (
                  SELECT 1 FROM llm_extractions any_le
                  WHERE any_le.page_id = p.id AND any_le.status = 'success'
+                   AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
                )
              ))
             OR le.status = 'claimed'
@@ -476,6 +478,13 @@ def claim_next_page():
         "max_attempts": MAX_ATTEMPTS_PER_PAGE,
         "source_model_tag": SOURCE_MODEL_TAG,
         "allow_already_extracted": ALLOW_ALREADY_EXTRACTED,
+        # These two tags' own 'success' rows are an OCR-completion marker
+        # with zero catalogue_entries, not a real extraction verdict -- see
+        # GEMMA_OCR_ONLY_TAGS' comment -- so they're excluded from the
+        # any_le check above: a page Gemma merely OCR'd (nothing has
+        # actually extracted structured data from yet) shouldn't look
+        # "already covered" to gemini-3.1/3.5-flash-lite's own default run.
+        "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
     }
     with db_connection() as conn:
         for _ in range(CLAIM_MAX_ATTEMPTS):

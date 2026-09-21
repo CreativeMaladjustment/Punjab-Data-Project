@@ -79,6 +79,14 @@ HF_SPACE_ID = os.environ.get("HF_SPACE_ID", "floutenvy/Punjab-Data-Project")
 MODEL = "HF Space (ZeroGPU): floutenvy/Punjab-Data-Project"
 MODEL_TAG = "hf-space-zerogpu"
 
+# Mirrors extract_with_gemini.py's GEMMA_OCR_ONLY_TAGS -- not imported, same
+# rationale as this module's other duplicated constants. These two tags'
+# 'success' rows are an OCR-completion marker with zero catalogue_entries,
+# never a real extraction verdict -- excluded below from the any_le check
+# so a page Gemma has merely OCR'd doesn't look "already covered" to this
+# script's own default (ALLOW_ALREADY_EXTRACTED=false) claim.
+GEMMA_OCR_ONLY_TAGS = ("gemma-4-31b-it", "gemma-4-26b-a4b-it")
+
 # See extract_with_llm.py's own SOURCE_MODEL/rescue-mode comment -- same
 # mechanic, provider-agnostic: model_tag alone decides what's rescuable, so
 # this can rescue an Ollama/Gemini/HF-Inference-Providers model's capped
@@ -256,6 +264,7 @@ CLAIM_NEXT_PAGE_SQL = """
                OR NOT EXISTS (
                  SELECT 1 FROM llm_extractions any_le
                  WHERE any_le.page_id = p.id AND any_le.status = 'success'
+                   AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
                )
              ))
             OR (le.status = 'claimed'
@@ -321,6 +330,7 @@ PENDING_EXISTS_SQL = """
                OR NOT EXISTS (
                  SELECT 1 FROM llm_extractions any_le
                  WHERE any_le.page_id = p.id AND any_le.status = 'success'
+                   AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
                )
              ))
             OR le.status = 'claimed'
@@ -356,6 +366,7 @@ def claim_next_page():
         "max_attempts": MAX_ATTEMPTS_PER_PAGE,
         "source_model_tag": SOURCE_MODEL_TAG,
         "allow_already_extracted": ALLOW_ALREADY_EXTRACTED,
+        "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
     }
     with db_connection() as conn:
         for _ in range(CLAIM_MAX_ATTEMPTS):

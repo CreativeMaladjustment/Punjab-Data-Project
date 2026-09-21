@@ -1,31 +1,52 @@
 # Same job as parse-ocr-text.yml (backfills structured catalogue entries
 # from already-successful full-page OCR transcriptions -- see
 # scripts/parse_ocr_text.py's module docstring for the full reasoning), but
-# on a self-hosted runner instead of GitHub-hosted ubuntu-latest, as a
-# second, independent workflow rather than a change to that one -- both can
-# run concurrently without conflict (scripts/parse_ocr_text.py's
-# claim_next_page() uses `FOR UPDATE SKIP LOCKED`, the same safe-for-
-# concurrent-workers pattern every extraction script in this repo relies
-# on), so this is pure additional throughput on top of parse-ocr-text.yml,
-# not a replacement for it.
+# on the same self-hosted runner extract-pages-local.yml already targets,
+# as a second, independent workflow rather than a change to that one --
+# both parse-ocr-text.yml and this one can run concurrently without
+# conflict (scripts/parse_ocr_text.py's claim_next_page() uses `FOR UPDATE
+# SKIP LOCKED`, the same safe-for-concurrent-workers pattern every
+# extraction script in this repo relies on), so this is pure additional
+# throughput on top of parse-ocr-text.yml, not a replacement for it.
 #
-# No `matrix:` here -- a self-hosted runner is a single machine you
-# control, not GitHub's shared/ephemeral pool: a multi-job matrix against
-# it would just queue sequentially on the same box (or contend for the same
-# local Ollama server) for no benefit, unlike parse-ocr-text.yml's matrix
-# fanning out across GitHub's separate hosted runners.
+# Everything below the trigger mirrors extract-pages-local.yml's own
+# conventions for that same runner rather than parse-ocr-text.yml's
+# GitHub-hosted steps -- confirmed (via that workflow's own comments) to be
+# macOS, a real persistent machine, not an ephemeral Linux VM:
+#   - No matrix: a self-hosted runner is a single machine you control, not
+#     GitHub's shared pool, so a multi-job matrix against it would just
+#     queue sequentially on the same box (or contend for the same local
+#     Ollama server) for no benefit.
+#   - No "free runner disk space" step: that only clears GitHub-hosted
+#     ubuntu-latest's pre-installed toolchain bloat on a shared image you
+#     don't control.
+#   - No `curl -fsSL https://ollama.com/install.sh` / actions/cache for the
+#     Ollama binary: that's the Linux installer, and it also silently
+#     modifies a persistent machine on every cache miss -- installing
+#     system software on your own machine without you doing it yourself
+#     once, deliberately, isn't something CI should do. "Verify Ollama is
+#     installed" below fails with instructions instead, exactly matching
+#     extract-pages-local.yml.
+#   - No actions/setup-python: its tool-cache step creates
+#     $RUNNER_TOOL_CACHE under /Users/runner/hostedtoolcache, a GitHub-
+#     hosted-macOS-runner-only path this self-hosted runner doesn't set --
+#     extract-pages-local.yml confirmed this fails outright ("mkdir:
+#     /Users/runner: Permission denied") on this exact runner. "Verify
+#     Python 3 is installed" + a venv below matches that workflow instead.
+#   - No actions/cache for the Ollama model either: `~/.ollama` already
+#     persists on local disk between runs on a real machine.
 #
-# Same 4x/day schedule as parse-ocr-text.yml, offset by nothing -- both
-# fire together and each just claims whatever pages are still available;
-# change this independently if you want different cadences for the two.
+# Trigger: schedule (not workflow_dispatch-only like extract-pages-local.yml)
+# is a deliberate difference, not an oversight -- that workflow's own
+# security note is specifically about never adding a pull_request (or any
+# fork-reachable) trigger to a workflow targeting a self-hosted runner,
+# since a fork PR author could then run arbitrary code on your machine.
+# `schedule` isn't fork-reachable (only this repo's own committed cron,
+# evaluated by GitHub against the default branch) and carries none of that
+# risk, so it's kept here to match parse-ocr-text.yml's own cadence.
 name: Parse structured entries from OCR text (self-hosted)
 
 on:
-  # See extract-pages.yml's own schedule comment for why every `inputs.*`
-  # reference below (not just this job-level env var, but the cache key and
-  # step env further down too -- a schedule event's `inputs` context is
-  # empty) carries the same `|| 'llama3.1:8b'` fallback repeated verbatim,
-  # reapplying the input's own declared default for a scheduled run.
   schedule:
     - cron: "0 2,8,14,20 * * *"
   workflow_dispatch:
@@ -45,11 +66,10 @@ permissions:
 
 jobs:
   parse:
-    # self-hosted: no `matrix:` -- see the module comment above. If you ever
-    # register more than one self-hosted runner for this repo and want to
-    # target a specific one, add its custom label here (e.g.
-    # `[self-hosted, gpu-box]`) -- plain `self-hosted` matches any
-    # registered self-hosted runner, which is fine with just one.
+    # Matches any self-hosted runner registered to this repo -- fine while
+    # there's exactly one (see extract-pages-local.yml's own comment on
+    # this same choice). If a second is ever added, narrow this to a
+    # distinguishing label.
     runs-on: self-hosted
     timeout-minutes: 350
     environment: b2-upload  # where SUPABASE_DB_URL lives; no B2 secrets are
@@ -58,67 +78,31 @@ jobs:
       # Routed through an env var rather than interpolating
       # ${{ inputs.text_model }} directly into run: scripts (Semgrep:
       # yaml.github-actions.security.run-shell-injection) -- same pattern
-      # extract-pages.yml uses for inputs.model. `|| 'llama3.1:8b'`
+      # parse-ocr-text.yml uses for inputs.text_model. `|| 'llama3.1:8b'`
       # reapplies the input's own declared default for a schedule-triggered
       # run, whose `inputs` context is empty -- without this a scheduled
       # run would try `ollama pull ""` and fail outright.
       TEXT_MODEL_INPUT: ${{ inputs.text_model || 'llama3.1:8b' }}
-      OLLAMA_VERSION: "0.34.0"  # keep in sync with extract-pages.yml
     steps:
-      # No "free runner disk space" step here -- that only exists in
-      # extract-pages.yml/extract-pages-gemini.yml/parse-ocr-text.yml to
-      # clear GitHub-hosted ubuntu-latest's pre-installed toolchain bloat on
-      # a shared image you don't control; a self-hosted runner is your own
-      # machine, so you manage its disk directly.
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Cache Ollama binary
-        id: cache-ollama-bin
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cache/ollama-bin
-          key: ollama-bin-${{ env.OLLAMA_VERSION }}
-
-      - name: Restore Ollama binary from cache
-        if: steps.cache-ollama-bin.outputs.cache-hit == 'true'
+      - name: Verify Ollama is installed
+        # Intentionally does not auto-install -- see extract-pages-local.yml's
+        # own comment on this exact step.
         run: |
-          sudo mkdir -p /usr/local/lib/ollama
-          sudo cp ~/.cache/ollama-bin/ollama /usr/local/bin/ollama
-          sudo chmod 755 /usr/local/bin/ollama
-          sudo cp -r ~/.cache/ollama-bin/lib/. /usr/local/lib/ollama/
-          command -v ollama
-
-      - name: Install Ollama
-        if: steps.cache-ollama-bin.outputs.cache-hit != 'true'
-        run: |
-          for attempt in 1 2 3 4 5; do
-            if curl -fsSL https://ollama.com/install.sh -o install-ollama.sh && sh install-ollama.sh; then
-              exit 0
-            fi
-            echo "Ollama install attempt $attempt failed"
-            if [ "$attempt" -lt 5 ]; then
-              sleep $((2 ** attempt))
-            fi
-          done
-          echo "Ollama install failed after 5 attempts"
-          exit 1
-
-      - name: Populate Ollama binary cache
-        if: steps.cache-ollama-bin.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p ~/.cache/ollama-bin/lib
-          cp /usr/local/bin/ollama ~/.cache/ollama-bin/ollama
-          cp -r /usr/local/lib/ollama/. ~/.cache/ollama-bin/lib/
-
-      - name: Cache Ollama model
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.ollama
-          key: ollama-model-${{ inputs.text_model || 'llama3.1:8b' }}
+          if ! command -v ollama >/dev/null 2>&1; then
+            echo "Ollama not found on PATH. Install it yourself first (e.g. 'brew install ollama' or https://ollama.com/download), then re-run this workflow."
+            exit 1
+          fi
+          ollama --version
 
       - name: Start Ollama server
         run: |
+          if curl -sf http://localhost:11434/api/tags > /dev/null 2>&1; then
+            echo "Ollama server already running -- reusing it"
+            exit 0
+          fi
           nohup ollama serve > ollama.log 2>&1 &
           for i in $(seq 1 30); do
             curl -sf http://localhost:11434/api/tags > /dev/null && exit 0
@@ -129,15 +113,24 @@ jobs:
       - name: Pull model
         run: ollama pull "$TEXT_MODEL_INPUT"
 
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
-        with:
-          python-version: "3.x"
-          cache: pip
-          cache-dependency-path: scripts/requirements.txt
+      - name: Verify Python 3 is installed
+        # Not actions/setup-python -- see the module comment above (and
+        # extract-pages-local.yml's identical step) for why it fails on
+        # this runner.
+        run: |
+          if ! command -v python3 >/dev/null 2>&1; then
+            echo "python3 not found on PATH. Install it yourself first (e.g. 'brew install python3'), then re-run this workflow."
+            exit 1
+          fi
+          python3 --version
 
       - name: Install Python dependencies
-        run: pip install -r scripts/requirements.txt
+        # A venv, not a bare `pip install` -- see extract-pages-local.yml's
+        # own comment on this same step (persistent, shared machine; newer
+        # Homebrew Python's "externally-managed-environment" pip refusal).
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install -r scripts/requirements.txt
 
       - name: Run OCR-text parsing
         id: run
@@ -148,14 +141,14 @@ jobs:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           set +e
-          python scripts/parse_ocr_text.py
+          .venv/bin/python scripts/parse_ocr_text.py
           echo "exit_code=$?" >> "$GITHUB_OUTPUT"
           set -e
 
       - name: Flag runtime guard trip for manual resume
         if: steps.run.outputs.exit_code == '42'
         run: |
-          echo "### ⏱️ Runtime guard tripped for \`$TEXT_MODEL_INPUT\` — resume needed" >> "$GITHUB_STEP_SUMMARY"
+          echo "### ⏱️ Runtime guard tripped for \`$TEXT_MODEL_INPUT\` (self-hosted) — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "The run stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"

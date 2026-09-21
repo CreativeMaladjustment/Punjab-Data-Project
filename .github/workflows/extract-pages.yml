@@ -92,9 +92,9 @@ jobs:
   extract:
     strategy:
       fail-fast: false
-      # 10 parallel workers -- each independently claims and processes pages
+      # 5 parallel workers -- each independently claims and processes pages
       # (see scripts/extract_with_llm.py's claim_next_page()), so this
-      # fans the backlog out across 10 runners without either stepping on
+      # fans the backlog out across 5 runners without either stepping on
       # the other's pages.
       #
       # GitHub-hosted ubuntu-latest runners share a single account-wide
@@ -109,15 +109,15 @@ jobs:
       # worker (see its own module comment: both Gemma tags were failing
       # almost every page against Google's backend regardless of worker
       # count), freeing enough of the 20-job cap back up to raise this to
-      # 10, then raised back to 5 once the same module comment's fix
-      # (dropping the JSON-mode call, OCR-only now) gave reason to expect
-      # better throughput -- 10 + gemini's own single-worker `extract` job
-      # + gemma-matrix's 5 workers is 16, still comfortably under 20 even
-      # when all three workflows' schedules overlap. See
+      # 10, then brought down to 5 -- matching gemma-matrix's own 5 once it
+      # was raised back up on the same module comment's fix (dropping the
+      # JSON-mode call, OCR-only now). 5 + gemini's own single-worker
+      # `extract` job + gemma-matrix's 5 workers is 11, comfortably under
+      # 20 even when all three workflows' schedules overlap. See
       # extract-pages-gemini.yml's own module comment for the exact hours
       # each model runs.
       matrix:
-        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        worker: [1, 2, 3, 4, 5]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload

@@ -48,6 +48,18 @@ extract_with_llm.py beyond swapping Ollama for Gemini:
     the accounting for "how much quota does one page cost" already
     reflects two calls, not one.
 
+    Exception: GEMMA_OCR_ONLY_TAGS below (gemma-4-31b-it, gemma-4-26b-a4b-
+    it) skip the second call entirely -- live runs showed gemini_generate()
+    (the JSON-mode structured-extraction call) succeeding on 0 of several
+    hundred real attempts across both tags, while the plain-text OCR call
+    succeeded on roughly half. Gemma served this way evidently doesn't
+    reliably honor generationConfig.responseMimeType: "application/json" --
+    it responds with prose reasoning about the page instead. So these two
+    tags are OCR-only: one call per page, and their actual catalogue-entry
+    contribution comes later, via scripts/parse_ocr_text.py's textparse:*
+    pipeline reading their page_ocr_text rows with a text-only (non-vision)
+    model that's already proven to honor JSON mode reliably.
+
 Default candidate selection, rescue mode (SOURCE_MODEL), and
 ALLOW_ALREADY_EXTRACTED all work exactly like extract_with_llm.py's own --
 see that module's docstring for the full reasoning; duplicated here rather
@@ -841,6 +853,14 @@ def is_content_failure(exc):
     return getattr(exc, "raw_text", None) is not None
 
 
+# See the module docstring's "rate limits" section, the OCR-only exception
+# there. Both tags' gemini_generate() success rate was 0 across live runs
+# (hundreds of real attempts) -- Gemma served this way doesn't reliably
+# honor JSON mode -- so structured extraction is skipped for them entirely;
+# process_page() below branches on this set.
+GEMMA_OCR_ONLY_TAGS = {"gemma-4-31b-it", "gemma-4-26b-a4b-it"}
+
+
 def process_page(clients, claim):
     """Extract one already-claimed page. See extract_with_llm.py's
     process_page() -- identical shape, including the full-page OCR call,
@@ -877,6 +897,26 @@ def process_page(clients, claim):
         except Exception as exc:
             exc.b2_download_failure = True
             raise
+
+        if MODEL_TAG in GEMMA_OCR_ONLY_TAGS:
+            # OCR *is* the whole job for these two tags -- see
+            # GEMMA_OCR_ONLY_TAGS' comment above. Unlike the best-effort OCR
+            # call further down (which can't fail the page, since
+            # gemini_generate() alone decides success/failure there), a
+            # failure here IS the page's failure: there's no second call to
+            # fall back on, so it propagates to the except block below like
+            # any other page failure.
+            page_text = gemini_ocr_full_page(image_bytes, context=context)
+            db_save_page_ocr_text(page_id, GEMINI_MODEL, MODEL_TAG, page_text)
+            # Zero entries deliberately -- see GEMMA_OCR_ONLY_TAGS' comment.
+            # This llm_extractions row exists only so claim_next_page()'s
+            # existing claim/retry machinery keeps working unchanged (a
+            # 'success' row is never reclaimed); it never carries real
+            # catalogue data for these two tags.
+            db_save_extraction_success(page_id, [], page_text)
+            print(f"done (OCR-only): {context}")
+            return True, False, False
+
         # Full-page OCR: independent of the structured extraction below --
         # best-effort, and deliberately not allowed to affect this page's
         # success/failure/retry accounting (MAX_ATTEMPTS_PER_PAGE,

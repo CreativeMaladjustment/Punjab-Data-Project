@@ -8,9 +8,24 @@
 # output is Postgres writes -- so no B2 secrets are used here at all, and
 # there's no image-decode/vision-token cost, just a much cheaper text-only
 # Ollama call per page.
+#
+# Was workflow_dispatch-only, so this backfill only ever ran when someone
+# remembered to trigger it by hand -- meaning OCR text from every model
+# (glm-ocr's own, and since extract-pages-gemini.yml's gemma-4-31b-it/
+# gemma-4-26b-a4b-it went OCR-only -- see that script's GEMMA_OCR_ONLY_TAGS
+# -- theirs too) just sat in page_ocr_text unused between manual runs.
+# Scheduled 4x/day now so it actually keeps up with what extract-pages.yml
+# and extract-pages-gemini.yml are producing.
 name: Parse structured entries from OCR text
 
 on:
+  # See extract-pages.yml's own schedule comment for why every `inputs.*`
+  # reference below (not just this job-level env var, but the cache key and
+  # step env further down too -- a schedule event's `inputs` context is
+  # empty) carries the same `|| 'llama3.1:8b'` fallback repeated verbatim,
+  # reapplying the input's own declared default for a scheduled run.
+  schedule:
+    - cron: "0 2,8,14,20 * * *"
   workflow_dispatch:
     inputs:
       text_model:
@@ -30,13 +45,16 @@ jobs:
   parse:
     strategy:
       fail-fast: false
-      # 15 workers -- single-worker throughput was slower than wanted for
-      # the size of this backlog. A text-only call is still much faster per
-      # page than the vision pass (no image decode, no vision tokens), so
-      # this clears noticeably faster than extract-pages.yml's own even at
-      # fewer than its 18 workers.
+      # 5 workers -- down from 15. This backlog is now fed continuously by
+      # a 4x/day schedule instead of being a one-off manual catch-up run,
+      # so there's no longer a large standing backlog to clear in one go;
+      # 5 workers keeps each scheduled run quick without holding onto a
+      # disproportionate share of GitHub's 20-job account-wide concurrency
+      # cap against extract-pages.yml's 10 and extract-pages-gemini.yml's
+      # 1 (gemini) + 1 (gemma matrix) -- see extract-pages.yml's own
+      # matrix-size comment for the cap math.
       matrix:
-        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        worker: [1, 2, 3, 4, 5]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload  # where SUPABASE_DB_URL lives; no B2 secrets are
@@ -45,8 +63,11 @@ jobs:
       # Routed through an env var rather than interpolating
       # ${{ inputs.text_model }} directly into run: scripts (Semgrep:
       # yaml.github-actions.security.run-shell-injection) -- same pattern
-      # extract-pages.yml uses for inputs.model.
-      TEXT_MODEL_INPUT: ${{ inputs.text_model }}
+      # extract-pages.yml uses for inputs.model. `|| 'llama3.1:8b'`
+      # reapplies the input's own declared default for a schedule-triggered
+      # run, whose `inputs` context is empty -- without this a scheduled
+      # run would try `ollama pull ""` and fail outright.
+      TEXT_MODEL_INPUT: ${{ inputs.text_model || 'llama3.1:8b' }}
       OLLAMA_VERSION: "0.34.0"  # keep in sync with extract-pages.yml
     steps:
       - name: Free runner disk space
@@ -105,7 +126,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.ollama
-          key: ollama-model-${{ inputs.text_model }}
+          key: ollama-model-${{ inputs.text_model || 'llama3.1:8b' }}
 
       - name: Start Ollama server
         run: |
@@ -133,7 +154,7 @@ jobs:
         id: run
         env:
           PYTHONUNBUFFERED: "1"
-          TEXT_MODEL: ${{ inputs.text_model }}
+          TEXT_MODEL: ${{ inputs.text_model || 'llama3.1:8b' }}
           MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |

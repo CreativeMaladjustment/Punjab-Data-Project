@@ -19,8 +19,8 @@
 # quota (see the four `cron:` entries below, matched at run time via
 # github.event.schedule in each job's env: block):
 #
-#   - gemini-3.1-flash-lite: hours 4, 16 (twice a day, RPD 500) -- `extract` job, single worker
-#   - gemini-3.5-flash-lite: hours 10, 22 (twice a day, RPD 500) -- `extract` job, single worker
+#   - gemini-3.1-flash-lite: hours 1, 7, 13, 19 (four times a day, RPD 500) -- `extract` job, single worker
+#   - gemini-3.5-flash-lite: hours 3, 9, 15, 21 (four times a day, RPD 500) -- `extract` job, single worker
 #   - gemma-4-31b-it: hours 0, 6, 12, 18 (four times a day, RPD 14,400) -- `extract-gemma-matrix` job, 5 workers
 #   - gemma-4-26b-a4b-it: hours 1, 7, 13, 19 (four times a day, RPD 14,400) -- `extract-gemma-matrix` job, 5 workers
 #
@@ -139,10 +139,10 @@ on:
   # decides whether to run at all) by matching github.event.schedule
   # against whichever of these four strings fired.
   schedule:
-    - cron: "0 4,16 * * *"      # gemini-3.1-flash-lite
-    - cron: "0 10,22 * * *"     # gemini-3.5-flash-lite
-    - cron: "0 0,6,12,18 * * *" # gemma-4-31b-it (1-worker matrix, OCR-only)
-    - cron: "0 1,7,13,19 * * *" # gemma-4-26b-a4b-it (1-worker matrix, OCR-only)
+    - cron: "0 1,7,13,19 * * *"  # gemini-3.1-flash-lite
+    - cron: "0 3,9,15,21 * * *"  # gemini-3.5-flash-lite
+    - cron: "0 0,6,12,18 * * *"  # gemma-4-31b-it (5-worker matrix, OCR-only)
+    - cron: "0 1,7,13,19 * * *"  # gemma-4-26b-a4b-it (5-worker matrix, OCR-only)
   workflow_dispatch:
     inputs:
       model:
@@ -259,7 +259,7 @@ jobs:
       # (its own cron string) and the final fallback, since this job's
       # `if:` above already guarantees any schedule event reaching here
       # fired one of only two possible strings.
-      GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 10,22 * * *' && 'gemini-3.5-flash-lite' || 'gemini-3.1-flash-lite') }}
+      GEMINI_MODEL: ${{ inputs.model || ((github.event.schedule == '0 3,9,15,21 * * *') && 'gemini-3.5-flash-lite' || 'gemini-3.1-flash-lite') }}
       SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
       ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
     steps:

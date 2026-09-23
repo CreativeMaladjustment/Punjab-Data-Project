@@ -37,17 +37,7 @@
 name: Extract catalogue entries with Hugging Face
 
 on:
-  # Once a week (Mondays at 04:00 UTC, same anchor hour as
-  # extract-pages.yml's and extract-pages-gemini.yml's own schedules)
-  # rather than every 6 hours like the other two extraction workflows --
-  # the monthly credit here is tiny enough ($0.10 free tier) that running
-  # more often than weekly just means more runs finding no credit left,
-  # not more pages processed. Most scheduled runs after the monthly
-  # credit is spent will exit within seconds on the first 402 (see the
-  # module docstring above), so this doesn't cost meaningful runner time
-  # even when there's no credit left to use.
-  schedule:
-    - cron: "0 4 * * 1"
+  # Scheduled cron disabled; manual workflow_dispatch only.
   workflow_dispatch:
     inputs:
       model:

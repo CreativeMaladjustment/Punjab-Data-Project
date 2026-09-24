@@ -15,14 +15,13 @@
 # pacing below (scripts/extract_with_gemini.py's GEMINI_MODEL_PACING)
 # still matches -- Google revises these, sometimes sharply.
 #
-# Four models are scheduled, each on its own independent free-tier daily
-# quota (see the four `cron:` entries below, matched at run time via
-# github.event.schedule in each job's env: block):
+# Scheduled models on independent free-tier daily quotas (see `cron:` entries below,
+# matched at run time via github.event.schedule in each job's env: block):
 #
 #   - gemini-3.1-flash-lite: hours 4, 16 (twice a day, RPD 500) -- `extract` job, single worker
 #   - gemini-3.5-flash-lite: hours 10, 22 (twice a day, RPD 500) -- `extract` job, single worker
-#   - gemma-4-31b-it: hours 0, 3, 6, 9, 12, 15, 18, 21 (8 times a day, RPD 14,400) -- `extract-gemma-matrix` job, 5 workers
-#   - gemma-4-26b-a4b-it: hours 1, 4, 7, 10, 13, 16, 19, 22 (8 times a day, RPD 14,400) -- `extract-gemma-matrix` job, 5 workers
+#   - gemma-4-26b-a4b-it: hours 0, 3, 6, 9, 12, 15, 18, 21 (8 times a day, RPD 14,400) -- `extract-gemma-matrix` job, 6 workers
+#   - gemma-4-31b-it: manual workflow_dispatch trigger only (0 scheduled runs)
 #
 # None of the twelve resulting daily runs share a clock hour -- the two
 # Gemma models are offset from each other by one hour (0-vs-1, 6-vs-7,
@@ -141,8 +140,7 @@ on:
   schedule:
     - cron: "0 4,16 * * *"                 # gemini-3.1-flash-lite
     - cron: "0 10,22 * * *"                # gemini-3.5-flash-lite
-    - cron: "0 0,3,6,9,12,15,18,21 * * *"  # gemma-4-31b-it (5-worker matrix, OCR-only)
-    - cron: "0 1,4,7,10,13,16,19,22 * * *" # gemma-4-26b-a4b-it (5-worker matrix, OCR-only)
+    - cron: "0 0,3,6,9,12,15,18,21 * * *"  # gemma-4-26b-a4b-it (6-worker matrix, OCR-only)
   workflow_dispatch:
     inputs:
       model:
@@ -234,8 +232,7 @@ jobs:
     # every trigger must match exactly one of the two jobs, never both,
     # never neither.
     if: >-
-      github.event.schedule != '0 0,6,12,18 * * *' &&
-      github.event.schedule != '0 1,7,13,19 * * *' &&
+      github.event.schedule != '0 0,3,6,9,12,15,18,21 * * *' &&
       inputs.model != 'gemma-4-31b-it' &&
       inputs.model != 'gemma-4-26b-a4b-it'
     runs-on: ubuntu-latest
@@ -320,29 +317,20 @@ jobs:
         run: exit 1
 
   extract-gemma-matrix:
-    # 5 workers -- was 8, cut to 1 after live runs showed both Gemma tags
-    # failing almost every page with 500/503 from Google's own backend
-    # (see the module comment above for the details and the pacing
-    # derivation), raised back up to 5 now that gemini_generate() has been
-    # dropped for these two tags (one OCR-only call per page instead of
-    # two) and the read timeout raised to 600s. Each worker independently
-    # claims and processes pages (see extract_with_gemini.py's
-    # claim_next_page(), built on `FOR UPDATE ... SKIP LOCKED`, the same
-    # safe-for-concurrent-workers pattern extract-pages.yml's own matrix
-    # relies on).
+    # 6 workers -- each worker independently claims and processes pages
+    # (see extract_with_gemini.py's claim_next_page(), built on `FOR UPDATE
+    # ... SKIP LOCKED`, the same safe-for-concurrent-workers pattern
+    # extract-pages.yml's own matrix relies on).
     #
-    # Only runs for the two Gemma models -- the exact negation of
-    # extract's `if:` above. Keep both conditions in sync: every trigger
-    # must match exactly one of the two jobs, never both, never neither.
+    # Keep conditions in sync with extract's `if:` above.
     if: >-
       github.event.schedule == '0 0,3,6,9,12,15,18,21 * * *' ||
-      github.event.schedule == '0 1,4,7,10,13,16,19,22 * * *' ||
       inputs.model == 'gemma-4-31b-it' ||
       inputs.model == 'gemma-4-26b-a4b-it'
     strategy:
       fail-fast: false
       matrix:
-        worker: [1, 2, 3, 4, 5]
+        worker: [1, 2, 3, 4, 5, 6]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload
@@ -353,7 +341,7 @@ jobs:
       # Only two cron strings ever reach this job (this job's `if:`
       # above guarantees it), so a schedule-triggered run needs only one
       # match, with the other cron string implied by the fallback.
-      GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 0,3,6,9,12,15,18,21 * * *' && 'gemma-4-31b-it' || 'gemma-4-26b-a4b-it') }}
+      GEMINI_MODEL: ${{ inputs.model || 'gemma-4-26b-a4b-it' }}
       SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
       ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
     steps:

@@ -638,6 +638,9 @@ QC_FIRST_ID_SQL = """
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
           )
+          AND NOT EXISTS (
+            SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
+          )
       ))
 """
 
@@ -664,6 +667,9 @@ QC_NEXT_ID_SQL = """
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
           )
+          AND NOT EXISTS (
+            SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
+          )
       ))
 """
 
@@ -689,6 +695,9 @@ QC_PREV_ID_SQL = """
           AND le.status = 'success'
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
           )
       ))
 """
@@ -724,6 +733,9 @@ QC_POSITION_SQL = """
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
           )
+          AND NOT EXISTS (
+            SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
+          )
       ))
 """
 
@@ -753,6 +765,9 @@ QC_ID_AT_RANK_SQL = """
           AND le.status = 'success'
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id
           )
       ))
     ORDER BY id

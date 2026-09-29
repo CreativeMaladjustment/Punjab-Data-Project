@@ -290,11 +290,13 @@
           {% if not_extracted %}<input type="hidden" name="not_extracted" value="1">{% endif %}
           <textarea class="verdict-note" name="note" rows="2" placeholder="Optional note — what's wrong, and where"></textarea>
           <div class="verdict-actions">
-            {% if data.extraction.status == 'success' %}
-            <button type="submit" name="verdict" value="approved" class="btn-approve">Looks right</button>
+            {% if data.extraction.status != 'claimed' %}
+            <button type="submit" name="verdict" value="approved" class="btn-approve">Approved — don't reprocess</button>
             {% endif %}
+            {% if data.extraction.status != 'claimed' %}
             <button type="submit" name="verdict" value="needs_reprocessing" class="btn-reprocess">Needs reprocessing</button>
-            <span class="verdict-help">Reprocessing resets the extraction so a worker reclaims the page on its next run.</span>
+            <span class="verdict-help">{% if data.extraction.status == 'success' %}Reprocessing resets the extraction so a worker reclaims the page on its next run.{% else %}Mark for retry — resets the claim so a worker can attempt it again.{% endif %}</span>
+            {% endif %}
           </div>
         </form>
         {% endif %}

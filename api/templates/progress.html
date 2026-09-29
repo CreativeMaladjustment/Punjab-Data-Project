@@ -151,8 +151,14 @@
 
         <div class="progress-card">
           <div class="progress-card-label">Empty extractions</div>
-          <div class="progress-card-value">{{ "{:,}".format(progress_summary.empty_extraction) }}</div>
-          <div class="progress-card-subtext">success, no entries</div>
+          <div class="progress-card-value">{{ "{:,}".format(progress_summary.empty_extraction_unreviewed) }}</div>
+          <div class="progress-card-subtext">needs review</div>
+        </div>
+
+        <div class="progress-card">
+          <div class="progress-card-label">Empty, approved</div>
+          <div class="progress-card-value">{{ "{:,}".format(progress_summary.empty_extraction_approved) }}</div>
+          <div class="progress-card-subtext">confirmed empty</div>
         </div>
       </div>
     </div>

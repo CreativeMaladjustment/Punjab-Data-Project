@@ -239,7 +239,7 @@ PAGES_OCR_NO_EXTRACTION_SQL = """
       )
 """
 
-# Pages with successful extraction but empty (no catalogue entries)
+# Pages with successful extraction but empty (no catalogue entries) -- all, regardless of review status
 PAGES_EMPTY_EXTRACTION_SQL = """
     SELECT COUNT(DISTINCT le.id) FROM pages p
     JOIN llm_extractions le ON le.page_id = p.id
@@ -250,6 +250,40 @@ PAGES_EMPTY_EXTRACTION_SQL = """
       AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
       AND NOT EXISTS (
         SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
+      )
+"""
+
+# Empty extractions (successful with no entries) that have NOT been reviewed/approved yet
+PAGES_EMPTY_EXTRACTION_UNREVIEWED_SQL = """
+    SELECT COUNT(DISTINCT le.id) FROM pages p
+    JOIN llm_extractions le ON le.page_id = p.id
+    WHERE p.image_uploaded_at IS NOT NULL
+      AND p.excluded_at IS NULL
+      AND le.status = 'success'
+      AND le.model_tag <> %(human_tag)s
+      AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
+      AND NOT EXISTS (
+        SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id AND qr.verdict = 'approved'
+      )
+"""
+
+# Empty extractions (successful with no entries) that HAVE been reviewed and approved
+PAGES_EMPTY_EXTRACTION_APPROVED_SQL = """
+    SELECT COUNT(DISTINCT le.id) FROM pages p
+    JOIN llm_extractions le ON le.page_id = p.id
+    WHERE p.image_uploaded_at IS NOT NULL
+      AND p.excluded_at IS NULL
+      AND le.status = 'success'
+      AND le.model_tag <> %(human_tag)s
+      AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
+      AND NOT EXISTS (
+        SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
+      )
+      AND EXISTS (
+        SELECT 1 FROM qc_reviews qr WHERE qr.extraction_id = le.id AND qr.verdict = 'approved'
       )
 """
 
@@ -275,11 +309,19 @@ def fetch_progress_summary(conn, total_pages):
         cur.execute(PAGES_EMPTY_EXTRACTION_SQL, {"human_tag": HUMAN_MODEL_TAG, "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS)})
         (empty_extraction,) = cur.fetchone()
 
+        cur.execute(PAGES_EMPTY_EXTRACTION_UNREVIEWED_SQL, {"human_tag": HUMAN_MODEL_TAG, "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS)})
+        (empty_extraction_unreviewed,) = cur.fetchone()
+
+        cur.execute(PAGES_EMPTY_EXTRACTION_APPROVED_SQL, {"human_tag": HUMAN_MODEL_TAG, "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS)})
+        (empty_extraction_approved,) = cur.fetchone()
+
     return {
         "model_progress": model_progress,
         "not_processed": not_processed,
         "ocr_no_extraction": ocr_no_extraction,
         "empty_extraction": empty_extraction,
+        "empty_extraction_unreviewed": empty_extraction_unreviewed,
+        "empty_extraction_approved": empty_extraction_approved,
     }
 
 

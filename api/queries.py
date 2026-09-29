@@ -554,6 +554,7 @@ QC_FIRST_ID_SQL = """
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
+          AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
           AND le.status = 'success'
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
@@ -579,6 +580,7 @@ QC_NEXT_ID_SQL = """
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
+          AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
           AND le.status = 'success'
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
@@ -604,6 +606,7 @@ QC_PREV_ID_SQL = """
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
+          AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
           AND le.status = 'success'
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
@@ -637,6 +640,7 @@ QC_POSITION_SQL = """
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
+          AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
           AND le.status = 'success'
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
@@ -666,6 +670,7 @@ QC_ID_AT_RANK_SQL = """
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
+          AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
           AND le.status = 'success'
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id

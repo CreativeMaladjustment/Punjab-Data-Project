@@ -464,7 +464,7 @@ CLAIM_NEXT_PAGE_SQL = """
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
           {source_filter}
-        ORDER BY random()
+        ORDER BY CASE WHEN le.id IS NULL THEN 0 ELSE 1 END, random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),

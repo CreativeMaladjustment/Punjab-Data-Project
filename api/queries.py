@@ -307,13 +307,16 @@ def fetch_dashboard_data(conn):
         models[tag]["ocr_success"] = row["success"]
         models[tag]["ocr_failed"] = row["failed"]
 
+    # Filter to models with >= 400 extraction attempts for cleaner progress tracking
+    significant_models = [m for m in models.values() if m["extraction_attempted"] >= 400]
+
     return {
         "total_pages": total_pages,
         "any_extracted_pages": any_extracted_pages,
         # Fewest pages remaining first -- the Progress page's own framing
         # is "how much is left," so the model closest to done (or already
         # there, at 0) leads, not alphabetical order.
-        "models": sorted(models.values(), key=lambda m: m["remaining"]),
+        "models": sorted(significant_models, key=lambda m: m["remaining"]),
     }
 
 

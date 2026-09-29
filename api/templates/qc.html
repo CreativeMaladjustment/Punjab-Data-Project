@@ -157,16 +157,18 @@
       <div class="subtitle">{{ data.page.pcloud_folder }}/{{ data.page.pcloud_name }} &middot; page {{ data.page.page_no }} &middot; page id {{ data.page.id }}</div>
     </div>
     <div class="qc-nav">
-      {% if data.prev_id %}<a class="nav-btn" href="{{ url_for('qc_page', page_id=data.prev_id, model_tag=data.selected_tag, needs_review=('1' if needs_review else None)) }}">&larr; Prev</a>{% else %}<span class="nav-btn disabled">&larr; Prev</span>{% endif %}
-      <span class="pos-count">page {{ page_rank }} of {{ total_pages_available }}{% if needs_review %} needing review{% else %} with images{% endif %}</span>
-      {% if data.next_id %}<a class="nav-btn" href="{{ url_for('qc_page', page_id=data.next_id, model_tag=data.selected_tag, needs_review=('1' if needs_review else None)) }}">Next &rarr;</a>{% else %}<span class="nav-btn disabled">Next &rarr;</span>{% endif %}
+      {% if data.prev_id %}<a class="nav-btn" href="{{ url_for('qc_page', page_id=data.prev_id, model_tag=data.selected_tag, needs_review=('1' if needs_review else None), not_extracted=('1' if not_extracted else None)) }}">&larr; Prev</a>{% else %}<span class="nav-btn disabled">&larr; Prev</span>{% endif %}
+      <span class="pos-count">page {{ page_rank }} of {{ total_pages_available }}{% if needs_review %} needing review{% elif not_extracted %} with empty extractions{% else %} with images{% endif %}</span>
+      {% if data.next_id %}<a class="nav-btn" href="{{ url_for('qc_page', page_id=data.next_id, model_tag=data.selected_tag, needs_review=('1' if needs_review else None), not_extracted=('1' if not_extracted else None)) }}">Next &rarr;</a>{% else %}<span class="nav-btn disabled">Next &rarr;</span>{% endif %}
       <form class="goto-form" method="get" action="{{ url_for('qc_goto') }}">
         {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
+        {% if not_extracted %}<input type="hidden" name="not_extracted" value="1">{% endif %}
         {% if data.selected_tag %}<input type="hidden" name="model_tag" value="{{ data.selected_tag }}">{% endif %}
         <input class="goto-input" type="number" name="n" min="1" max="{{ total_pages_available }}" placeholder="page #" required>
         <button type="submit" class="nav-btn">Go</button>
       </form>
-      <a class="nav-btn {{ 'active' if needs_review else '' }}" href="{{ url_for('qc_page', page_id=data.page.id, model_tag=data.selected_tag, needs_review=(None if needs_review else '1')) }}" title="Show only pages with a successful extraction still awaiting a verdict, or a capped content failure">{% if needs_review %}&check; {% endif %}Needs review only</a>
+      <a class="nav-btn {{ 'active' if needs_review else '' }}" href="{{ url_for('qc_page', page_id=data.page.id, model_tag=data.selected_tag, needs_review=(None if needs_review else '1'), not_extracted=None) }}" title="Show only pages with a successful extraction still awaiting a verdict, or a capped content failure">{% if needs_review %}&check; {% endif %}Needs review only</a>
+      <a class="nav-btn {{ 'active' if not_extracted else '' }}" href="{{ url_for('qc_page', page_id=data.page.id, model_tag=data.selected_tag, not_extracted=(None if not_extracted else '1'), needs_review=None) }}" title="Show only pages with successful extractions that have no catalogue entries">{% if not_extracted %}&check; {% endif %}Empty extractions</a>
     </div>
   </div>
 
@@ -193,6 +195,7 @@
             <input type="hidden" name="page_id" value="{{ data.page.id }}">
             <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
             {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
+            {% if not_extracted %}<input type="hidden" name="not_extracted" value="1">{% endif %}
             <input type="hidden" name="action" value="include">
             <button type="submit" class="btn-outline">Re-include in processing</button>
           </form>
@@ -203,6 +206,7 @@
             <input type="hidden" name="page_id" value="{{ data.page.id }}">
             <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
             {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
+            {% if not_extracted %}<input type="hidden" name="not_extracted" value="1">{% endif %}
             <input type="hidden" name="action" value="exclude">
             <textarea class="verdict-note" name="note" rows="2" placeholder="Optional note — why this page shouldn't be processed (duplicate, blank, unusable scan, ...)"></textarea>
             <button type="submit" class="btn-reprocess">Exclude from processing</button>
@@ -283,6 +287,7 @@
         <form method="post" action="{{ url_for('qc_verdict') }}">
           <input type="hidden" name="extraction_id" value="{{ data.extraction.id }}">
           {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
+          {% if not_extracted %}<input type="hidden" name="not_extracted" value="1">{% endif %}
           <textarea class="verdict-note" name="note" rows="2" placeholder="Optional note — what's wrong, and where"></textarea>
           <div class="verdict-actions">
             {% if data.extraction.status == 'success' %}
@@ -307,6 +312,7 @@
           <input type="hidden" name="page_id" value="{{ data.page.id }}">
           <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
           {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
+          {% if not_extracted %}<input type="hidden" name="not_extracted" value="1">{% endif %}
           <input type="hidden" name="total_rows" value="{{ prefill_entries | length + extra_blank_rows }}">
           {% for i in range(prefill_entries | length + extra_blank_rows) %}
           {% set entry = prefill_entries[i] if i < prefill_entries | length else {} %}

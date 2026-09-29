@@ -206,6 +206,82 @@ PAGES_ANY_EXTRACTED_SQL = """
       AND p.excluded_at IS NULL
 """
 
+# Detailed progress for the two primary extraction models
+MODEL_PROGRESS_SQL = """
+    SELECT model_tag,
+           COUNT(*) as total_attempted,
+           SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count
+    FROM llm_extractions
+    WHERE model_tag IN (%(primary_model)s, %(secondary_model)s)
+    GROUP BY model_tag
+"""
+
+# Pages with no extraction attempt from any model yet
+PAGES_NOT_PROCESSED_SQL = """
+    SELECT COUNT(*) FROM pages p
+    WHERE p.image_uploaded_at IS NOT NULL
+      AND p.excluded_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM llm_extractions le
+        WHERE le.page_id = p.id AND le.model_tag <> %(human_tag)s
+      )
+"""
+
+# Pages with full-page OCR but no extraction attempt
+PAGES_OCR_NO_EXTRACTION_SQL = """
+    SELECT COUNT(DISTINCT p.id) FROM pages p
+    JOIN page_ocr_text pot ON pot.page_id = p.id
+    WHERE p.image_uploaded_at IS NOT NULL
+      AND p.excluded_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM llm_extractions le
+        WHERE le.page_id = p.id AND le.model_tag <> %(human_tag)s
+      )
+"""
+
+# Pages with successful extraction but empty (no catalogue entries)
+PAGES_EMPTY_EXTRACTION_SQL = """
+    SELECT COUNT(DISTINCT le.id) FROM pages p
+    JOIN llm_extractions le ON le.page_id = p.id
+    WHERE p.image_uploaded_at IS NOT NULL
+      AND p.excluded_at IS NULL
+      AND le.status = 'success'
+      AND le.model_tag <> %(human_tag)s
+      AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
+      AND NOT EXISTS (
+        SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
+      )
+"""
+
+
+def fetch_progress_summary(conn, total_pages):
+    """Fetch detailed progress metrics for the main processing pipeline."""
+    with conn.cursor() as cur:
+        cur.execute(MODEL_PROGRESS_SQL, {"primary_model": "glm-ocr", "secondary_model": "gemma-4-26b-a4b-it"})
+        model_progress = {}
+        for tag, attempted, success in cur.fetchall():
+            model_progress[tag] = {
+                "attempted": attempted,
+                "success": success,
+                "percent": round(100.0 * success / total_pages, 1)
+            }
+
+        cur.execute(PAGES_NOT_PROCESSED_SQL, {"human_tag": HUMAN_MODEL_TAG})
+        (not_processed,) = cur.fetchone()
+
+        cur.execute(PAGES_OCR_NO_EXTRACTION_SQL, {"human_tag": HUMAN_MODEL_TAG})
+        (ocr_no_extraction,) = cur.fetchone()
+
+        cur.execute(PAGES_EMPTY_EXTRACTION_SQL, {"human_tag": HUMAN_MODEL_TAG, "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS)})
+        (empty_extraction,) = cur.fetchone()
+
+    return {
+        "model_progress": model_progress,
+        "not_processed": not_processed,
+        "ocr_no_extraction": ocr_no_extraction,
+        "empty_extraction": empty_extraction,
+    }
+
 
 def fetch_dashboard_data(conn):
     """Run every query above and merge extraction/entries/OCR stats into one

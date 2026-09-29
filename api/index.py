@@ -77,6 +77,7 @@ from queries import (
     apply_qc_verdict,
     fetch_corpus_stats,
     fetch_dashboard_data,
+    fetch_progress_summary,
     fetch_qc_first_id,
     fetch_qc_id_at_rank,
     fetch_qc_page,
@@ -534,10 +535,11 @@ def progress():
     conn = db_connect()
     try:
         data = fetch_dashboard_data(conn)
+        total_pages = data["total_pages"]
+        progress_summary = fetch_progress_summary(conn, total_pages)
     finally:
         conn.close()
 
-    total_pages = data["total_pages"]
     models = []
     for m in data["models"]:
         m = dict(m)
@@ -571,6 +573,7 @@ def progress():
         any_extracted_pages=any_extracted_pages,
         any_extracted_pct=any_extracted_pct,
         models=models,
+        progress_summary=progress_summary,
     )
 
 

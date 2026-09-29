@@ -670,27 +670,32 @@ def _parse_needs_review():
     return request.values.get("needs_review") in ("1", "true", "yes")
 
 
+def _parse_not_extracted():
+    # Same pattern as needs_review: read from either query string or POST form.
+    return request.values.get("not_extracted") in ("1", "true", "yes")
+
+
 @app.route("/qc")
 @login_required
 def qc_index():
     needs_review = _parse_needs_review()
+    not_extracted = _parse_not_extracted()
     conn = db_connect()
     try:
         # image_uploaded_at IS NOT NULL: a placeholder page with no image
         # yet has nothing for a reviewer to look at (same predicate
         # fetch_qc_page()'s own lookup and prev/next use). excluded_at IS
         # NULL: skip straight past a page someone's already pulled out of
-        # processing, same as prev/next do. needs_review, when set,
-        # additionally restricts to pages with something still needing a
-        # verdict (see queries.py's QC_FIRST_ID_SQL) -- lands on None (a 404
-        # below) once that queue is actually empty, rather than silently
-        # falling back to the unfiltered first page.
-        first_id = fetch_qc_first_id(conn, needs_review=needs_review)
+        # processing, same as prev/next do. needs_review and not_extracted,
+        # when set, additionally restrict to those subsets (see queries.py's
+        # QC_FIRST_ID_SQL) -- lands on None (a 404 below) once that queue
+        # is actually empty, rather than silently falling back to unfiltered.
+        first_id = fetch_qc_first_id(conn, needs_review=needs_review, not_extracted=not_extracted)
     finally:
         conn.close()
     if first_id is None:
         abort(404)
-    return redirect(url_for("qc_page", page_id=first_id, needs_review=("1" if needs_review else None)))
+    return redirect(url_for("qc_page", page_id=first_id, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None)))
 
 
 def _entries_for_display(entries):
@@ -737,11 +742,12 @@ def _entries_for_display(entries):
 def qc_page(page_id):
     model_tag = request.args.get("model_tag") or None
     needs_review = _parse_needs_review()
+    not_extracted = _parse_not_extracted()
     conn = db_connect()
     try:
-        data = fetch_qc_page(conn, page_id, model_tag, needs_review=needs_review)
+        data = fetch_qc_page(conn, page_id, model_tag, needs_review=needs_review, not_extracted=not_extracted)
         if data is not None:
-            page_rank, total_pages_available = fetch_qc_position(conn, page_id, needs_review=needs_review)
+            page_rank, total_pages_available = fetch_qc_position(conn, page_id, needs_review=needs_review, not_extracted=not_extracted)
     finally:
         conn.close()
     if data is None:
@@ -781,6 +787,7 @@ def qc_page(page_id):
         page_rank=page_rank,
         total_pages_available=total_pages_available,
         needs_review=needs_review,
+        not_extracted=not_extracted,
         catalogue_fields=CATALOGUE_ENTRY_FIELDS,
         bool_fields=CATALOGUE_ENTRY_BOOL_FIELDS,
         json_fields=CATALOGUE_ENTRY_JSON_FIELDS,
@@ -794,13 +801,12 @@ def qc_page(page_id):
 def qc_goto():
     """Backs the QC page's "go to page N" jump -- N is the same 1-indexed
     rank the "page N of M" counter shows (see fetch_qc_position()), under
-    whichever needs_review filter is currently active, so typing the
-    number already on screen for a *different* page (e.g. after the
-    filter changed how many pages are in the count) still lands somewhere
-    sensible rather than on an unrelated id. model_tag, when present, is
-    forwarded to the redirect unchanged -- same as Prev/Next -- so jumping
-    doesn't silently reset back to the default extraction tab."""
+    whichever filters (needs_review, not_extracted) are currently active,
+    so typing the number already on screen for a *different* page still lands
+    somewhere sensible rather than on an unrelated id. model_tag, when present,
+    is forwarded to the redirect unchanged -- same as Prev/Next."""
     needs_review = _parse_needs_review()
+    not_extracted = _parse_not_extracted()
     model_tag = request.args.get("model_tag") or None
     try:
         rank = int(request.args.get("n", ""))
@@ -808,13 +814,13 @@ def qc_goto():
         abort(400)
     conn = db_connect()
     try:
-        page_id = fetch_qc_id_at_rank(conn, rank, needs_review=needs_review)
+        page_id = fetch_qc_id_at_rank(conn, rank, needs_review=needs_review, not_extracted=not_extracted)
     finally:
         conn.close()
     if page_id is None:
         abort(404)
     return redirect(
-        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None))
+        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None))
     )
 
 
@@ -847,6 +853,7 @@ def qc_verdict():
     verdict = request.form.get("verdict")
     note = request.form.get("note", "").strip()
     needs_review = _parse_needs_review()
+    not_extracted = _parse_not_extracted()
     if extraction_id is None or verdict not in ("approved", "needs_reprocessing"):
         abort(400)
 
@@ -885,7 +892,7 @@ def qc_verdict():
         # to approve.
         abort(400)
     return redirect(
-        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None))
+        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None))
     )
 
 
@@ -897,6 +904,7 @@ def qc_exclude():
     action = request.form.get("action")
     note = request.form.get("note", "").strip()
     needs_review = _parse_needs_review()
+    not_extracted = _parse_not_extracted()
     if submitted_page_id is None or action not in ("exclude", "include"):
         abort(400)
 
@@ -941,7 +949,7 @@ def qc_exclude():
         # timing window, not the expected path.
         abort(409)
     return redirect(
-        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None))
+        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None))
     )
 
 
@@ -951,6 +959,7 @@ def qc_save_edit():
     submitted_page_id = request.form.get("page_id", type=int)
     submitted_model_tag = request.form.get("model_tag") or None
     needs_review = _parse_needs_review()
+    not_extracted = _parse_not_extracted()
     # `... or 0` would treat a missing or malformed total_rows the same as
     # an explicit, legitimate 0 (which does mean something real: "save
     # this correction with every entry deleted") -- silently running the
@@ -1059,7 +1068,7 @@ def qc_save_edit():
     finally:
         conn.close()
     return redirect(
-        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None))
+        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None))
     )
 
 

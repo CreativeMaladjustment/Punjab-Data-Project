@@ -75,6 +75,7 @@ from queries import (
     CATALOGUE_ENTRY_JSON_FIELDS,
     apply_page_exclusion,
     apply_qc_verdict,
+    fetch_catalogue_entries_summaries,
     fetch_corpus_stats,
     fetch_dashboard_data,
     fetch_progress_summary,
@@ -592,9 +593,10 @@ def tables_index():
     conn = db_connect()
     try:
         tables = list_tables(conn)
+        catalogue_summaries = fetch_catalogue_entries_summaries(conn)
     finally:
         conn.close()
-    return render_template("tables_list.html", active="tables", tables=tables)
+    return render_template("tables_list.html", active="tables", tables=tables, catalogue_summaries=catalogue_summaries)
 
 
 @app.route("/tables/<table_name>")

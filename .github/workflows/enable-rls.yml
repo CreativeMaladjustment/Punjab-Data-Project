@@ -17,7 +17,7 @@ jobs:
     environment: b2-upload
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
 
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -26,6 +26,7 @@ jobs:
         env:
           PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           # Extract connection details from DATABASE_URL
           # Format: postgresql://user:password@host:port/dbname
@@ -91,7 +92,7 @@ jobs:
           CREATE POLICY pcloud_files_select ON pcloud_files FOR SELECT USING (true);
           EOF
 
-          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+          if [[ "$DRY_RUN" == "true" ]]; then
             echo "=== DRY RUN: SQL that would be executed ==="
             cat enable_rls.sql
             echo ""
@@ -107,6 +108,7 @@ jobs:
         env:
           PGPASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
           DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|.*@([^:/]+).*|\1|')
           DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|.*:([0-9]+)/.*|\1|')

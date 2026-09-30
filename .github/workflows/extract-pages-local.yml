@@ -29,50 +29,55 @@
 # your machine -- never add a `pull_request` (or any fork-reachable)
 # trigger to a workflow that targets a self-hosted runner, since that would
 # let anyone who can open a PR run arbitrary code on your laptop.
+#
+# NOTE: DISABLED - Self-hosted runner has been stopped. This workflow can be
+# re-enabled by uncommenting the `on: workflow_dispatch:` trigger below if
+# the self-hosted runner is brought back online.
 name: Extract catalogue entries with a local LLM (self-hosted)
 
 on:
-  workflow_dispatch:
-    inputs:
-      model:
-        description: "Ollama vision model to run"
-        type: choice
-        default: glm-ocr
-        options:
-          - minicpm-v4.6
-          - qwen3-vl:2b
-          - qwen3-vl:4b
-          - gemma4:e2b
-          - glm-ocr
-          - minicpm-v4.5
-      source_model:
-        description: >-
-          Rescue mode (optional): only reprocess pages that this OTHER
-          model already gave up on (capped-out content failures, i.e. its
-          "content failed" pages after 2 attempts) -- instead of the normal
-          full backlog for "model" above. Leave as "(none)" for a normal
-          run. Must differ from "model". See extract-pages.yml / extract_with_llm.py's
-          docstring for the exact definition.
-        type: choice
-        default: "(none)"
-        options:
-          - "(none)"
-          - minicpm-v4.6
-          - qwen3-vl:2b
-          - qwen3-vl:4b
-          - gemma4:e2b
-          - glm-ocr
-          - minicpm-v4.5
-      allow_already_extracted:
-        description: >-
-          By default this run skips any page that already has a successful
-          extraction from ANY source (another model, the textparse:* OCR-
-          text backfill, or a human correction) -- the goal is coverage,
-          not re-running a page that already has data. Check this box only
-          for a deliberate model bake-off/comparison run. See
-          extract-pages.yml / extract_with_llm.py's docstring.
-        type: boolean
-        default: false
+  # DISABLED: Self-hosted runner stopped
+  # workflow_dispatch:
+  #   inputs:
+  #     model:
+  #       description: "Ollama vision model to run"
+  #       type: choice
+  #       default: glm-ocr
+  #       options:
+  #         - minicpm-v4.6
+  #         - qwen3-vl:2b
+  #         - qwen3-vl:4b
+  #         - gemma4:e2b
+  #         - glm-ocr
+  #         - minicpm-v4.5
+  #     source_model:
+  #       description: >-
+  #         Rescue mode (optional): only reprocess pages that this OTHER
+  #         model already gave up on (capped-out content failures, i.e. its
+  #         "content failed" pages after 2 attempts) -- instead of the normal
+  #         full backlog for "model" above. Leave as "(none)" for a normal
+  #         run. Must differ from "model". See extract-pages.yml / extract_with_llm.py's
+  #         docstring for the exact definition.
+  #       type: choice
+  #       default: "(none)"
+  #       options:
+  #         - "(none)"
+  #         - minicpm-v4.6
+  #         - qwen3-vl:2b
+  #         - qwen3-vl:4b
+  #         - gemma4:e2b
+  #         - glm-ocr
+  #         - minicpm-v4.5
+  #     allow_already_extracted:
+  #       description: >-
+  #         By default this run skips any page that already has a successful
+  #         extraction from ANY source (another model, the textparse:* OCR-
+  #         text backfill, or a human correction) -- the goal is coverage,
+  #         not re-running a page that already has data. Check this box only
+  #         for a deliberate model bake-off/comparison run. See
+  #         extract-pages.yml / extract_with_llm.py's docstring.
+  #       type: boolean
+  #       default: false
 
 permissions:
   contents: read

@@ -17,7 +17,7 @@ jobs:
     environment: b2-upload
     steps:
       - name: Checkout
-        uses: actions/checkout@8ade135a41bc03ea155e62e844d188df1ea18608 # v4
+        uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938 # v4.2.0
 
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client

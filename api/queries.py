@@ -1251,15 +1251,16 @@ def fetch_catalogue_entries_summaries(conn):
 
     with conn.cursor() as cur:
         for field in fields:
+            field_id = psycopg2.sql.Identifier(field)
             cur.execute(
-                f"""
+                psycopg2.sql.SQL("""
                 SELECT {field} as value, COUNT(*) as count
                 FROM catalogue_entries
                 WHERE {field} IS NOT NULL
                 GROUP BY {field}
                 ORDER BY count DESC
                 LIMIT 100
-                """
+                """).format(field=field_id)
             )
             results[field] = [{"value": row[0], "count": row[1]} for row in cur.fetchall()]
 

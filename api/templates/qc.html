@@ -167,8 +167,8 @@
         <input class="goto-input" type="number" name="n" min="1" max="{{ total_pages_available }}" placeholder="page #" required>
         <button type="submit" class="nav-btn">Go</button>
       </form>
-      <a class="nav-btn {{ 'active' if needs_review else '' }}" href="{{ url_for('qc_page', page_id=data.page.id, model_tag=data.selected_tag, needs_review=(None if needs_review else '1'), not_extracted=None) }}" title="Show only pages with a successful extraction still awaiting a verdict, or a capped content failure">{% if needs_review %}&check; {% endif %}Needs review only</a>
-      <a class="nav-btn {{ 'active' if not_extracted else '' }}" href="{{ url_for('qc_page', page_id=data.page.id, model_tag=data.selected_tag, not_extracted=(None if not_extracted else '1'), needs_review=None) }}" title="Show only pages with successful extractions that have no catalogue entries">{% if not_extracted %}&check; {% endif %}Empty extractions</a>
+      <a class="nav-btn {{ 'active' if needs_review else '' }}" href="{{ url_for('qc_index', needs_review=(None if needs_review else '1'), not_extracted=None) }}" title="Show only pages with a successful extraction still awaiting a verdict, or a capped content failure">{% if needs_review %}&check; {% endif %}Needs review only</a>
+      <a class="nav-btn {{ 'active' if not_extracted else '' }}" href="{{ url_for('qc_index', not_extracted=(None if not_extracted else '1'), needs_review=None) }}" title="Show only pages with successful extractions that have no catalogue entries">{% if not_extracted %}&check; {% endif %}Empty extractions</a>
     </div>
   </div>
 

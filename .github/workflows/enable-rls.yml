@@ -36,6 +36,14 @@ jobs:
           DB_PASS=$(echo "$DATABASE_URL" | sed -E 's|.*://[^:]+:([^@]+)@.*|\1|')
           export PGPASSWORD="$DB_PASS"
 
+          # Debug: Show parsed values (mask password)
+          echo "DEBUG: Parsed connection details:"
+          echo "  Host: $DB_HOST"
+          echo "  Port: $DB_PORT"
+          echo "  Database: $DB_NAME"
+          echo "  User: $DB_USER"
+          echo "  Password: ${DB_PASS:0:3}***"
+
           # Create SQL script
           cat > enable_rls.sql << 'EOF'
           -- Enable RLS on critical tables
@@ -115,6 +123,14 @@ jobs:
           DB_USER=$(echo "$DATABASE_URL" | sed -E 's|//([^:]+):.*|\1|')
           DB_PASS=$(echo "$DATABASE_URL" | sed -E 's|.*://[^:]+:([^@]+)@.*|\1|')
           export PGPASSWORD="$DB_PASS"
+
+          # Debug: Show parsed values (mask password)
+          echo "DEBUG: Parsed connection details:"
+          echo "  Host: $DB_HOST"
+          echo "  Port: $DB_PORT"
+          echo "  Database: $DB_NAME"
+          echo "  User: $DB_USER"
+          echo "  Password: ${DB_PASS:0:3}***"
 
           echo "=== RLS Status by Table ==="
           psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \

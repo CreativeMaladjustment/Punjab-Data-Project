@@ -134,15 +134,15 @@ on:
   #
   # Four cron entries, one per model, each firing that model's own hours.
   # Gemini flash-lite models: process all unapproved pages (100% coverage)
-  # Gemma models: 4 times a day (2, 8, 14, 20 UTC), staggered by 1 hour each:
-  # - gemma-4-31b-it: hours 2, 8, 14, 20 (5-worker matrix, OCR-only)
-  # - gemma-4-26b-a4b-it: hours 3, 9, 15, 21 (5-worker matrix, OCR-only)
-  # Max 10 concurrent runners (5+5 Gemma) at any time during runs, leaving ~10 for other tasks.
+  # Gemma models: 4 times a day every 6 hours, staggered by 1 hour each:
+  # - gemma-4-31b-it: hours 0, 6, 12, 18 UTC (5-worker matrix, OCR-only)
+  # - gemma-4-26b-a4b-it: hours 1, 7, 13, 19 UTC (5-worker matrix, OCR-only)
+  # Max 5 concurrent runners per Gemma model at any time, max ~10 total, leaving ~10 for other tasks.
   schedule:
     - cron: "0 4,16 * * *"         # gemini-3.1-flash-lite
     - cron: "0 10,22 * * *"        # gemini-3.5-flash-lite
-    - cron: "0 2,8,14,20 * * *"    # gemma-4-31b-it (5-worker matrix, OCR-only)
-    - cron: "0 3,9,15,21 * * *"    # gemma-4-26b-a4b-it (5-worker matrix, OCR-only)
+    - cron: "0 0,6,12,18 * * *"    # gemma-4-31b-it (5-worker matrix, OCR-only)
+    - cron: "0 1,7,13,19 * * *"    # gemma-4-26b-a4b-it (5-worker matrix, OCR-only)
   workflow_dispatch:
     inputs:
       model:
@@ -330,8 +330,8 @@ jobs:
     # extract's `if:` above. Keep both conditions in sync: every trigger
     # must match exactly one of the two jobs, never both, never neither.
     if: >-
-      github.event.schedule == '0 2,8,14,20 * * *' ||
-      github.event.schedule == '0 3,9,15,21 * * *' ||
+      github.event.schedule == '0 0,6,12,18 * * *' ||
+      github.event.schedule == '0 1,7,13,19 * * *' ||
       inputs.model == 'gemma-4-31b-it' ||
       inputs.model == 'gemma-4-26b-a4b-it'
     strategy:
@@ -348,7 +348,7 @@ jobs:
       # Only two cron strings ever reach this job (this job's `if:`
       # above guarantees it), so a schedule-triggered run needs only one
       # match, with the other cron string implied by the fallback.
-      GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 2,8,14,20 * * *' && 'gemma-4-31b-it' || 'gemma-4-26b-a4b-it') }}
+      GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 0,6,12,18 * * *' && 'gemma-4-31b-it' || 'gemma-4-26b-a4b-it') }}
       SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
       ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
     steps:

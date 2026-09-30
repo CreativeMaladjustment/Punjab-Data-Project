@@ -132,17 +132,16 @@ on:
   # running them in the same clock hour doesn't couple them, just means
   # both show up for review at once.
   #
-  # Four cron entries, one per model, each firing that model's own hours
-  # -- see the module comment above for the full hour-by-model breakdown
-  # and why none of the twelve resulting daily runs share an hour. Each
-  # job's env: block below picks its model (or, for extract-gemma-matrix,
-  # decides whether to run at all) by matching github.event.schedule
-  # against whichever of these four strings fired.
+  # Four cron entries, one per model, each firing that model's own hours.
+  # Gemma models staggered to prevent concurrent runs (each run takes ~5 hours):
+  # - gemma-4-31b-it: hours 3, 15 (runs 3-8, 15-20)
+  # - gemma-4-26b-a4b-it: hours 9, 21 (runs 9-14, 21-2)
+  # Max 15 concurrent runners at any time, leaving 5 for other tasks.
   schedule:
-    - cron: "0 4,16 * * *"                 # gemini-3.1-flash-lite
-    - cron: "0 10,22 * * *"                # gemini-3.5-flash-lite
-    - cron: "0 0,3,6,9,12,15,18,21 * * *"  # gemma-4-31b-it (5-worker matrix, OCR-only)
-    - cron: "0 1,4,7,10,13,16,19,22 * * *" # gemma-4-26b-a4b-it (5-worker matrix, OCR-only)
+    - cron: "0 4,16 * * *"         # gemini-3.1-flash-lite
+    - cron: "0 10,22 * * *"        # gemini-3.5-flash-lite
+    - cron: "0 3,15 * * *"         # gemma-4-31b-it (15-worker matrix, OCR-only)
+    - cron: "0 9,21 * * *"         # gemma-4-26b-a4b-it (15-worker matrix, OCR-only)
   workflow_dispatch:
     inputs:
       model:
@@ -234,8 +233,8 @@ jobs:
     # every trigger must match exactly one of the two jobs, never both,
     # never neither.
     if: >-
-      github.event.schedule != '0 0,6,12,18 * * *' &&
-      github.event.schedule != '0 1,7,13,19 * * *' &&
+      github.event.schedule != '0 3,15 * * *' &&
+      github.event.schedule != '0 9,21 * * *' &&
       inputs.model != 'gemma-4-31b-it' &&
       inputs.model != 'gemma-4-26b-a4b-it'
     runs-on: ubuntu-latest
@@ -320,13 +319,8 @@ jobs:
         run: exit 1
 
   extract-gemma-matrix:
-    # 5 workers -- was 8, cut to 1 after live runs showed both Gemma tags
-    # failing almost every page with 500/503 from Google's own backend
-    # (see the module comment above for the details and the pacing
-    # derivation), raised back up to 5 now that gemini_generate() has been
-    # dropped for these two tags (one OCR-only call per page instead of
-    # two) and the read timeout raised to 600s. Each worker independently
-    # claims and processes pages (see extract_with_gemini.py's
+    # 15 workers -- scaled up from 5 to maximize throughput. Each worker
+    # independently claims and processes pages (see extract_with_gemini.py's
     # claim_next_page(), built on `FOR UPDATE ... SKIP LOCKED`, the same
     # safe-for-concurrent-workers pattern extract-pages.yml's own matrix
     # relies on).
@@ -335,14 +329,14 @@ jobs:
     # extract's `if:` above. Keep both conditions in sync: every trigger
     # must match exactly one of the two jobs, never both, never neither.
     if: >-
-      github.event.schedule == '0 0,3,6,9,12,15,18,21 * * *' ||
-      github.event.schedule == '0 1,4,7,10,13,16,19,22 * * *' ||
+      github.event.schedule == '0 3,15 * * *' ||
+      github.event.schedule == '0 9,21 * * *' ||
       inputs.model == 'gemma-4-31b-it' ||
       inputs.model == 'gemma-4-26b-a4b-it'
     strategy:
       fail-fast: false
       matrix:
-        worker: [1, 2, 3, 4, 5]
+        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload
@@ -353,7 +347,7 @@ jobs:
       # Only two cron strings ever reach this job (this job's `if:`
       # above guarantees it), so a schedule-triggered run needs only one
       # match, with the other cron string implied by the fallback.
-      GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 0,3,6,9,12,15,18,21 * * *' && 'gemma-4-31b-it' || 'gemma-4-26b-a4b-it') }}
+      GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 3,15 * * *' && 'gemma-4-31b-it' || 'gemma-4-26b-a4b-it') }}
       SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
       ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
     steps:
@@ -375,10 +369,10 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # 5 * 60/5 RPM = 60 RPM target (aggressive test to see actual
-          # throughput and identify bottlenecks). Current usage only ~7 RPM,
-          # so testing higher pace to explore the limit.
-          GEMINI_PACE_SECONDS: "5.0"
+          # 15 workers at 1 second pace = aggressive throughput test.
+          # Monitor rate limit errors (429) and adjust pace upward if needed
+          # to stay within quota constraints (30 RPM limit).
+          GEMINI_PACE_SECONDS: "1.0"
           MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}

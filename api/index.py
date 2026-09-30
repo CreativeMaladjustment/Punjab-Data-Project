@@ -855,6 +855,7 @@ def qc_verdict():
     extraction_id = request.form.get("extraction_id", type=int)
     verdict = request.form.get("verdict")
     note = request.form.get("note", "").strip()
+    form_model_tag = request.form.get("model_tag") or None
     needs_review = _parse_needs_review()
     not_extracted = _parse_not_extracted()
     if extraction_id is None or verdict not in ("approved", "needs_reprocessing"):
@@ -862,18 +863,10 @@ def qc_verdict():
 
     conn = db_connect()
     try:
-        # apply_qc_verdict() is also the source of the redirect's page_id
-        # and model_tag -- read back from the row itself, rather than
-        # whatever the form happened to submit alongside it, both because
-        # the form's copies were only ever for display (trusting them
-        # instead could send a reviewer to the wrong page/tab if they
-        # disagreed) and because a value read straight from request.form
-        # still gets flagged reaching redirect() via url_for() even though
-        # url_for() can only ever build a same-origin URL (see PR history
-        # for next=, which was dropped outright rather than validated in
-        # place) -- sourcing it from a DB row instead avoids relying on a
-        # scanner-specific sanitizer it may not recognize.
-        result, page_id, model_tag = apply_qc_verdict(conn, extraction_id, verdict, note)
+        # apply_qc_verdict() returns the next page_id to navigate to, along with
+        # the model_tag to use. It uses needs_review and not_extracted to apply
+        # the same filters as the current QC view when finding the next page.
+        result, page_id, model_tag = apply_qc_verdict(conn, extraction_id, verdict, note, needs_review=needs_review, not_extracted=not_extracted, model_tag=form_model_tag)
     finally:
         conn.close()
     if result == "not_found":
@@ -889,6 +882,9 @@ def qc_verdict():
         # need QC's help anyway -- claim_next_page() reclaims it on its
         # own regardless.
         abort(409)
+    if page_id is None:
+        # No more pages available in the current filter, redirect to QC home
+        return redirect(url_for("qc_home"))
     return redirect(
         url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None))
     )

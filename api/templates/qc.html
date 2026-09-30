@@ -286,6 +286,7 @@
         {% else %}
         <form method="post" action="{{ url_for('qc_verdict') }}">
           <input type="hidden" name="extraction_id" value="{{ data.extraction.id }}">
+          <input type="hidden" name="model_tag" value="{{ data.selected_tag or '' }}">
           {% if needs_review %}<input type="hidden" name="needs_review" value="1">{% endif %}
           {% if not_extracted %}<input type="hidden" name="not_extracted" value="1">{% endif %}
           <textarea class="verdict-note" name="note" rows="2" placeholder="Optional note — what's wrong, and where"></textarea>

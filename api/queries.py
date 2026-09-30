@@ -1024,10 +1024,12 @@ def fetch_qc_id_at_rank(conn, rank, needs_review=False, not_extracted=False):
     return row[0] if row else None
 
 
-def apply_qc_verdict(conn, extraction_id, verdict, note):
+def apply_qc_verdict(conn, extraction_id, verdict, note, needs_review=False, not_extracted=False, model_tag=None):
     """Atomically validate and apply a QC verdict against extraction_id.
-    Returns ("ok" | "not_found" | "claimed", page_id, model_tag) --
-    page_id/model_tag are None unless the row was found.
+    Returns ("ok" | "not_found" | "claimed", next_page_id, model_tag) --
+    next_page_id/model_tag are None unless the row was found. After recording
+    the verdict, fetches the next page_id to navigate to using the same filters
+    (needs_review, not_extracted) as the current QC view.
 
     A separate "check, then write" (an earlier version of this function
     split across qc_verdict_target()/save_qc_verdict()) has a real race:
@@ -1075,10 +1077,10 @@ def apply_qc_verdict(conn, extraction_id, verdict, note):
         if row is None:
             conn.rollback()
             return "not_found", None, None
-        page_id, model_tag, status = row
+        page_id, db_model_tag, status = row
         if status == "claimed":
             conn.rollback()
-            return "claimed", page_id, model_tag
+            return "claimed", page_id, db_model_tag
 
         cur.execute(
             "INSERT INTO qc_reviews (extraction_id, verdict, note) VALUES (%(extraction_id)s, %(verdict)s, %(note)s)",
@@ -1108,8 +1110,27 @@ def apply_qc_verdict(conn, extraction_id, verdict, note):
                 """,
                 {"extraction_id": extraction_id, "claim_timeout": CLAIM_TIMEOUT_SECONDS},
             )
+
+        # Find the next page to navigate to, using the same filters as the QC page
+        cur.execute(
+            QC_NEXT_ID_SQL,
+            {
+                "page_id": page_id,
+                "needs_review": needs_review,
+                "not_extracted": not_extracted,
+                "human_tag": HUMAN_MODEL_TAG,
+                "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
+                "max_attempts": MAX_ATTEMPTS_PER_PAGE,
+            }
+        )
+        next_page_id = cur.fetchone()
+        next_page_id = next_page_id[0] if next_page_id else None
+
+        # Use the model_tag from the query (db_model_tag) or the one passed in
+        nav_model_tag = model_tag or db_model_tag
+
     conn.commit()
-    return "ok", page_id, model_tag
+    return "ok", next_page_id, nav_model_tag
 
 
 def apply_page_exclusion(conn, page_id, excluded, note):

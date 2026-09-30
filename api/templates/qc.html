@@ -370,4 +370,42 @@
     </div>
   </div>
 </main>
+
+<script>
+// Auto-advance to next page after recording verdict
+document.querySelectorAll('[name="verdict"]').forEach(button => {
+  button.addEventListener('click', function(e) {
+    e.preventDefault();
+    const form = this.closest('form');
+    const formData = new FormData(form);
+
+    // Add the verdict value from the clicked button
+    formData.set('verdict', this.value);
+
+    // Show visual feedback
+    this.disabled = true;
+    const originalText = this.textContent;
+    this.textContent = 'Recording...';
+
+    fetch(form.action, {
+      method: 'POST',
+      body: formData,
+      redirect: 'follow'
+    })
+    .then(response => {
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      // fetch with redirect: 'follow' will automatically navigate on redirect
+      // If we get here, the page has already loaded the next page
+    })
+    .catch(error => {
+      console.error('Error recording verdict:', error);
+      this.disabled = false;
+      this.textContent = originalText;
+      alert('Error recording verdict. Please try again.');
+    });
+  });
+});
+</script>
 {% endblock %}

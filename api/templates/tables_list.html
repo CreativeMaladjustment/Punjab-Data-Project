@@ -3,6 +3,7 @@
 {% block extra_style %}
   main { max-width: 1180px; margin: 0 auto; padding: 48px 32px 96px; }
   h1 { font: 400 30px/1.2 "IBM Plex Serif", Georgia, serif; margin: 0 0 8px; }
+  h2 { font: 400 20px/1.2 "IBM Plex Serif", Georgia, serif; margin: 48px 0 16px; }
   .lede { font: 400 15px/1.6 "IBM Plex Sans", sans-serif; color: var(--body-text); margin: 0 0 36px; max-width: 70ch; }
   .lede code { font-family: "IBM Plex Mono", monospace; font-size: 13px; background: var(--border-soft); padding: 1px 5px; }
 
@@ -15,6 +16,25 @@
   .table-row:hover { background: var(--tint); color: var(--ink); }
   .table-row .name { font: 400 13px/1.3 "IBM Plex Mono", monospace; }
   .table-row .kind { font: 400 10px/1 "IBM Plex Mono", monospace; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-2); }
+
+  .pivots-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; margin-top: 24px;
+  }
+  .pivot-table {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 4px; overflow: hidden;
+  }
+  .pivot-header {
+    background: var(--tint); padding: 12px 16px; border-bottom: 1px solid var(--border-soft);
+    font: 400 13px/1.3 "IBM Plex Sans", sans-serif; font-weight: 500; color: var(--ink);
+  }
+  .pivot-rows { max-height: 400px; overflow-y: auto; }
+  .pivot-row {
+    display: flex; justify-content: space-between; align-items: center; padding: 8px 16px;
+    border-bottom: 1px solid var(--border-soft); font: 400 12px/1.4 "IBM Plex Sans", sans-serif;
+  }
+  .pivot-row:last-child { border-bottom: none; }
+  .pivot-value { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pivot-count { color: var(--muted); font-family: "IBM Plex Mono", monospace; font-size: 11px; margin-left: 12px; min-width: 50px; text-align: right; }
 {% endblock %}
 {% block content %}
 <main>
@@ -29,5 +49,29 @@
     </a>
     {% endfor %}
   </div>
+
+  {% if catalogue_summaries %}
+  <h2>Catalogue Entries Summary (Top 100 per field)</h2>
+  <p class="lede">Most common values in high-value columns from <code>catalogue_entries</code>.</p>
+
+  <div class="pivots-grid">
+    {% set fields = ['author', 'title', 'publisher', 'pubcity', 'pcity', 'date', 'lang', 'topic'] %}
+    {% for field in fields %}
+      {% if catalogue_summaries[field] %}
+      <div class="pivot-table">
+        <div class="pivot-header">{{ field|capitalize }}</div>
+        <div class="pivot-rows">
+          {% for item in catalogue_summaries[field] %}
+          <div class="pivot-row">
+            <div class="pivot-value" title="{{ item.value }}">{{ item.value or '(empty)' }}</div>
+            <div class="pivot-count">{{ item.count }}</div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
 </main>
 {% endblock %}

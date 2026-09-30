@@ -1241,3 +1241,27 @@ def save_human_edit(conn, page_id, entries):
             cur.execute(insert_sql, values)
     conn.commit()
     return extraction_id
+
+
+def fetch_catalogue_entries_summaries(conn):
+    """Fetch top 100 most common values for high-value columns in catalogue_entries.
+    Returns dict with field names as keys and list of (value, count) tuples as values."""
+    fields = ["author", "title", "publisher", "pubcity", "pcity", "date", "lang", "topic"]
+    results = {}
+
+    with conn.cursor() as cur:
+        for field in fields:
+            field_id = psycopg2.sql.Identifier(field)
+            cur.execute(
+                psycopg2.sql.SQL("""
+                SELECT {field} as value, COUNT(*) as count
+                FROM catalogue_entries
+                WHERE {field} IS NOT NULL
+                GROUP BY {field}
+                ORDER BY count DESC
+                LIMIT 100
+                """).format(field=field_id)
+            )
+            results[field] = [{"value": row[0], "count": row[1]} for row in cur.fetchall()]
+
+    return results

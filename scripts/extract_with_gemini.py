@@ -144,6 +144,12 @@ if SOURCE_MODEL_TAG is not None and SOURCE_MODEL_TAG == MODEL_TAG:
 # comparison run.
 ALLOW_ALREADY_EXTRACTED = os.environ.get("ALLOW_ALREADY_EXTRACTED", "").strip().lower() in ("true", "1", "yes")
 
+# gemini-3.1-flash-lite and gemini-3.5-flash-lite process 100% of unapproved pages
+# (anything without an 'approved' verdict), ignoring whether other models have
+# already successfully extracted them. All other models use the default behavior:
+# skip pages that already have a successful extraction from any source.
+USE_APPROVAL_CHECK = MODEL_TAG in ("gemini-3.1-flash-lite", "gemini-3.5-flash-lite")
+
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
 
@@ -372,10 +378,21 @@ CLAIM_NEXT_PAGE_SQL = """
             (le.id IS NULL
              AND (
                %(allow_already_extracted)s
-               OR NOT EXISTS (
-                 SELECT 1 FROM llm_extractions any_le
-                 WHERE any_le.page_id = p.id AND any_le.status = 'success'
-                   AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
+               OR (
+                 %(use_approval_check)s
+                 AND NOT EXISTS (
+                   SELECT 1 FROM qc_reviews qr
+                   WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
+                     AND qr.verdict = 'approved'
+                 )
+               )
+               OR (
+                 NOT %(use_approval_check)s
+                 AND NOT EXISTS (
+                   SELECT 1 FROM llm_extractions any_le
+                   WHERE any_le.page_id = p.id AND any_le.status = 'success'
+                     AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
+                 )
                )
              ))
             OR (le.status = 'claimed'
@@ -438,10 +455,21 @@ PENDING_EXISTS_SQL = """
             (le.id IS NULL
              AND (
                %(allow_already_extracted)s
-               OR NOT EXISTS (
-                 SELECT 1 FROM llm_extractions any_le
-                 WHERE any_le.page_id = p.id AND any_le.status = 'success'
-                   AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
+               OR (
+                 %(use_approval_check)s
+                 AND NOT EXISTS (
+                   SELECT 1 FROM qc_reviews qr
+                   WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
+                     AND qr.verdict = 'approved'
+                 )
+               )
+               OR (
+                 NOT %(use_approval_check)s
+                 AND NOT EXISTS (
+                   SELECT 1 FROM llm_extractions any_le
+                   WHERE any_le.page_id = p.id AND any_le.status = 'success'
+                     AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
+                 )
                )
              ))
             OR le.status = 'claimed'
@@ -478,6 +506,7 @@ def claim_next_page():
         "max_attempts": MAX_ATTEMPTS_PER_PAGE,
         "source_model_tag": SOURCE_MODEL_TAG,
         "allow_already_extracted": ALLOW_ALREADY_EXTRACTED,
+        "use_approval_check": USE_APPROVAL_CHECK,
         # These two tags' own 'success' rows are an OCR-completion marker
         # with zero catalogue_entries, not a real extraction verdict -- see
         # GEMMA_OCR_ONLY_TAGS' comment -- so they're excluded from the
@@ -979,6 +1008,8 @@ def main():
         print(f"rescue mode: only claiming pages capped out as content failures under source model tag {SOURCE_MODEL_TAG!r}")
     if ALLOW_ALREADY_EXTRACTED:
         print("ALLOW_ALREADY_EXTRACTED set: will claim pages another model/textparse/human already succeeded on")
+    elif USE_APPROVAL_CHECK:
+        print("approval-check mode: processing all pages without an 'approved' verdict, ignoring other models' extractions")
     else:
         print("default: skipping pages that already have a successful extraction from any source")
     if MAX_PAGES_PER_WORKER:

@@ -1021,8 +1021,8 @@ def fetch_qc_id_at_rank(conn, rank, needs_review=False, not_extracted=False):
 
 def apply_qc_verdict(conn, extraction_id, verdict, note):
     """Atomically validate and apply a QC verdict against extraction_id.
-    Returns ("ok" | "not_found" | "claimed" | "not_success", page_id,
-    model_tag) -- page_id/model_tag are None unless the row was found.
+    Returns ("ok" | "not_found" | "claimed", page_id, model_tag) --
+    page_id/model_tag are None unless the row was found.
 
     A separate "check, then write" (an earlier version of this function
     split across qc_verdict_target()/save_qc_verdict()) has a real race:
@@ -1053,8 +1053,8 @@ def apply_qc_verdict(conn, extraction_id, verdict, note):
     Excludes HUMAN_MODEL_TAG rows entirely -- the QC form never renders a
     verdict control for a human correction, so an id resolving to one
     here only happens via a crafted request, and there's no model attempt
-    behind it to judge. 'approved' additionally requires status='success'
-    -- a failed or claimed row has no output worth signing off on.
+    behind it to judge. Any status='claimed' row is rejected outright; all
+    other non-human rows can receive a verdict (approved or needs_reprocessing).
     """
     with conn.cursor() as cur:
         cur.execute(
@@ -1074,9 +1074,6 @@ def apply_qc_verdict(conn, extraction_id, verdict, note):
         if status == "claimed":
             conn.rollback()
             return "claimed", page_id, model_tag
-        if verdict == "approved" and status != "success":
-            conn.rollback()
-            return "not_success", page_id, model_tag
 
         cur.execute(
             "INSERT INTO qc_reviews (extraction_id, verdict, note) VALUES (%(extraction_id)s, %(verdict)s, %(note)s)",

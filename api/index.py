@@ -889,11 +889,6 @@ def qc_verdict():
         # need QC's help anyway -- claim_next_page() reclaims it on its
         # own regardless.
         abort(409)
-    if result == "not_success":
-        # Only a completed, successful extraction has output worth
-        # signing off on -- a failed or (stale-)claimed row has nothing
-        # to approve.
-        abort(400)
     return redirect(
         url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None))
     )

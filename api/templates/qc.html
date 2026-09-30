@@ -396,8 +396,8 @@ document.querySelectorAll('[name="verdict"]').forEach(button => {
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
-      // fetch with redirect: 'follow' will automatically navigate on redirect
-      // If we get here, the page has already loaded the next page
+      // Navigate to the final URL after the redirect chain
+      window.location.href = response.url;
     })
     .catch(error => {
       console.error('Error recording verdict:', error);

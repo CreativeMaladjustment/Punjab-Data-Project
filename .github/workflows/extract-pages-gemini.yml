@@ -320,13 +320,8 @@ jobs:
         run: exit 1
 
   extract-gemma-matrix:
-    # 5 workers -- was 8, cut to 1 after live runs showed both Gemma tags
-    # failing almost every page with 500/503 from Google's own backend
-    # (see the module comment above for the details and the pacing
-    # derivation), raised back up to 5 now that gemini_generate() has been
-    # dropped for these two tags (one OCR-only call per page instead of
-    # two) and the read timeout raised to 600s. Each worker independently
-    # claims and processes pages (see extract_with_gemini.py's
+    # 15 workers -- scaled up from 5 to maximize throughput. Each worker
+    # independently claims and processes pages (see extract_with_gemini.py's
     # claim_next_page(), built on `FOR UPDATE ... SKIP LOCKED`, the same
     # safe-for-concurrent-workers pattern extract-pages.yml's own matrix
     # relies on).
@@ -342,7 +337,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        worker: [1, 2, 3, 4, 5]
+        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload
@@ -375,10 +370,10 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # 5 * 60/5 RPM = 60 RPM target (aggressive test to see actual
-          # throughput and identify bottlenecks). Current usage only ~7 RPM,
-          # so testing higher pace to explore the limit.
-          GEMINI_PACE_SECONDS: "5.0"
+          # 15 workers at 1 second pace = aggressive throughput test.
+          # Monitor rate limit errors (429) and adjust pace upward if needed
+          # to stay within quota constraints (30 RPM limit).
+          GEMINI_PACE_SECONDS: "1.0"
           MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}

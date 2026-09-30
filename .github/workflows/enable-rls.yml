@@ -27,22 +27,8 @@ jobs:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
           DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          # Extract connection details from DATABASE_URL
-          # Format: postgresql://user:password@host:port/dbname
-          DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|.*@([^:/]+).*|\1|')
-          DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|.*:([0-9]+)/.*|\1|')
-          DB_NAME=$(echo "$DATABASE_URL" | sed -E 's|.*/([^?]+).*|\1|')
-          DB_USER=$(echo "$DATABASE_URL" | sed -E 's|//([^:]+):.*|\1|')
-          DB_PASS=$(echo "$DATABASE_URL" | sed -E 's|.*://[^:]+:([^@]+)@.*|\1|')
-          export PGPASSWORD="$DB_PASS"
-
-          # Debug: Show parsed values (mask password)
-          echo "DEBUG: Parsed connection details:"
-          echo "  Host: $DB_HOST"
-          echo "  Port: $DB_PORT"
-          echo "  Database: $DB_NAME"
-          echo "  User: $DB_USER"
-          echo "  Password: ${DB_PASS:0:3}***"
+          # psql supports connection URIs directly, no need to parse manually
+          # This avoids issues with special characters in passwords
 
           # Create SQL script
           cat > enable_rls.sql << 'EOF'
@@ -108,7 +94,7 @@ jobs:
             echo "To apply these changes, re-run this workflow with dry_run=false"
           else
             echo "=== Executing RLS enablement ==="
-            psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f enable_rls.sql
+            psql "$DATABASE_URL" -f enable_rls.sql
             echo "✓ RLS enabled successfully"
           fi
 
@@ -117,23 +103,8 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
-          DB_HOST=$(echo "$DATABASE_URL" | sed -E 's|.*@([^:/]+).*|\1|')
-          DB_PORT=$(echo "$DATABASE_URL" | sed -E 's|.*:([0-9]+)/.*|\1|')
-          DB_NAME=$(echo "$DATABASE_URL" | sed -E 's|.*/([^?]+).*|\1|')
-          DB_USER=$(echo "$DATABASE_URL" | sed -E 's|//([^:]+):.*|\1|')
-          DB_PASS=$(echo "$DATABASE_URL" | sed -E 's|.*://[^:]+:([^@]+)@.*|\1|')
-          export PGPASSWORD="$DB_PASS"
-
-          # Debug: Show parsed values (mask password)
-          echo "DEBUG: Parsed connection details:"
-          echo "  Host: $DB_HOST"
-          echo "  Port: $DB_PORT"
-          echo "  Database: $DB_NAME"
-          echo "  User: $DB_USER"
-          echo "  Password: ${DB_PASS:0:3}***"
-
           echo "=== RLS Status by Table ==="
-          psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+          psql "$DATABASE_URL" \
             -c "SELECT tablename, rowsecurity FROM pg_tables WHERE schemaname='public' ORDER BY tablename;" \
             || echo "Note: Verification query may fail depending on permissions"
 

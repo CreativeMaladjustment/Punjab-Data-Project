@@ -132,17 +132,17 @@ on:
   # running them in the same clock hour doesn't couple them, just means
   # both show up for review at once.
   #
-  # Schedule disabled - use workflow_dispatch to run manually
   # Four cron entries, one per model, each firing that model's own hours.
-  # Gemma models staggered to prevent concurrent runs (each run takes ~5 hours):
+  # Gemini flash-lite models: process all unapproved pages (100% coverage)
+  # Gemma models: staggered to prevent concurrent runs (each run takes ~5 hours):
   # - gemma-4-31b-it: hours 3, 15 (runs 3-8, 15-20)
   # - gemma-4-26b-a4b-it: hours 9, 21 (runs 9-14, 21-2)
   # Max 15 concurrent runners at any time, leaving 5 for other tasks.
-  # schedule:
-  #   - cron: "0 4,16 * * *"         # gemini-3.1-flash-lite
-  #   - cron: "0 10,22 * * *"        # gemini-3.5-flash-lite
-  #   - cron: "0 3,15 * * *"         # gemma-4-31b-it (15-worker matrix, OCR-only)
-  #   - cron: "0 9,21 * * *"         # gemma-4-26b-a4b-it (15-worker matrix, OCR-only)
+  schedule:
+    - cron: "0 4,16 * * *"         # gemini-3.1-flash-lite
+    - cron: "0 10,22 * * *"        # gemini-3.5-flash-lite
+    - cron: "0 3,15 * * *"         # gemma-4-31b-it (15-worker matrix, OCR-only)
+    - cron: "0 9,21 * * *"         # gemma-4-26b-a4b-it (15-worker matrix, OCR-only)
   workflow_dispatch:
     inputs:
       model:

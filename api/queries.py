@@ -671,7 +671,7 @@ QC_FIRST_ID_SQL = """
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
           )
       ))
-      AND (NOT %(not_extracted)s OR EXISTS (
+      AND (NOT %(not_extracted)s OR (EXISTS (
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
@@ -680,11 +680,11 @@ QC_FIRST_ID_SQL = """
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
           )
-          AND NOT EXISTS (
-            SELECT 1 FROM qc_reviews qr
-            WHERE qr.extraction_id = le.id AND qr.verdict = 'approved'
-          )
-      ))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM qc_reviews qr
+        WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
+          AND qr.verdict = 'approved'
+      )))
 """
 
 QC_NEXT_ID_SQL = """
@@ -701,7 +701,7 @@ QC_NEXT_ID_SQL = """
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
           )
       ))
-      AND (NOT %(not_extracted)s OR EXISTS (
+      AND (NOT %(not_extracted)s OR (EXISTS (
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
@@ -710,11 +710,11 @@ QC_NEXT_ID_SQL = """
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
           )
-          AND NOT EXISTS (
-            SELECT 1 FROM qc_reviews qr
-            WHERE qr.extraction_id = le.id AND qr.verdict = 'approved'
-          )
-      ))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM qc_reviews qr
+        WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
+          AND qr.verdict = 'approved'
+      )))
 """
 
 QC_PREV_ID_SQL = """
@@ -731,7 +731,7 @@ QC_PREV_ID_SQL = """
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
           )
       ))
-      AND (NOT %(not_extracted)s OR EXISTS (
+      AND (NOT %(not_extracted)s OR (EXISTS (
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
@@ -740,11 +740,11 @@ QC_PREV_ID_SQL = """
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
           )
-          AND NOT EXISTS (
-            SELECT 1 FROM qc_reviews qr
-            WHERE qr.extraction_id = le.id AND qr.verdict = 'approved'
-          )
-      ))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM qc_reviews qr
+        WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
+          AND qr.verdict = 'approved'
+      )))
 """
 
 # rank/total in one round trip (rank counts pages with id <= page_id,
@@ -769,7 +769,7 @@ QC_POSITION_SQL = """
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
           )
       ))
-      AND (NOT %(not_extracted)s OR EXISTS (
+      AND (NOT %(not_extracted)s OR (EXISTS (
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
@@ -778,11 +778,11 @@ QC_POSITION_SQL = """
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
           )
-          AND NOT EXISTS (
-            SELECT 1 FROM qc_reviews qr
-            WHERE qr.extraction_id = le.id AND qr.verdict = 'approved'
-          )
-      ))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM qc_reviews qr
+        WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
+          AND qr.verdict = 'approved'
+      )))
 """
 
 # Backs the "go to page N" jump: N is the same 1-indexed rank
@@ -803,7 +803,7 @@ QC_ID_AT_RANK_SQL = """
             OR (le.status = 'failed' AND le.content_failure AND le.attempt_count >= %(max_attempts)s)
           )
       ))
-      AND (NOT %(not_extracted)s OR EXISTS (
+      AND (NOT %(not_extracted)s OR (EXISTS (
         SELECT 1 FROM llm_extractions le
         WHERE le.page_id = p.id
           AND le.model_tag <> %(human_tag)s
@@ -812,11 +812,11 @@ QC_ID_AT_RANK_SQL = """
           AND NOT EXISTS (
             SELECT 1 FROM catalogue_entries ce WHERE ce.extraction_id = le.id
           )
-          AND NOT EXISTS (
-            SELECT 1 FROM qc_reviews qr
-            WHERE qr.extraction_id = le.id AND qr.verdict = 'approved'
-          )
-      ))
+      ) AND NOT EXISTS (
+        SELECT 1 FROM qc_reviews qr
+        WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
+          AND qr.verdict = 'approved'
+      )))
     ORDER BY id
     OFFSET %(offset)s LIMIT 1
 """

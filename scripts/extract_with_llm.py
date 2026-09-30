@@ -449,7 +449,13 @@ _SKIP_ALREADY_EXTRACTED_FILTER = """
 
 CLAIM_NEXT_PAGE_SQL = """
     WITH candidate AS (
-        SELECT p.id
+        SELECT p.id,
+               NOT EXISTS (
+                 SELECT 1 FROM llm_extractions any_le
+                 WHERE any_le.page_id = p.id
+                   AND any_le.status = 'success'
+                   AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
+               ) AS has_no_extraction
         FROM pages p
         LEFT JOIN llm_extractions le
             ON le.page_id = p.id AND le.model_tag = %(model_tag)s
@@ -464,13 +470,13 @@ CLAIM_NEXT_PAGE_SQL = """
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
           {source_filter}
-        ORDER BY CASE WHEN le.id IS NULL THEN 0 ELSE 1 END, random()
+        ORDER BY has_no_extraction DESC, CASE WHEN le.id IS NULL THEN 0 ELSE 1 END, random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),
     inserted AS (
         INSERT INTO llm_extractions (page_id, model, model_tag, status, claimed_at, attempt_count)
-        SELECT candidate.id, %(model)s, %(model_tag)s, 'claimed', now(), 1
+        SELECT id, %(model)s, %(model_tag)s, 'claimed', now(), 1
         FROM candidate
         ON CONFLICT (page_id, model_tag) DO UPDATE SET
             status = 'claimed', claimed_at = now(), error_message = NULL,

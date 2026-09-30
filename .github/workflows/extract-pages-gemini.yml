@@ -375,12 +375,10 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # 5 * 60/30 RPM = 10.0s is the bare floor for 5 workers to stay
-          # within gemma's real RPM cap without any one worker needing to
-          # know the others exist; 12.0s adds some margin (combined ~25
-          # RPM). See the module comment above for why TPM, not RPM, is
-          # the more uncertain constraint here.
-          GEMINI_PACE_SECONDS: "12.0"
+          # 5 * 60/5 RPM = 60 RPM target (aggressive test to see actual
+          # throughput and identify bottlenecks). Current usage only ~7 RPM,
+          # so testing higher pace to explore the limit.
+          GEMINI_PACE_SECONDS: "5.0"
           MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}

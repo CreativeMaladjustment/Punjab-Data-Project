@@ -134,15 +134,15 @@ on:
   #
   # Four cron entries, one per model, each firing that model's own hours.
   # Gemini flash-lite models: process all unapproved pages (100% coverage)
-  # Gemma models: staggered to prevent concurrent runs (each run takes ~5 hours):
-  # - gemma-4-31b-it: hours 3, 15 (runs 3-8, 15-20)
-  # - gemma-4-26b-a4b-it: hours 9, 21 (runs 9-14, 21-2)
-  # Max 15 concurrent runners at any time, leaving 5 for other tasks.
+  # Gemma models: 4 times a day every 6 hours, staggered by 1 hour each:
+  # - gemma-4-31b-it: hours 0, 6, 12, 18 UTC (5-worker matrix, OCR-only)
+  # - gemma-4-26b-a4b-it: hours 1, 7, 13, 19 UTC (5-worker matrix, OCR-only)
+  # Max 5 concurrent runners per Gemma model at any time, max ~10 total, leaving ~10 for other tasks.
   schedule:
     - cron: "0 4,16 * * *"         # gemini-3.1-flash-lite
     - cron: "0 10,22 * * *"        # gemini-3.5-flash-lite
-    - cron: "0 3,15 * * *"         # gemma-4-31b-it (15-worker matrix, OCR-only)
-    - cron: "0 9,21 * * *"         # gemma-4-26b-a4b-it (15-worker matrix, OCR-only)
+    - cron: "0 0,6,12,18 * * *"    # gemma-4-31b-it (5-worker matrix, OCR-only)
+    - cron: "0 1,7,13,19 * * *"    # gemma-4-26b-a4b-it (5-worker matrix, OCR-only)
   workflow_dispatch:
     inputs:
       model:
@@ -320,24 +320,24 @@ jobs:
         run: exit 1
 
   extract-gemma-matrix:
-    # 15 workers -- scaled up from 5 to maximize throughput. Each worker
-    # independently claims and processes pages (see extract_with_gemini.py's
-    # claim_next_page(), built on `FOR UPDATE ... SKIP LOCKED`, the same
-    # safe-for-concurrent-workers pattern extract-pages.yml's own matrix
-    # relies on).
+    # 5 workers -- provides adequate throughput for the new 4x/day schedule
+    # without excessive runner usage. Each worker independently claims and
+    # processes pages (see extract_with_gemini.py's claim_next_page(), built
+    # on `FOR UPDATE ... SKIP LOCKED`, the same safe-for-concurrent-workers
+    # pattern extract-pages.yml's own matrix relies on).
     #
     # Only runs for the two Gemma models -- the exact negation of
     # extract's `if:` above. Keep both conditions in sync: every trigger
     # must match exactly one of the two jobs, never both, never neither.
     if: >-
-      github.event.schedule == '0 3,15 * * *' ||
-      github.event.schedule == '0 9,21 * * *' ||
+      github.event.schedule == '0 0,6,12,18 * * *' ||
+      github.event.schedule == '0 1,7,13,19 * * *' ||
       inputs.model == 'gemma-4-31b-it' ||
       inputs.model == 'gemma-4-26b-a4b-it'
     strategy:
       fail-fast: false
       matrix:
-        worker: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        worker: [1, 2, 3, 4, 5]
     runs-on: ubuntu-latest
     timeout-minutes: 350
     environment: b2-upload
@@ -348,7 +348,7 @@ jobs:
       # Only two cron strings ever reach this job (this job's `if:`
       # above guarantees it), so a schedule-triggered run needs only one
       # match, with the other cron string implied by the fallback.
-      GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 3,15 * * *' && 'gemma-4-31b-it' || 'gemma-4-26b-a4b-it') }}
+      GEMINI_MODEL: ${{ inputs.model || (github.event.schedule == '0 0,6,12,18 * * *' && 'gemma-4-31b-it' || 'gemma-4-26b-a4b-it') }}
       SOURCE_MODEL: ${{ inputs.source_model || '(none)' }}
       ALLOW_ALREADY_EXTRACTED: ${{ inputs.allow_already_extracted || false }}
     steps:
@@ -370,10 +370,10 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # 15 workers at 1 second pace = aggressive throughput test.
-          # Monitor rate limit errors (429) and adjust pace upward if needed
-          # to stay within quota constraints (30 RPM limit).
-          GEMINI_PACE_SECONDS: "1.0"
+          # 5 workers at 3 second pace = balanced throughput for 4x/day schedule.
+          # Formula: N workers sharing 30 RPM limit requires N * 2.0s pace minimum.
+          # 5 * 2.0 = 10.0s minimum; 3.0s is still conservative with built-in margin.
+          GEMINI_PACE_SECONDS: "3.0"
           MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           B2_ENDPOINT: ${{ secrets.B2_ENDPOINT }}
@@ -404,9 +404,9 @@ jobs:
         run: |
           echo "### 🚦 Daily Gemini quota exhausted for \`$GEMINI_MODEL\` (worker ${{ matrix.worker }}) — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "This worker's Gemini call kept getting rejected (429, or a 5xx from the same underlying cause) through every retry. With 8 workers sharing one quota, more than one may hit this around the same time -- each stops itself independently rather than all 8 grinding through repeated retry cycles. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "This worker's Gemini call kept getting rejected (429, or a 5xx from the same underlying cause) through every retry. With 5 workers sharing one quota, more than one may hit this around the same time -- each stops itself independently rather than all 5 grinding through repeated retry cycles. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Action needed:** none -- RPD quotas reset at midnight Pacific time, and the next scheduled run (every 6h) or a manual re-run with the same model (\`$GEMINI_MODEL\`) continues it automatically." >> "$GITHUB_STEP_SUMMARY"
+          echo "**Action needed:** none -- RPD quotas reset at midnight Pacific time, and the next scheduled run (~6h) or a manual re-run with the same model (\`$GEMINI_MODEL\`) continues it automatically." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail job on unexpected script error
         if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42' && steps.run.outputs.exit_code != '43'

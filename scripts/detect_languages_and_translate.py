@@ -9,12 +9,13 @@ Results are stored in two tables:
   - page_detected_languages: one row per unique language per page
   - page_translations: original text + English translation for non-English content
 
-Uses Gemini 3.5 Flash Lite (or 3.1 Flash Lite as fallback) for speed and efficiency --
-language identification and translation are straightforward tasks that don't need
-larger models.
+Alternates between Gemini 3.5 Flash Lite and Gemini 3.1 Flash Lite for speed and
+efficiency -- language identification and translation are straightforward tasks
+that don't need larger models. Alternating models lets us work within free-tier
+quotas by distributing load across two model buckets (each has 15 RPM, 250K TPM).
 
 Processes pages with successful OCR text that haven't been language-analyzed yet.
-Respects Gemini's free-tier rate limits via pacing similar to extract_with_gemini.py.
+Paces requests at 5s apart (start-to-start) to stay under rate limits with margin.
 """
 import json
 import os
@@ -26,13 +27,16 @@ import psycopg2
 import requests
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
-# Gemini 3.5 Flash Lite: 15 RPM, 250K TPM free tier
-# Gemini 3.1 Flash Lite: 15 RPM, 250K TPM free tier
-# These are per-project quotas shared across ALL callers, so we pace conservatively
-GEMINI_PACE_SECONDS = 5.0  # 12 requests/minute per this worker (conservative vs 15 RPM limit)
+# Alternate between two models to distribute quota load
+# Gemini 3.5 Flash Lite: 15 RPM, 250K TPM free tier (per-project quota)
+# Gemini 3.1 Flash Lite: 15 RPM, 250K TPM free tier (per-project quota)
+# By alternating, each model gets ~6 req/min (within limit with margin)
+GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+GEMINI_MODEL_INDEX = 0  # Start with 3.5
+GEMINI_DISABLED_MODELS = set()  # Models that hit rate limits during this run
+GEMINI_PACE_SECONDS = 2.0  # 2s from request start to next request start (15 RPM per model when alternating)
 
 DB_CONNECT_MAX_ATTEMPTS = 5
 RUNTIME_GUARD_EXIT_CODE = 42
@@ -43,6 +47,7 @@ MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
 DEBUG = MAX_PAGES_PER_WORKER > 0 and MAX_PAGES_PER_WORKER < 20
 
 START_TIME = time.time()
+LAST_REQUEST_START_TIME = None  # Track when the last request started (for 5s pacing)
 
 SYSTEM_PROMPT = """You are a language identification and translation expert. You will analyze text from scanned pages of British colonial-era "Catalogue of Books registered" volumes.
 
@@ -96,13 +101,49 @@ def db_connect():
             time.sleep(2**attempt)
 
 
+def get_next_model():
+    """Return next available model in rotation (skip disabled ones).
+
+    Returns: model name if available, or None if all models are disabled
+    Raises: RuntimeError if all models have hit their rate limits
+    """
+    global GEMINI_MODEL_INDEX
+
+    # Check if all models are disabled
+    if len(GEMINI_DISABLED_MODELS) == len(GEMINI_MODELS):
+        raise RuntimeError(f"All models have hit rate limits: {', '.join(GEMINI_MODELS)}")
+
+    # Find next enabled model, skipping disabled ones
+    attempts = 0
+    while attempts < len(GEMINI_MODELS):
+        model = GEMINI_MODELS[GEMINI_MODEL_INDEX]
+        GEMINI_MODEL_INDEX = (GEMINI_MODEL_INDEX + 1) % len(GEMINI_MODELS)
+
+        if model not in GEMINI_DISABLED_MODELS:
+            return model
+        attempts += 1
+
+    raise RuntimeError(f"No available models (all disabled: {GEMINI_DISABLED_MODELS})")
+
+
 def wait_for_rate_limit():
-    """Pace requests to stay under Gemini's free-tier rate limit."""
-    time.sleep(GEMINI_PACE_SECONDS)
+    """Pace requests: maintain 5s from previous request start to this request start."""
+    global LAST_REQUEST_START_TIME
+    now = time.time()
+    if LAST_REQUEST_START_TIME is not None:
+        elapsed_since_last = now - LAST_REQUEST_START_TIME
+        if elapsed_since_last < GEMINI_PACE_SECONDS:
+            sleep_time = GEMINI_PACE_SECONDS - elapsed_since_last
+            time.sleep(sleep_time)
+    LAST_REQUEST_START_TIME = time.time()
 
 
-def detect_and_translate_page(ocr_text, model_tag):
+def detect_and_translate_page(ocr_text, model):
     """Send full OCR text to Gemini, get language IDs and translations.
+
+    Args:
+        ocr_text: Full page OCR text to analyze
+        model: Model ID to use (e.g., "gemini-3.5-flash-lite")
 
     Returns: {"languages": [...], "translations": [...]}
     Raises: RuntimeError on API error or unexpected response format
@@ -112,8 +153,8 @@ def detect_and_translate_page(ocr_text, model_tag):
     log_debug(f"OCR text length: {len(ocr_text)} characters")
     log_debug(f"OCR text (first 500 chars): {ocr_text[:500]!r}")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    log_debug(f"Calling Gemini API: {url}")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    log_debug(f"Calling Gemini API: {url} ({model})")
 
     payload = {
         "contents": [{
@@ -163,6 +204,9 @@ def detect_and_translate_page(ocr_text, model_tag):
 
     if not resp.ok:
         log_debug(f"Error response body: {resp.text[:2000]}")
+        # Signal rate limit errors distinctly so we can disable this model
+        if resp.status_code == 429:
+            raise RuntimeError(f"Gemini {model} rate limit hit (429): quota exhausted for this model")
         raise RuntimeError(f"Gemini API returned {resp.status_code}: {resp.text[:1000]}")
 
     response_data = resp.json()
@@ -256,7 +300,7 @@ def save_languages_and_translations(page_id, model_tag, analysis_result):
     log_debug(f"  ✓ Saved to database")
 
 
-def get_pages_needing_language_detection(model_tag):
+def get_pages_needing_language_detection():
     """Fetch pages with successful OCR that haven't been analyzed yet.
 
     Returns list of (page_id, ocr_text) tuples.
@@ -286,7 +330,9 @@ def get_pages_needing_language_detection(model_tag):
 
 def main():
     print(f"Language detection and translation worker starting")
-    print(f"Model: {GEMINI_MODEL}, Pace: {GEMINI_PACE_SECONDS}s per request")
+    print(f"Models: {' ↔ '.join(GEMINI_MODELS)} (alternating)")
+    print(f"  Will skip models that hit rate limits; stops if all models disabled")
+    print(f"Pace: {GEMINI_PACE_SECONDS}s between request starts")
     print(f"DEBUG mode: {'ON' if DEBUG else 'OFF'}")
     if DEBUG:
         print(f"  (DEBUG enabled: processing < 20 pages)")
@@ -295,7 +341,7 @@ def main():
     pages_failed = 0
 
     try:
-        pages = get_pages_needing_language_detection(GEMINI_MODEL)
+        pages = get_pages_needing_language_detection()
         print(f"Found {len(pages)} pages needing language detection")
         if DEBUG:
             log_debug(f"Pages to process: {[p[0] for p in pages]}")
@@ -306,21 +352,58 @@ def main():
                 sys.exit(RUNTIME_GUARD_EXIT_CODE)
 
             try:
-                print(f"[{page_num}/{len(pages)}] Processing page {page_id}... ", end="", flush=True)
+                # Select model for this request (may raise if all models disabled)
+                current_model = get_next_model()
+                print(f"[{page_num}/{len(pages)}] Processing page {page_id} ({current_model})... ", end="", flush=True)
 
                 if DEBUG:
-                    log_debug(f"Page {page_id}: OCR text length: {len(ocr_text)}")
+                    log_debug(f"Page {page_id}: OCR text length: {len(ocr_text)}, using {current_model}")
 
                 # Detect languages and get translations
-                result = detect_and_translate_page(ocr_text, GEMINI_MODEL)
+                result = detect_and_translate_page(ocr_text, current_model)
 
-                # Store in database
-                save_languages_and_translations(page_id, GEMINI_MODEL, result)
+                # Store in database with model tag
+                save_languages_and_translations(page_id, current_model, result)
 
                 lang_count = len(result.get("languages", []))
                 trans_count = len(result.get("translations", []))
                 print(f"✓ {lang_count} language(s), {trans_count} translation(s)")
                 pages_processed += 1
+
+            except RuntimeError as exc:
+                error_msg = str(exc)
+                # Check if this is a rate limit error for a specific model
+                if "rate limit hit (429)" in error_msg:
+                    # Extract which model hit the limit and disable it
+                    model_disabled = False
+                    for model in GEMINI_MODELS:
+                        if model in error_msg:
+                            GEMINI_DISABLED_MODELS.add(model)
+                            print(f"✗ {model} disabled (rate limit)")
+                            model_disabled = True
+                            break
+
+                    if model_disabled:
+                        # Check if other models still available
+                        if len(GEMINI_DISABLED_MODELS) < len(GEMINI_MODELS):
+                            print(f"  Continuing with remaining model(s)")
+                            pages_failed += 1
+                        else:
+                            print(f"✗ All models disabled - stopping")
+                            raise
+                    else:
+                        # Rate limit error but couldn't identify model, treat as fatal
+                        print(f"✗ {exc}")
+                        pages_failed += 1
+                else:
+                    # Non-rate-limit error, just log and continue
+                    print(f"✗ {exc}")
+                    if DEBUG:
+                        import traceback
+                        log_debug(f"Exception traceback:")
+                        for line in traceback.format_exc().split('\n'):
+                            log_debug(line)
+                    pages_failed += 1
 
             except Exception as exc:
                 print(f"✗ {exc}")

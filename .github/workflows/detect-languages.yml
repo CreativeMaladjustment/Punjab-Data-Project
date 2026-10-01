@@ -20,7 +20,8 @@ jobs:
     timeout-minutes: 350
     environment: b2-upload  # Where GEMINI_API_KEY lives
     env:
-      GEMINI_MODEL: gemini-3.5-flash-lite
+      # Script alternates between 3.5 and 3.1 Flash Lite
+      # (no GEMINI_MODEL env var needed; models are hardcoded in script)
       MAX_PAGES_PER_WORKER: ${{ inputs.max_pages || 0 }}
       MAX_RUNTIME_SECONDS: 18000  # 5 hours
       PYTHONUNBUFFERED: "1"

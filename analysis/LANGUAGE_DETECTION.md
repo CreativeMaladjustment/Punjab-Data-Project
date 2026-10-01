@@ -93,22 +93,30 @@ FROM pages p
 JOIN page_translations pt ON pt.page_id = p.id;
 ```
 
-## Model Choice: Gemini 3.5 Flash Lite
+## Model Strategy: Alternating 3.5 and 3.1 Flash Lite
 
-- **Why:** Language ID and translation are straightforward tasks; doesn't need model size
-- **Speed:** Optimized for fast inference
-- **Efficiency:** Excellent token efficiency (13.64K/250K TPM quota)
-- **Cost:** Minimal token usage per page
-- **Rate limits:** 15 RPM free tier (paced at 5s = 12 req/min for headroom)
+The script **alternates between Gemini 3.5 Flash Lite and 3.1 Flash Lite**:
+- **3.5** for odd-numbered requests, **3.1** for even-numbered requests
+- Each model gets ~6 req/min (vs 15 RPM limit), well within quota
+- Leverages two separate model quotas to increase throughput without rate-limit contention
 
-Fallback to **Gemini 3.1 Flash Lite** if 3.5 becomes unavailable (same capabilities, same quotas).
+**Why both models:**
+- Language ID and translation are straightforward tasks; both models handle equally well
+- Speed: Both optimized for fast inference
+- Quota: 15 RPM, 250K TPM per model = 30 RPM total quota available
+- Alternating spreads load evenly and keeps both within limits with margin
+
+**Pacing:** Requests are spaced 2 seconds apart (measured start-to-start). With alternation,
+each model gets a request every 4 seconds = 15 req/min (hitting the full quota limit).
 
 ## Extending
 
-### Support for more models
-Later, can add **Gemini 3.1 Flash Lite** as alternative:
-- Set env var: `GEMINI_MODEL=gemini-3.1-flash-lite`
-- Update pacing if needed (currently same 15 RPM limit)
+### Adding more models to the alternation
+To add a third model (e.g., **Gemini 2.0 Flash Lite**):
+- Add to `GEMINI_MODELS` list in the script
+- Adjust `GEMINI_PACE_SECONDS` if needed (currently 5s = 12 req/min per model)
+- With 3 models: 5s pacing = 4 req/min per model (4 × 15 = 60 RPM total)
+- Monitor quota usage and adjust pacing accordingly
 
 ### Multi-section handling
 Currently treats entire page as one unit. To split OCR text into sections:

@@ -304,8 +304,8 @@ def get_pages_needing_language_detection():
     """Fetch pages with successful OCR that haven't been analyzed yet.
 
     Each page appears exactly once (one OCR per page, even if multiple models
-    have OCR'd it). Uses DISTINCT ON to pick the first successful OCR for
-    each page (in case multiple models OCR'd the same page).
+    have OCR'd it). Prioritizes by model_tag: gemma-4-31b-it first, then
+    gemma-4-26b-a4b-it, then others in order of creation.
 
     Returns list of (page_id, ocr_text) tuples.
     """
@@ -324,7 +324,13 @@ def get_pages_needing_language_detection():
                   )
                   AND p.image_uploaded_at IS NOT NULL
                   AND p.excluded_at IS NULL
-                ORDER BY p.id, pot.created_at
+                ORDER BY p.id,
+                  CASE pot.model_tag
+                    WHEN 'gemma-4-31b-it' THEN 0
+                    WHEN 'gemma-4-26b-a4b-it' THEN 1
+                    ELSE 2
+                  END,
+                  pot.created_at
                 LIMIT %s
                 """,
                 (MAX_PAGES_PER_WORKER if MAX_PAGES_PER_WORKER else 1000000,)

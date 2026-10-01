@@ -287,6 +287,81 @@ PAGES_EMPTY_EXTRACTION_APPROVED_SQL = """
       )
 """
 
+# Language detection and translation queries
+PAGES_WITH_LANGUAGE_DETECTION_SQL = """
+    SELECT COUNT(DISTINCT page_id)
+    FROM page_detected_languages
+"""
+
+PAGES_WITHOUT_LANGUAGE_DETECTION_SQL = """
+    SELECT COUNT(DISTINCT p.id)
+    FROM pages p
+    WHERE p.image_uploaded_at IS NOT NULL
+      AND p.excluded_at IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM page_detected_languages pdl
+        WHERE pdl.page_id = p.id
+      )
+"""
+
+LANGUAGES_SUMMARY_SQL = """
+    SELECT language, language_code, COUNT(DISTINCT page_id) as page_count
+    FROM page_detected_languages
+    GROUP BY language, language_code
+    ORDER BY page_count DESC
+"""
+
+PAGES_MONOLINGUAL_SQL = """
+    SELECT COUNT(DISTINCT page_id)
+    FROM (
+        SELECT page_id, COUNT(DISTINCT language_code) as lang_count
+        FROM page_detected_languages
+        GROUP BY page_id
+        HAVING COUNT(DISTINCT language_code) = 1
+    ) monolingual_pages
+"""
+
+PAGES_MULTILINGUAL_SQL = """
+    SELECT COUNT(DISTINCT page_id)
+    FROM (
+        SELECT page_id, COUNT(DISTINCT language_code) as lang_count
+        FROM page_detected_languages
+        GROUP BY page_id
+        HAVING COUNT(DISTINCT language_code) > 1
+    ) multilingual_pages
+"""
+
+
+def fetch_language_detection_summary(conn, total_pages):
+    """Fetch language detection and translation statistics."""
+    with conn.cursor() as cur:
+        cur.execute(PAGES_WITH_LANGUAGE_DETECTION_SQL)
+        (pages_with_detection,) = cur.fetchone()
+
+        cur.execute(PAGES_WITHOUT_LANGUAGE_DETECTION_SQL)
+        (pages_without_detection,) = cur.fetchone()
+
+        cur.execute(LANGUAGES_SUMMARY_SQL)
+        languages = [
+            {"language": row[0], "code": row[1], "pages": row[2]}
+            for row in cur.fetchall()
+        ]
+
+        cur.execute(PAGES_MONOLINGUAL_SQL)
+        (monolingual_pages,) = cur.fetchone()
+
+        cur.execute(PAGES_MULTILINGUAL_SQL)
+        (multilingual_pages,) = cur.fetchone()
+
+    return {
+        "pages_with_detection": pages_with_detection or 0,
+        "pages_without_detection": pages_without_detection or 0,
+        "detection_pct": round(100.0 * (pages_with_detection or 0) / total_pages, 1) if total_pages > 0 else 0,
+        "languages": languages,
+        "monolingual_pages": monolingual_pages or 0,
+        "multilingual_pages": multilingual_pages or 0,
+    }
+
 
 def fetch_progress_summary(conn, total_pages):
     """Fetch detailed progress metrics for the main processing pipeline."""

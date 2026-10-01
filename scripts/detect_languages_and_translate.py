@@ -303,13 +303,17 @@ def save_languages_and_translations(page_id, model_tag, analysis_result):
 def get_pages_needing_language_detection():
     """Fetch pages with successful OCR that haven't been analyzed yet.
 
+    Each page appears exactly once (one OCR per page, even if multiple models
+    have OCR'd it). Uses DISTINCT ON to pick the first successful OCR for
+    each page (in case multiple models OCR'd the same page).
+
     Returns list of (page_id, ocr_text) tuples.
     """
     with db_connect() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT p.id, pot.raw_text
+                SELECT DISTINCT ON (p.id) p.id, pot.raw_text
                 FROM pages p
                 JOIN page_ocr_text pot ON pot.page_id = p.id
                 WHERE pot.status = 'success'
@@ -320,7 +324,7 @@ def get_pages_needing_language_detection():
                   )
                   AND p.image_uploaded_at IS NOT NULL
                   AND p.excluded_at IS NULL
-                ORDER BY p.id
+                ORDER BY p.id, pot.created_at
                 LIMIT %s
                 """,
                 (MAX_PAGES_PER_WORKER if MAX_PAGES_PER_WORKER else 1000000,)

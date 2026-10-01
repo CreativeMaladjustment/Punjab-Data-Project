@@ -36,7 +36,7 @@ SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 GEMINI_MODEL_INDEX = 0  # Start with 3.5
 GEMINI_DISABLED_MODELS = set()  # Models that hit rate limits during this run
-GEMINI_PACE_SECONDS = 5.0  # 5s from request start to next request start
+GEMINI_PACE_SECONDS = 2.0  # 2s from request start to next request start (15 RPM per model when alternating)
 
 DB_CONNECT_MAX_ATTEMPTS = 5
 RUNTIME_GUARD_EXIT_CODE = 42

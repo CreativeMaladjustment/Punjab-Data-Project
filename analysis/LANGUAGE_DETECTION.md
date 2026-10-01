@@ -106,8 +106,8 @@ The script **alternates between Gemini 3.5 Flash Lite and 3.1 Flash Lite**:
 - Quota: 15 RPM, 250K TPM per model = 30 RPM total quota available
 - Alternating spreads load evenly and keeps both within limits with margin
 
-**Pacing:** Requests are spaced 5 seconds apart (measured start-to-start), ensuring
-neither model exceeds ~12 req/min (conservative vs 15 RPM limit).
+**Pacing:** Requests are spaced 2 seconds apart (measured start-to-start). With alternation,
+each model gets a request every 4 seconds = 15 req/min (hitting the full quota limit).
 
 ## Extending
 

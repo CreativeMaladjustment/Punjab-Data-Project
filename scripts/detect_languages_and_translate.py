@@ -39,6 +39,9 @@ RUNTIME_GUARD_EXIT_CODE = 42
 MAX_RUNTIME_SECONDS = 18000  # 5 hours
 MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
 
+# Enable debug mode for small test runs
+DEBUG = MAX_PAGES_PER_WORKER > 0 and MAX_PAGES_PER_WORKER < 20
+
 START_TIME = time.time()
 
 SYSTEM_PROMPT = """You are a language identification and translation expert. You will analyze text from scanned pages of British colonial-era "Catalogue of Books registered" volumes.
@@ -76,6 +79,12 @@ def elapsed():
     return time.time() - START_TIME
 
 
+def log_debug(msg):
+    """Print debug message if DEBUG mode is enabled."""
+    if DEBUG:
+        print(f"[DEBUG] {msg}", file=sys.stderr)
+
+
 def db_connect():
     for attempt in range(1, DB_CONNECT_MAX_ATTEMPTS + 1):
         try:
@@ -100,64 +109,99 @@ def detect_and_translate_page(ocr_text, model_tag):
     """
     wait_for_rate_limit()
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    log_debug(f"OCR text length: {len(ocr_text)} characters")
+    log_debug(f"OCR text (first 500 chars): {ocr_text[:500]!r}")
 
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    log_debug(f"Calling Gemini API: {url}")
+
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [{
+                "text": f"{SYSTEM_PROMPT}\n\nPage OCR text:\n\n{ocr_text}"
+            }]
+        }],
+        "generationConfig": {
+            "temperature": 0,
+            "maxOutputTokens": 4096,
+            "responseMimeType": "application/json"
+        },
+        "safetySettings": [
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_NONE"
+            }
+        ]
+    }
+
+    log_debug(f"Request payload keys: {list(payload.keys())}")
+
+    start_api = time.time()
     resp = requests.post(
         url,
-        json={
-            "contents": [{
-                "role": "user",
-                "parts": [{
-                    "text": f"{SYSTEM_PROMPT}\n\nPage OCR text:\n\n{ocr_text}"
-                }]
-            }],
-            "generationConfig": {
-                "temperature": 0,
-                "maxOutputTokens": 4096,
-                "responseMimeType": "application/json"
-            },
-            "safetySettings": [
-                {
-                    "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    "threshold": "BLOCK_NONE"
-                },
-                {
-                    "category": "HARM_CATEGORY_HARASSMENT",
-                    "threshold": "BLOCK_NONE"
-                },
-                {
-                    "category": "HARM_CATEGORY_HATE_SPEECH",
-                    "threshold": "BLOCK_NONE"
-                },
-                {
-                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                    "threshold": "BLOCK_NONE"
-                }
-            ]
-        },
+        json=payload,
         headers={"x-goog-api-key": GEMINI_API_KEY},
         timeout=(10, 600)
     )
+    api_time = time.time() - start_api
+
+    log_debug(f"API response status: {resp.status_code} (took {api_time:.1f}s)")
+    log_debug(f"Response headers: {dict(resp.headers)}")
 
     if not resp.ok:
+        log_debug(f"Error response body: {resp.text[:2000]}")
         raise RuntimeError(f"Gemini API returned {resp.status_code}: {resp.text[:1000]}")
 
     response_data = resp.json()
+    log_debug(f"Response JSON keys: {list(response_data.keys())}")
+
     if "candidates" not in response_data or not response_data["candidates"]:
+        log_debug(f"Full response: {json.dumps(response_data, indent=2)}")
         raise RuntimeError(f"Unexpected Gemini response format: {response_data}")
 
     candidate = response_data["candidates"][0]
+    log_debug(f"Candidate keys: {list(candidate.keys())}")
+
     if "content" not in candidate or "parts" not in candidate["content"]:
+        log_debug(f"Full candidate: {json.dumps(candidate, indent=2)}")
         raise RuntimeError(f"No content in Gemini response: {response_data}")
 
     text = candidate["content"]["parts"][0]["text"]
+    log_debug(f"Extracted text length: {len(text)} characters")
+    log_debug(f"Extracted text (first 1000 chars): {text[:1000]!r}")
 
     try:
         result = json.loads(text)
     except json.JSONDecodeError as exc:
+        log_debug(f"Failed to parse JSON, full text: {text[:1000]}")
         raise RuntimeError(f"Gemini returned invalid JSON: {text[:500]}") from exc
 
+    log_debug(f"Parsed result keys: {list(result.keys())}")
+    log_debug(f"Languages detected: {result.get('languages', [])}")
+    log_debug(f"Translations count: {len(result.get('translations', []))}")
+
+    for i, trans in enumerate(result.get("translations", [])):
+        log_debug(f"  Translation {i+1}: {trans.get('source_language')} → English")
+        log_debug(f"    Original length: {len(trans.get('original_text', ''))} chars")
+        log_debug(f"    Translation length: {len(trans.get('english_translation', ''))} chars")
+        log_debug(f"    Original (first 200 chars): {trans.get('original_text', '')[:200]!r}")
+        log_debug(f"    Translation (first 200 chars): {trans.get('english_translation', '')[:200]!r}")
+
     if not isinstance(result.get("languages"), list):
+        log_debug(f"Invalid structure, full result: {json.dumps(result, indent=2)}")
         raise RuntimeError(f"Invalid response structure: {result}")
 
     return result
@@ -165,10 +209,15 @@ def detect_and_translate_page(ocr_text, model_tag):
 
 def save_languages_and_translations(page_id, model_tag, analysis_result):
     """Store detected languages and translations in database."""
+    log_debug(f"Saving results for page {page_id}")
+
     with db_connect() as conn:
         with conn.cursor() as cur:
             # Insert detected languages
-            for lang_info in analysis_result.get("languages", []):
+            languages = analysis_result.get("languages", [])
+            log_debug(f"  Inserting {len(languages)} language(s)")
+            for lang_info in languages:
+                log_debug(f"    - {lang_info['language']} ({lang_info['code']})")
                 cur.execute(
                     """
                     INSERT INTO page_detected_languages (page_id, language, language_code, model_tag)
@@ -179,7 +228,11 @@ def save_languages_and_translations(page_id, model_tag, analysis_result):
                 )
 
             # Insert translations (non-English only)
-            for trans in analysis_result.get("translations", []):
+            translations = analysis_result.get("translations", [])
+            log_debug(f"  Inserting {len(translations)} translation(s)")
+            for i, trans in enumerate(translations):
+                log_debug(f"    - Translation {i+1}: {trans['source_language']} → English")
+                log_debug(f"      Original: {len(trans['original_text'])} chars, Translated: {len(trans['english_translation'])} chars")
                 cur.execute(
                     """
                     INSERT INTO page_translations (
@@ -199,6 +252,8 @@ def save_languages_and_translations(page_id, model_tag, analysis_result):
                 )
 
         conn.commit()
+
+    log_debug(f"  ✓ Saved to database")
 
 
 def get_pages_needing_language_detection(model_tag):
@@ -232,6 +287,9 @@ def get_pages_needing_language_detection(model_tag):
 def main():
     print(f"Language detection and translation worker starting")
     print(f"Model: {GEMINI_MODEL}, Pace: {GEMINI_PACE_SECONDS}s per request")
+    print(f"DEBUG mode: {'ON' if DEBUG else 'OFF'}")
+    if DEBUG:
+        print(f"  (DEBUG enabled: processing < 20 pages)")
 
     pages_processed = 0
     pages_failed = 0
@@ -239,14 +297,19 @@ def main():
     try:
         pages = get_pages_needing_language_detection(GEMINI_MODEL)
         print(f"Found {len(pages)} pages needing language detection")
+        if DEBUG:
+            log_debug(f"Pages to process: {[p[0] for p in pages]}")
 
-        for page_id, ocr_text in pages:
+        for page_num, (page_id, ocr_text) in enumerate(pages, 1):
             if MAX_RUNTIME_SECONDS and elapsed() > MAX_RUNTIME_SECONDS:
                 print(f"\n⏱️ Runtime limit reached after {elapsed():.0f}s")
                 sys.exit(RUNTIME_GUARD_EXIT_CODE)
 
             try:
-                print(f"Processing page {page_id}... ", end="", flush=True)
+                print(f"[{page_num}/{len(pages)}] Processing page {page_id}... ", end="", flush=True)
+
+                if DEBUG:
+                    log_debug(f"Page {page_id}: OCR text length: {len(ocr_text)}")
 
                 # Detect languages and get translations
                 result = detect_and_translate_page(ocr_text, GEMINI_MODEL)
@@ -261,10 +324,20 @@ def main():
 
             except Exception as exc:
                 print(f"✗ {exc}")
+                if DEBUG:
+                    import traceback
+                    log_debug(f"Exception traceback:")
+                    for line in traceback.format_exc().split('\n'):
+                        log_debug(line)
                 pages_failed += 1
 
     except Exception as exc:
         print(f"Fatal error: {exc}", file=sys.stderr)
+        if DEBUG:
+            import traceback
+            log_debug(f"Fatal error details:")
+            for line in traceback.format_exc().split('\n'):
+                log_debug(line)
         sys.exit(1)
 
     print(f"\n✓ Processed {pages_processed} pages, {pages_failed} failed ({elapsed():.0f}s elapsed)")

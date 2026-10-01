@@ -35,6 +35,7 @@ SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 # By alternating, each model gets ~6 req/min (within limit with margin)
 GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 GEMINI_MODEL_INDEX = 0  # Start with 3.5
+GEMINI_DISABLED_MODELS = set()  # Models that hit rate limits during this run
 GEMINI_PACE_SECONDS = 5.0  # 5s from request start to next request start
 
 DB_CONNECT_MAX_ATTEMPTS = 5
@@ -101,11 +102,28 @@ def db_connect():
 
 
 def get_next_model():
-    """Return next model in rotation and update index."""
+    """Return next available model in rotation (skip disabled ones).
+
+    Returns: model name if available, or None if all models are disabled
+    Raises: RuntimeError if all models have hit their rate limits
+    """
     global GEMINI_MODEL_INDEX
-    model = GEMINI_MODELS[GEMINI_MODEL_INDEX]
-    GEMINI_MODEL_INDEX = (GEMINI_MODEL_INDEX + 1) % len(GEMINI_MODELS)
-    return model
+
+    # Check if all models are disabled
+    if len(GEMINI_DISABLED_MODELS) == len(GEMINI_MODELS):
+        raise RuntimeError(f"All models have hit rate limits: {', '.join(GEMINI_MODELS)}")
+
+    # Find next enabled model, skipping disabled ones
+    attempts = 0
+    while attempts < len(GEMINI_MODELS):
+        model = GEMINI_MODELS[GEMINI_MODEL_INDEX]
+        GEMINI_MODEL_INDEX = (GEMINI_MODEL_INDEX + 1) % len(GEMINI_MODELS)
+
+        if model not in GEMINI_DISABLED_MODELS:
+            return model
+        attempts += 1
+
+    raise RuntimeError(f"No available models (all disabled: {GEMINI_DISABLED_MODELS})")
 
 
 def wait_for_rate_limit():
@@ -186,6 +204,9 @@ def detect_and_translate_page(ocr_text, model):
 
     if not resp.ok:
         log_debug(f"Error response body: {resp.text[:2000]}")
+        # Signal rate limit errors distinctly so we can disable this model
+        if resp.status_code == 429:
+            raise RuntimeError(f"Gemini {model} rate limit hit (429): quota exhausted for this model")
         raise RuntimeError(f"Gemini API returned {resp.status_code}: {resp.text[:1000]}")
 
     response_data = resp.json()
@@ -310,6 +331,7 @@ def get_pages_needing_language_detection():
 def main():
     print(f"Language detection and translation worker starting")
     print(f"Models: {' ↔ '.join(GEMINI_MODELS)} (alternating)")
+    print(f"  Will skip models that hit rate limits; stops if all models disabled")
     print(f"Pace: {GEMINI_PACE_SECONDS}s between request starts")
     print(f"DEBUG mode: {'ON' if DEBUG else 'OFF'}")
     if DEBUG:
@@ -330,7 +352,7 @@ def main():
                 sys.exit(RUNTIME_GUARD_EXIT_CODE)
 
             try:
-                # Select model for this request
+                # Select model for this request (may raise if all models disabled)
                 current_model = get_next_model()
                 print(f"[{page_num}/{len(pages)}] Processing page {page_id} ({current_model})... ", end="", flush=True)
 
@@ -347,6 +369,41 @@ def main():
                 trans_count = len(result.get("translations", []))
                 print(f"✓ {lang_count} language(s), {trans_count} translation(s)")
                 pages_processed += 1
+
+            except RuntimeError as exc:
+                error_msg = str(exc)
+                # Check if this is a rate limit error for a specific model
+                if "rate limit hit (429)" in error_msg:
+                    # Extract which model hit the limit and disable it
+                    model_disabled = False
+                    for model in GEMINI_MODELS:
+                        if model in error_msg:
+                            GEMINI_DISABLED_MODELS.add(model)
+                            print(f"✗ {model} disabled (rate limit)")
+                            model_disabled = True
+                            break
+
+                    if model_disabled:
+                        # Check if other models still available
+                        if len(GEMINI_DISABLED_MODELS) < len(GEMINI_MODELS):
+                            print(f"  Continuing with remaining model(s)")
+                            pages_failed += 1
+                        else:
+                            print(f"✗ All models disabled - stopping")
+                            raise
+                    else:
+                        # Rate limit error but couldn't identify model, treat as fatal
+                        print(f"✗ {exc}")
+                        pages_failed += 1
+                else:
+                    # Non-rate-limit error, just log and continue
+                    print(f"✗ {exc}")
+                    if DEBUG:
+                        import traceback
+                        log_debug(f"Exception traceback:")
+                        for line in traceback.format_exc().split('\n'):
+                            log_debug(line)
+                    pages_failed += 1
 
             except Exception as exc:
                 print(f"✗ {exc}")

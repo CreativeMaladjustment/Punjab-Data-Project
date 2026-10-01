@@ -1,0 +1,349 @@
+"""Detect languages in full-page OCR text and translate non-English sections to English.
+
+Uses the full-page OCR transcriptions (from page_ocr_text table) produced by
+extract_with_llm.py's ocr_full_page() to:
+  1. Identify all languages present on each page
+  2. For each non-English language detected, translate the relevant sections to English
+
+Results are stored in two tables:
+  - page_detected_languages: one row per unique language per page
+  - page_translations: original text + English translation for non-English content
+
+Uses Gemini 3.5 Flash Lite (or 3.1 Flash Lite as fallback) for speed and efficiency --
+language identification and translation are straightforward tasks that don't need
+larger models.
+
+Processes pages with successful OCR text that haven't been language-analyzed yet.
+Respects Gemini's free-tier rate limits via pacing similar to extract_with_gemini.py.
+"""
+import json
+import os
+import re
+import sys
+import time
+
+import psycopg2
+import requests
+
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
+SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
+
+# Gemini 3.5 Flash Lite: 15 RPM, 250K TPM free tier
+# Gemini 3.1 Flash Lite: 15 RPM, 250K TPM free tier
+# These are per-project quotas shared across ALL callers, so we pace conservatively
+GEMINI_PACE_SECONDS = 5.0  # 12 requests/minute per this worker (conservative vs 15 RPM limit)
+
+DB_CONNECT_MAX_ATTEMPTS = 5
+RUNTIME_GUARD_EXIT_CODE = 42
+MAX_RUNTIME_SECONDS = 18000  # 5 hours
+MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
+
+# Enable debug mode for small test runs
+DEBUG = MAX_PAGES_PER_WORKER > 0 and MAX_PAGES_PER_WORKER < 20
+
+START_TIME = time.time()
+
+SYSTEM_PROMPT = """You are a language identification and translation expert. You will analyze text from scanned pages of British colonial-era "Catalogue of Books registered" volumes.
+
+Your task:
+1. Identify ALL languages present in the provided text (not just the dominant one)
+2. For each language identified:
+   - Provide the language name and ISO 639-1 code
+   - If the language is NOT English, extract the relevant portions and translate them to English
+3. Do NOT translate English text to English
+4. Return results as JSON only, no commentary
+
+Return format:
+{
+  "languages": [
+    {"language": "English", "code": "en"},
+    {"language": "Punjabi", "code": "pa"},
+    ...
+  ],
+  "translations": [
+    {
+      "source_language": "Punjabi",
+      "source_code": "pa",
+      "original_text": "...[punjabi text]...",
+      "english_translation": "...[english translation]..."
+    },
+    ...
+  ]
+}
+
+Only include translations for non-English languages. If a page is entirely in English, return empty translations array."""
+
+
+def elapsed():
+    return time.time() - START_TIME
+
+
+def log_debug(msg):
+    """Print debug message if DEBUG mode is enabled."""
+    if DEBUG:
+        print(f"[DEBUG] {msg}", file=sys.stderr)
+
+
+def db_connect():
+    for attempt in range(1, DB_CONNECT_MAX_ATTEMPTS + 1):
+        try:
+            return psycopg2.connect(SUPABASE_DB_URL)
+        except psycopg2.OperationalError as exc:
+            if attempt == DB_CONNECT_MAX_ATTEMPTS:
+                raise
+            print(f"DB connect attempt {attempt}/{DB_CONNECT_MAX_ATTEMPTS} failed; retrying", file=sys.stderr)
+            time.sleep(2**attempt)
+
+
+def wait_for_rate_limit():
+    """Pace requests to stay under Gemini's free-tier rate limit."""
+    time.sleep(GEMINI_PACE_SECONDS)
+
+
+def detect_and_translate_page(ocr_text, model_tag):
+    """Send full OCR text to Gemini, get language IDs and translations.
+
+    Returns: {"languages": [...], "translations": [...]}
+    Raises: RuntimeError on API error or unexpected response format
+    """
+    wait_for_rate_limit()
+
+    log_debug(f"OCR text length: {len(ocr_text)} characters")
+    log_debug(f"OCR text (first 500 chars): {ocr_text[:500]!r}")
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    log_debug(f"Calling Gemini API: {url}")
+
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [{
+                "text": f"{SYSTEM_PROMPT}\n\nPage OCR text:\n\n{ocr_text}"
+            }]
+        }],
+        "generationConfig": {
+            "temperature": 0,
+            "maxOutputTokens": 4096,
+            "responseMimeType": "application/json"
+        },
+        "safetySettings": [
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH",
+                "threshold": "BLOCK_NONE"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_NONE"
+            }
+        ]
+    }
+
+    log_debug(f"Request payload keys: {list(payload.keys())}")
+
+    start_api = time.time()
+    resp = requests.post(
+        url,
+        json=payload,
+        headers={"x-goog-api-key": GEMINI_API_KEY},
+        timeout=(10, 600)
+    )
+    api_time = time.time() - start_api
+
+    log_debug(f"API response status: {resp.status_code} (took {api_time:.1f}s)")
+    log_debug(f"Response headers: {dict(resp.headers)}")
+
+    if not resp.ok:
+        log_debug(f"Error response body: {resp.text[:2000]}")
+        raise RuntimeError(f"Gemini API returned {resp.status_code}: {resp.text[:1000]}")
+
+    response_data = resp.json()
+    log_debug(f"Response JSON keys: {list(response_data.keys())}")
+
+    if "candidates" not in response_data or not response_data["candidates"]:
+        log_debug(f"Full response: {json.dumps(response_data, indent=2)}")
+        raise RuntimeError(f"Unexpected Gemini response format: {response_data}")
+
+    candidate = response_data["candidates"][0]
+    log_debug(f"Candidate keys: {list(candidate.keys())}")
+
+    if "content" not in candidate or "parts" not in candidate["content"]:
+        log_debug(f"Full candidate: {json.dumps(candidate, indent=2)}")
+        raise RuntimeError(f"No content in Gemini response: {response_data}")
+
+    text = candidate["content"]["parts"][0]["text"]
+    log_debug(f"Extracted text length: {len(text)} characters")
+    log_debug(f"Extracted text (first 1000 chars): {text[:1000]!r}")
+
+    try:
+        result = json.loads(text)
+    except json.JSONDecodeError as exc:
+        log_debug(f"Failed to parse JSON, full text: {text[:1000]}")
+        raise RuntimeError(f"Gemini returned invalid JSON: {text[:500]}") from exc
+
+    log_debug(f"Parsed result keys: {list(result.keys())}")
+    log_debug(f"Languages detected: {result.get('languages', [])}")
+    log_debug(f"Translations count: {len(result.get('translations', []))}")
+
+    for i, trans in enumerate(result.get("translations", [])):
+        log_debug(f"  Translation {i+1}: {trans.get('source_language')} → English")
+        log_debug(f"    Original length: {len(trans.get('original_text', ''))} chars")
+        log_debug(f"    Translation length: {len(trans.get('english_translation', ''))} chars")
+        log_debug(f"    Original (first 200 chars): {trans.get('original_text', '')[:200]!r}")
+        log_debug(f"    Translation (first 200 chars): {trans.get('english_translation', '')[:200]!r}")
+
+    if not isinstance(result.get("languages"), list):
+        log_debug(f"Invalid structure, full result: {json.dumps(result, indent=2)}")
+        raise RuntimeError(f"Invalid response structure: {result}")
+
+    return result
+
+
+def save_languages_and_translations(page_id, model_tag, analysis_result):
+    """Store detected languages and translations in database."""
+    log_debug(f"Saving results for page {page_id}")
+
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            # Insert detected languages
+            languages = analysis_result.get("languages", [])
+            log_debug(f"  Inserting {len(languages)} language(s)")
+            for lang_info in languages:
+                log_debug(f"    - {lang_info['language']} ({lang_info['code']})")
+                cur.execute(
+                    """
+                    INSERT INTO page_detected_languages (page_id, language, language_code, model_tag)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (page_id, language_code) DO NOTHING
+                    """,
+                    (page_id, lang_info["language"], lang_info["code"], model_tag)
+                )
+
+            # Insert translations (non-English only)
+            translations = analysis_result.get("translations", [])
+            log_debug(f"  Inserting {len(translations)} translation(s)")
+            for i, trans in enumerate(translations):
+                log_debug(f"    - Translation {i+1}: {trans['source_language']} → English")
+                log_debug(f"      Original: {len(trans['original_text'])} chars, Translated: {len(trans['english_translation'])} chars")
+                cur.execute(
+                    """
+                    INSERT INTO page_translations (
+                        page_id, source_language, source_language_code,
+                        original_text, translated_text, model_tag
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        page_id,
+                        trans["source_language"],
+                        trans["source_code"],
+                        trans["original_text"],
+                        trans["english_translation"],
+                        model_tag
+                    )
+                )
+
+        conn.commit()
+
+    log_debug(f"  ✓ Saved to database")
+
+
+def get_pages_needing_language_detection(model_tag):
+    """Fetch pages with successful OCR that haven't been analyzed yet.
+
+    Returns list of (page_id, ocr_text) tuples.
+    """
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT p.id, pot.raw_text
+                FROM pages p
+                JOIN page_ocr_text pot ON pot.page_id = p.id
+                WHERE pot.status = 'success'
+                  AND pot.raw_text IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM page_detected_languages pdl
+                    WHERE pdl.page_id = p.id
+                  )
+                  AND p.image_uploaded_at IS NOT NULL
+                  AND p.excluded_at IS NULL
+                ORDER BY p.id
+                LIMIT %s
+                """,
+                (MAX_PAGES_PER_WORKER if MAX_PAGES_PER_WORKER else 1000000,)
+            )
+            return cur.fetchall()
+
+
+def main():
+    print(f"Language detection and translation worker starting")
+    print(f"Model: {GEMINI_MODEL}, Pace: {GEMINI_PACE_SECONDS}s per request")
+    print(f"DEBUG mode: {'ON' if DEBUG else 'OFF'}")
+    if DEBUG:
+        print(f"  (DEBUG enabled: processing < 20 pages)")
+
+    pages_processed = 0
+    pages_failed = 0
+
+    try:
+        pages = get_pages_needing_language_detection(GEMINI_MODEL)
+        print(f"Found {len(pages)} pages needing language detection")
+        if DEBUG:
+            log_debug(f"Pages to process: {[p[0] for p in pages]}")
+
+        for page_num, (page_id, ocr_text) in enumerate(pages, 1):
+            if MAX_RUNTIME_SECONDS and elapsed() > MAX_RUNTIME_SECONDS:
+                print(f"\n⏱️ Runtime limit reached after {elapsed():.0f}s")
+                sys.exit(RUNTIME_GUARD_EXIT_CODE)
+
+            try:
+                print(f"[{page_num}/{len(pages)}] Processing page {page_id}... ", end="", flush=True)
+
+                if DEBUG:
+                    log_debug(f"Page {page_id}: OCR text length: {len(ocr_text)}")
+
+                # Detect languages and get translations
+                result = detect_and_translate_page(ocr_text, GEMINI_MODEL)
+
+                # Store in database
+                save_languages_and_translations(page_id, GEMINI_MODEL, result)
+
+                lang_count = len(result.get("languages", []))
+                trans_count = len(result.get("translations", []))
+                print(f"✓ {lang_count} language(s), {trans_count} translation(s)")
+                pages_processed += 1
+
+            except Exception as exc:
+                print(f"✗ {exc}")
+                if DEBUG:
+                    import traceback
+                    log_debug(f"Exception traceback:")
+                    for line in traceback.format_exc().split('\n'):
+                        log_debug(line)
+                pages_failed += 1
+
+    except Exception as exc:
+        print(f"Fatal error: {exc}", file=sys.stderr)
+        if DEBUG:
+            import traceback
+            log_debug(f"Fatal error details:")
+            for line in traceback.format_exc().split('\n'):
+                log_debug(line)
+        sys.exit(1)
+
+    print(f"\n✓ Processed {pages_processed} pages, {pages_failed} failed ({elapsed():.0f}s elapsed)")
+    if pages_failed == 0:
+        print("All done!")
+
+
+if __name__ == "__main__":
+    main()

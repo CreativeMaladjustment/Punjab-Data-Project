@@ -2,8 +2,8 @@ name: Detect languages and translate to English
 
 on:
   schedule:
-    # Run twice daily at off-hours to avoid contending with extraction workflows
-    - cron: "0 5,17 * * *"  # 5 AM and 5 PM UTC
+    # Run every hour to continuously process pages
+    - cron: "0 * * * *"  # Every hour at :00
   workflow_dispatch:
     inputs:
       max_pages:
@@ -23,7 +23,7 @@ jobs:
       # Script alternates between 3.5 and 3.1 Flash Lite
       # (no GEMINI_MODEL env var needed; models are hardcoded in script)
       MAX_PAGES_PER_WORKER: ${{ inputs.max_pages || 0 }}
-      MAX_RUNTIME_SECONDS: 18000  # 5 hours
+      MAX_RUNTIME_SECONDS: 3600  # 60 minutes
       PYTHONUNBUFFERED: "1"
 
     steps:
@@ -56,9 +56,9 @@ jobs:
         run: |
           echo "### ⏱️ Runtime guard tripped for language detection — resume needed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "The language detection stopped after ~5 hours to stay under the runner limit. Progress already recorded in Postgres means the next run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
+          echo "The language detection stopped after ~60 minutes to stay under the runner limit. Progress already recorded in Postgres means the next hourly run picks up where this one left off." >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Action needed:** re-run this workflow to continue processing remaining pages." >> "$GITHUB_STEP_SUMMARY"
+          echo "**No action needed:** the workflow will automatically re-run in the next scheduled hour." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fail job on unexpected script error
         if: steps.run.outputs.exit_code != '0' && steps.run.outputs.exit_code != '42'

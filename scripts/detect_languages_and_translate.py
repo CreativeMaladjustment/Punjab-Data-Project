@@ -15,7 +15,8 @@ that don't need larger models. Alternating models lets us work within free-tier
 quotas by distributing load across two model buckets (each has 15 RPM, 250K TPM).
 
 Processes pages with successful OCR text that haven't been language-analyzed yet.
-Paces requests at 5s apart (start-to-start) to stay under rate limits with margin.
+Paces requests at 2s apart (start-to-start) to stay under rate limits with margin.
+Exits gracefully at 60 minutes to respect runner time limits; next hourly run continues.
 """
 import json
 import os
@@ -42,7 +43,7 @@ GEMINI_PACE_SECONDS = 2.0  # 2s from request start to next request start (15 RPM
 
 DB_CONNECT_MAX_ATTEMPTS = 5
 RUNTIME_GUARD_EXIT_CODE = 42
-MAX_RUNTIME_SECONDS = 18000  # 5 hours
+MAX_RUNTIME_SECONDS = 3600  # 60 minutes
 MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
 
 # Enable debug mode for small test runs

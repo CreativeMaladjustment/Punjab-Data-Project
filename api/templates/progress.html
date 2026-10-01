@@ -165,6 +165,58 @@
     {% endif %}
   </section>
 
+  {% if language_detection_summary %}
+  <section class="block">
+    <h2>Language detection and translation</h2>
+    <div class="overall-card">
+      <div class="overall-headline">
+        <span class="num">{{ "{:,}".format(language_detection_summary.pages_with_detection) }}</span>
+        <span class="of">of {{ "{:,}".format(total_pages) }} pages</span>
+        <span class="pct">{{ "%.1f"|format(language_detection_summary.detection_pct) }}%</span>
+      </div>
+      <div class="bar">
+        <div class="done" style="width:{{ language_detection_summary.detection_pct }}%"></div>
+      </div>
+      <div class="bar-legend">
+        <span>{{ "{:,}".format(language_detection_summary.pages_with_detection) }} processed for language detection</span>
+        <span>{{ "{:,}".format(language_detection_summary.pages_without_detection) }} awaiting processing</span>
+      </div>
+    </div>
+    <p class="remaining-note">Pages analyzed for languages present and non-English content translated to English using Gemini 3.5/3.1 Flash Lite, alternating between models for load distribution.</p>
+
+    {% if language_detection_summary.languages %}
+    <div class="progress-detail" style="margin-top: 28px; padding-top: 0; border-top: none;">
+      <div class="progress-detail-header">Languages detected</div>
+      <div class="progress-cards">
+        {% for lang in language_detection_summary.languages %}
+        <div class="progress-card">
+          <div class="progress-card-label">{{ lang.language }}</div>
+          <div class="progress-card-value">{{ "{:,}".format(lang.pages) }}</div>
+          <div class="progress-card-subtext">pages ({{ lang.code }})</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="progress-detail">
+      <div class="progress-detail-header">Language composition</div>
+      <div class="progress-cards">
+        <div class="progress-card">
+          <div class="progress-card-label">Monolingual</div>
+          <div class="progress-card-value">{{ "{:,}".format(language_detection_summary.monolingual_pages) }}</div>
+          <div class="progress-card-subtext">single language only</div>
+        </div>
+        <div class="progress-card">
+          <div class="progress-card-label">Multilingual</div>
+          <div class="progress-card-value">{{ "{:,}".format(language_detection_summary.multilingual_pages) }}</div>
+          <div class="progress-card-subtext">multiple languages mixed</div>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </section>
+  {% endif %}
+
   <section class="block">
     <h2>Pages remaining, per model</h2>
     <div class="model-list">

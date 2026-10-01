@@ -79,6 +79,7 @@ from queries import (
     fetch_corpus_stats,
     fetch_dashboard_data,
     fetch_progress_summary,
+    fetch_language_detection_summary,
     fetch_qc_first_id,
     fetch_qc_id_at_rank,
     fetch_qc_page,
@@ -538,6 +539,7 @@ def progress():
         data = fetch_dashboard_data(conn)
         total_pages = data["total_pages"]
         progress_summary = fetch_progress_summary(conn, total_pages)
+        language_detection_summary = fetch_language_detection_summary(conn, total_pages)
     finally:
         conn.close()
 
@@ -575,6 +577,7 @@ def progress():
         any_extracted_pct=any_extracted_pct,
         models=models,
         progress_summary=progress_summary,
+        language_detection_summary=language_detection_summary,
     )
 
 

@@ -212,6 +212,14 @@ integer. If none is visible, use 0 and add a `flags` entry noting the printed \
 page number wasn't visible. Leave `quarter` as "" — it isn't known for this \
 source. Output the JSON array only, no commentary.
 
+DITTO MARKS: Pages often use ditto marks (variants: "ditto", "ditto.", "do.", \
+"Do.", "-do-") to indicate that a field's value is the same as the previous \
+entry. When you encounter a ditto mark in a field, do NOT output the ditto \
+mark itself. Instead, use the corresponding field value from the immediately \
+previous entry on the page. If it's the first entry and has a ditto mark, \
+leave the field empty and flag it as "first entry with ditto". Ditto mark \
+resolution takes absolute priority — resolve every occurrence.
+
 SCHEMA:
 """ + SCHEMA_PATH.read_text(encoding="utf-8")
 

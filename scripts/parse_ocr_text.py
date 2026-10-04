@@ -119,6 +119,15 @@ if it isn't in the text, use 0 and add a `flags` entry noting the printed \
 page number wasn't present in the transcription. Flag every uncertain \
 reading in `flags`. Output the JSON array only, no commentary.
 
+DITTO MARKS: The transcription often uses ditto marks (variants: "ditto", \
+"ditto.", "do.", "Do.", "-do-") to indicate that a field's value is the same \
+as the previous entry. When you encounter a ditto mark in a field, do NOT \
+output the ditto mark itself. Instead, use the corresponding field value from \
+the immediately previous entry in the transcription. If it's the first entry \
+and has a ditto mark, leave the field empty and flag it as "first entry with \
+ditto". Ditto mark resolution takes absolute priority — resolve every \
+occurrence.
+
 SCHEMA:
 """ + SCHEMA_PATH.read_text(encoding="utf-8")
 

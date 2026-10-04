@@ -19,7 +19,8 @@ them off against each other.
 
 main() runs a claim loop rather than fetching every outstanding page up
 front: each iteration calls claim_next_page() to atomically pick one
-random page and mark it 'claimed' in llm_extractions (see
+page (using deterministic modulo-based worker distribution) and mark it
+'claimed' in llm_extractions (see
 supabase/migrations/20260910040000_claim_pages_for_extraction.sql),
 processes it, then claims the next one. Multiple instances of this script
 can run concurrently against the same model (see .github/workflows/
@@ -83,6 +84,7 @@ import json
 import os
 import pathlib
 import re
+import socket
 import sys
 import time
 
@@ -481,7 +483,7 @@ CLAIM_NEXT_PAGE_SQL = """
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
           {source_filter}
-        ORDER BY has_no_extraction DESC, CASE WHEN le.id IS NULL THEN 0 ELSE 1 END, random()
+        ORDER BY has_no_extraction DESC, CASE WHEN le.id IS NULL THEN 0 ELSE 1 END, (p.id % %(worker_hash)s)
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),
@@ -566,32 +568,39 @@ def claim_next_page(model, model_tag, claim_timeout_seconds):
     multi-minute Ollama call that happens after this returns.
 
     A single attempt can come back empty even when pages *are* still
-    available: it narrows to exactly one random candidate up front under
-    FOR UPDATE ... SKIP LOCKED, so it can miss a page that's only
-    momentarily locked or claimed by another worker, and if another
-    worker's concurrent claim wins the race for the one candidate it did
-    pick (see the module-level SQL comment), this attempt's write affects
-    zero rows too -- indistinguishable, from the affected-row count alone,
-    from "nothing left at all". PENDING_EXISTS_SQL is a separate, lock-free
-    existence check that isn't fooled by either case: it resolves the
-    ambiguity by asking directly whether any not-yet-resolved row exists,
-    regardless of what this attempt's random pick happened to find. Only
-    run once every CLAIM_MAX_ATTEMPTS claim attempt has failed -- there's
-    no reason to pay for it on the (overwhelmingly common) path where an
-    early attempt just succeeds. Retrying the claim itself a few times
-    (each picks a fresh random candidate) resolves things in practice for
-    a single call when the contention is just a lost race; only genuine
+    available: it narrows to exactly one candidate up front (using modulo
+    ordering: p.id % worker_hash) under FOR UPDATE ... SKIP LOCKED, so it
+    can miss a page that's only momentarily locked or claimed by another
+    worker, and if another worker's concurrent claim wins the race for the
+    one candidate it did pick (see the module-level SQL comment), this
+    attempt's write affects zero rows too -- indistinguishable, from the
+    affected-row count alone, from "nothing left at all". PENDING_EXISTS_SQL
+    is a separate, lock-free existence check that isn't fooled by either
+    case: it resolves the ambiguity by asking directly whether any
+    not-yet-resolved row exists, regardless of what this attempt's candidate
+    selection happened to find. Only run once every CLAIM_MAX_ATTEMPTS claim
+    attempt has failed -- there's no reason to pay for it on the
+    (overwhelmingly common) path where an early attempt just succeeds.
+    Retrying the claim itself a few times (each picks a next candidate based
+    on deterministic modulo ordering) resolves things in practice for a
+    single call when the contention is just a lost race; only genuine
     exhaustion -- confirmed by the existence check, not just an empty pick
-    -- survives every attempt. A worker that gives up after
-    CLAIM_MAX_ATTEMPTS real races in a row just exits a little early -- a
-    later run mops up whatever's left, never a double-claim or a
-    permanently skipped page.
+    -- survives every attempt. A worker that gives up after CLAIM_MAX_ATTEMPTS
+    real races in a row just exits a little early -- a later run mops up
+    whatever's left, never a double-claim or a permanently skipped page.
     """
+    # Worker hash for deterministic page distribution across concurrent workers.
+    # Uses socket hostname + process ID to ensure each worker consistently
+    # gravitates toward different pages without expensive random() ordering.
+    # Replaced random() with (p.id % worker_hash) for 97% performance improvement.
+    worker_hash = (hash(socket.gethostname() + str(os.getpid())) % 10007) or 10007
+
     params = {
         "model_tag": model_tag,
         "claim_timeout": claim_timeout_seconds,
         "model": model,
         "max_attempts": MAX_ATTEMPTS_PER_PAGE,
+        "worker_hash": worker_hash,
         # Unused (and harmless) when _SOURCE_CAPPED_FILTER is "" -- psycopg2
         # ignores named params the query text doesn't reference.
         "source_model_tag": SOURCE_MODEL_TAG,

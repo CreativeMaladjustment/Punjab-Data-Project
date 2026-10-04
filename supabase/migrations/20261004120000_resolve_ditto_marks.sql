@@ -101,87 +101,71 @@ BEFORE INSERT ON catalogue_entries
 FOR EACH ROW
 EXECUTE FUNCTION resolve_ditto_marks_on_page();
 
--- Post-process existing entries with ditto marks using the same logic
--- This query identifies entries with ditto marks and replaces them with
--- the previous entry's value using a window function approach
-WITH ditto_marked AS (
+-- Post-process existing entries with ditto marks using recursive resolution.
+-- This handles chains of dittos (do., do., do.) by iterating through entries
+-- in order and using already-resolved predecessors, not original values.
+WITH RECURSIVE ditto_resolution AS (
+  -- Base case: first entry (entry_index=0) keeps original values (no predecessor to reference)
   SELECT
     ce.id,
     ce.extraction_id,
     ce.entry_index,
-    ce.author,
-    ce.printer,
-    ce.pcity,
-    ce.publisher,
-    ce.pubcity,
-    LAG(ce.author) OVER (
-      PARTITION BY ce.extraction_id
-      ORDER BY ce.entry_index
-    ) as prev_author,
-    LAG(ce.printer) OVER (
-      PARTITION BY ce.extraction_id
-      ORDER BY ce.entry_index
-    ) as prev_printer,
-    LAG(ce.pcity) OVER (
-      PARTITION BY ce.extraction_id
-      ORDER BY ce.entry_index
-    ) as prev_pcity,
-    LAG(ce.publisher) OVER (
-      PARTITION BY ce.extraction_id
-      ORDER BY ce.entry_index
-    ) as prev_publisher,
-    LAG(ce.pubcity) OVER (
-      PARTITION BY ce.extraction_id
-      ORDER BY ce.entry_index
-    ) as prev_pubcity
+    ce.author as resolved_author,
+    ce.printer as resolved_printer,
+    ce.pcity as resolved_pcity,
+    ce.publisher as resolved_publisher,
+    ce.pubcity as resolved_pubcity
   FROM catalogue_entries ce
-  WHERE ce.author IS NOT NULL OR ce.printer IS NOT NULL OR
-        ce.pcity IS NOT NULL OR ce.publisher IS NOT NULL OR
-        ce.pubcity IS NOT NULL
-),
-resolved AS (
+  WHERE ce.entry_index = 0
+  UNION ALL
+  -- Recursive case: resolve each subsequent entry using the previous entry's RESOLVED values
   SELECT
-    id,
+    ce.id,
+    ce.extraction_id,
+    ce.entry_index,
     CASE
-      WHEN LOWER(author) IN ('ditto', 'ditto.', 'do', 'do.', '-do-')
-      THEN prev_author
-      ELSE author
+      WHEN ce.author IS NOT NULL AND LOWER(ce.author) IN ('ditto', 'ditto.', 'do', 'do.', '-do-')
+      THEN dr.resolved_author
+      ELSE ce.author
     END as resolved_author,
     CASE
-      WHEN LOWER(printer) IN ('ditto', 'ditto.', 'do', 'do.', '-do-')
-      THEN prev_printer
-      ELSE printer
+      WHEN ce.printer IS NOT NULL AND LOWER(ce.printer) IN ('ditto', 'ditto.', 'do', 'do.', '-do-')
+      THEN dr.resolved_printer
+      ELSE ce.printer
     END as resolved_printer,
     CASE
-      WHEN LOWER(pcity) IN ('ditto', 'ditto.', 'do', 'do.', '-do-')
-      THEN prev_pcity
-      ELSE pcity
+      WHEN ce.pcity IS NOT NULL AND LOWER(ce.pcity) IN ('ditto', 'ditto.', 'do', 'do.', '-do-')
+      THEN dr.resolved_pcity
+      ELSE ce.pcity
     END as resolved_pcity,
     CASE
-      WHEN LOWER(publisher) IN ('ditto', 'ditto.', 'do', 'do.', '-do-')
-      THEN prev_publisher
-      ELSE publisher
+      WHEN ce.publisher IS NOT NULL AND LOWER(ce.publisher) IN ('ditto', 'ditto.', 'do', 'do.', '-do-')
+      THEN dr.resolved_publisher
+      ELSE ce.publisher
     END as resolved_publisher,
     CASE
-      WHEN LOWER(pubcity) IN ('ditto', 'ditto.', 'do', 'do.', '-do-')
-      THEN prev_pubcity
-      ELSE pubcity
+      WHEN ce.pubcity IS NOT NULL AND LOWER(ce.pubcity) IN ('ditto', 'ditto.', 'do', 'do.', '-do-')
+      THEN dr.resolved_pubcity
+      ELSE ce.pubcity
     END as resolved_pubcity
-  FROM ditto_marked
+  FROM catalogue_entries ce
+  JOIN ditto_resolution dr ON
+    dr.extraction_id = ce.extraction_id
+    AND dr.entry_index = ce.entry_index - 1
 )
 UPDATE catalogue_entries ce
 SET
-  author = resolved.resolved_author,
-  printer = resolved.resolved_printer,
-  pcity = resolved.resolved_pcity,
-  publisher = resolved.resolved_publisher,
-  pubcity = resolved.resolved_pubcity
-FROM resolved
-WHERE ce.id = resolved.id
+  author = dr.resolved_author,
+  printer = dr.resolved_printer,
+  pcity = dr.resolved_pcity,
+  publisher = dr.resolved_publisher,
+  pubcity = dr.resolved_pubcity
+FROM ditto_resolution dr
+WHERE ce.id = dr.id
   AND (
-    ce.author != resolved.resolved_author OR
-    ce.printer != resolved.resolved_printer OR
-    ce.pcity != resolved.resolved_pcity OR
-    ce.publisher != resolved.resolved_publisher OR
-    ce.pubcity != resolved.resolved_pubcity
+    ce.author IS DISTINCT FROM dr.resolved_author OR
+    ce.printer IS DISTINCT FROM dr.resolved_printer OR
+    ce.pcity IS DISTINCT FROM dr.resolved_pcity OR
+    ce.publisher IS DISTINCT FROM dr.resolved_publisher OR
+    ce.pubcity IS DISTINCT FROM dr.resolved_pubcity
   );

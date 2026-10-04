@@ -121,12 +121,15 @@ reading in `flags`. Output the JSON array only, no commentary.
 
 DITTO MARKS: The transcription often uses ditto marks (variants: "ditto", \
 "ditto.", "do.", "Do.", "-do-") to indicate that a field's value is the same \
-as the previous entry. When you encounter a ditto mark in a field, do NOT \
-output the ditto mark itself. Instead, use the corresponding field value from \
-the immediately previous entry in the transcription. If it's the first entry \
-and has a ditto mark, leave the field empty and flag it as "first entry with \
-ditto". Ditto mark resolution takes absolute priority — resolve every \
-occurrence.
+as the previous entry. For the following STRUCTURED FIELDS ONLY — author, \
+title, date, printer, pcity, publisher, pubcity — when you encounter a ditto \
+mark, do NOT output the ditto mark itself. Instead, use the corresponding field \
+value from the immediately previous entry in the transcription. If it's the \
+first entry and has a ditto mark, leave the field empty and flag it as "first \
+entry with ditto". However, for `printer_verbatim` (the raw printer + place as \
+printed), retain ditto marks exactly as they appear in the transcription — \
+never resolve them. Ditto mark resolution applies only to the structured fields \
+above.
 
 SCHEMA:
 """ + SCHEMA_PATH.read_text(encoding="utf-8")

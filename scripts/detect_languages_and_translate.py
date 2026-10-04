@@ -209,7 +209,7 @@ def detect_and_translate_page(ocr_text, model):
         url,
         json=payload,
         headers={"x-goog-api-key": GEMINI_API_KEY},
-        timeout=(10, 600)
+        timeout=(10, 1800)
     )
     api_time = time.time() - start_api
 

@@ -80,11 +80,11 @@ RUNTIME_GUARD_EXIT_CODE = 42
 MAX_PAGES_PER_WORKER = int(os.environ.get("MAX_PAGES_PER_WORKER", "0"))
 START_TIME = time.time()
 
-# Text-only calls (no image tokens) are far cheaper than the vision pass, so
-# shorter timeouts than extract_with_llm.py's -- still generous for a CPU
-# runner under load.
+# Text-only calls (no image tokens) are far cheaper than the vision pass, but
+# OCR text can be very dense, requiring longer processing time than typical vision
+# extractions. Use same timeout as extract_with_llm.py to handle worst-case pages.
 OLLAMA_CONNECT_TIMEOUT_SECONDS = 10
-OLLAMA_READ_TIMEOUT_SECONDS = 600
+OLLAMA_READ_TIMEOUT_SECONDS = 1800
 # A dense page's OCR transcription + schema + system prompt can still run
 # long in tokens even without image tokens -- same headroom rationale as
 # extract_with_llm.py's OLLAMA_NUM_CTX.

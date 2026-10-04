@@ -21,7 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_llm_extractions_candidate_lookup
 -- Used in language detection query (16,841ms mean) and extraction fallback paths
 CREATE INDEX IF NOT EXISTS idx_page_ocr_text_candidate_lookup
   ON page_ocr_text(page_id, model_tag, status)
-  INCLUDE (raw_text, created_at);
+  INCLUDE (created_at);
 
 -- Index for QC review lookups
 -- Supports: WHERE qr.extraction_id = le.id AND qr.verdict = $1
@@ -36,11 +36,15 @@ CREATE INDEX IF NOT EXISTS idx_page_detected_languages_page_id
   ON page_detected_languages(page_id);
 
 -- Analysis:
--- Expected query performance improvements:
--- - llm_extractions queries: 300-600ms → 30-50ms (85% improvement)
--- - page_ocr_text queries: 7-16ms → 2-5ms (70% improvement)
--- - Language detection: 16,841ms → 300-500ms (95% improvement)
+-- These four indexes target the slowest query patterns in extraction and processing.
+-- Combined with worker distribution optimization (modulo-based instead of random()),
+-- expected daily Supabase CPU reduction: ~93% (from ~16 hours to ~1 hour)
 --
--- Combined daily Supabase CPU reduction: ~93% (from ~16 hours to ~1 hour)
+-- Query performance improvements:
+-- - llm_extractions candidate selection: 300-600ms → 30-50ms (85% improvement)
+-- - page_ocr_text filtering: covered by candidate index optimization
+-- - Language detection: 16,841ms → 300-500ms (95% improvement)
+-- - QC review routing: prevents N+1 patterns
+--
 -- Risk: Minimal - indexes are additive, no data changes
 -- Rollback: DROP INDEX IF EXISTS idx_*

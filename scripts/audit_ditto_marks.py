@@ -10,6 +10,7 @@ import os
 import sys
 
 import psycopg2
+from psycopg2 import sql
 
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
@@ -43,9 +44,10 @@ def find_top_pages_by_ditto_count(field_name):
     """Find top pages with most ditto marks in a specific field."""
     with db_connect() as conn:
         with conn.cursor() as cur:
-            # Count ditto marks per page for this field
-            # Using SIMILAR TO to match case-insensitive ditto patterns
-            query = f"""
+            # Count ditto marks per page for this field using parameterized queries
+            # to prevent SQL injection; use sql.Identifier for field names
+            field_ref = sql.Identifier("ce", field_name)
+            query = sql.SQL("""
                 WITH ditto_counts AS (
                   SELECT
                     p.id,
@@ -58,16 +60,19 @@ def find_top_pages_by_ditto_count(field_name):
                   JOIN llm_extractions le ON le.page_id = p.id
                   JOIN catalogue_entries ce ON ce.extraction_id = le.id
                   WHERE le.status = 'success'
-                    AND ce.{field_name} IS NOT NULL
-                    AND LOWER(ce.{field_name}) SIMILAR TO '%(ditto|ditto\.|do|do\.|do\-|^\-do\-)%'
+                    AND {field} IS NOT NULL
+                    AND LOWER({field}) SIMILAR TO %(pattern)s
                   GROUP BY p.id, p.page_no, pf.folder, pf.name
                 )
                 SELECT id, page_no, folder, name, ditto_count
                 FROM ditto_counts
                 ORDER BY ditto_count DESC
-                LIMIT {TOP_N_PAGES}
-            """
-            cur.execute(query)
+                LIMIT %(limit)s
+            """).format(field=field_ref)
+            cur.execute(query, {
+                "pattern": "%(ditto|ditto\\.|do|do\\.|do\\-|^\\-do\\-)%",
+                "limit": TOP_N_PAGES
+            })
             return field_name, cur.fetchall()
 
 

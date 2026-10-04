@@ -4,32 +4,36 @@
 -- 2. OCR text lookups filtering by page_id, model_tag, status
 -- 3. QC review lookups by extraction_id
 -- 4. Language detection filtering by page_id
+--
+-- DEPLOYMENT NOTE: Uses CONCURRENT index creation for hot tables (llm_extractions,
+-- page_ocr_text) to avoid blocking concurrent extraction workers. Standard index
+-- creation for other tables. All indexes use IF NOT EXISTS for idempotency.
 
--- Index for llm_extractions candidate selection
+-- Index for llm_extractions candidate selection (HOT TABLE - blocks extraction)
 -- Supports: WHERE ... AND le.page_id = p.id AND le.model_tag = $1
 --           AND le.status IN ('claimed', 'failed')
 --           AND le.claimed_at < now() - interval
 --           AND le.content_failure = ...
 -- This is the hottest query path: 30,299 calls × 299ms mean = 9M ms total
-CREATE INDEX IF NOT EXISTS idx_llm_extractions_candidate_lookup
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_llm_extractions_candidate_lookup
   ON llm_extractions(page_id, model_tag, status, claimed_at)
   INCLUDE (content_failure, attempt_count);
 
--- Index for page_ocr_text lookups
+-- Index for page_ocr_text lookups (HOT TABLE - blocks OCR processing)
 -- Supports: WHERE pot.page_id = p.id AND pot.status = 'success'
 --           AND pot.model_tag IN ('...')
 -- Used in language detection query (16,841ms mean) and extraction fallback paths
-CREATE INDEX IF NOT EXISTS idx_page_ocr_text_candidate_lookup
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_page_ocr_text_candidate_lookup
   ON page_ocr_text(page_id, model_tag, status)
   INCLUDE (created_at);
 
--- Index for QC review lookups
+-- Index for QC review lookups (lower write volume)
 -- Supports: WHERE qr.extraction_id = le.id AND qr.verdict = $1
 -- Used in extraction routing logic to determine if a page has been reviewed
 CREATE INDEX IF NOT EXISTS idx_qc_reviews_extraction_verdict
   ON qc_reviews(extraction_id, verdict);
 
--- Index for language detection
+-- Index for language detection (lower write volume)
 -- Supports: WHERE NOT EXISTS (SELECT ... FROM page_detected_languages WHERE page_id = p.id)
 -- Language detection query scans 309,644 rows for 14 results without this index
 CREATE INDEX IF NOT EXISTS idx_page_detected_languages_page_id
@@ -46,5 +50,13 @@ CREATE INDEX IF NOT EXISTS idx_page_detected_languages_page_id
 -- - Language detection: 16,841ms → 300-500ms (95% improvement)
 -- - QC review routing: prevents N+1 patterns
 --
--- Risk: Minimal - indexes are additive, no data changes
+-- Risk: Minimal - indexes are additive, no data changes. CONCURRENT index creation
+-- for hot tables (llm_extractions, page_ocr_text) ensures concurrent extraction and
+-- OCR workers continue unblocked during index build.
+--
+-- Deployment: CONCURRENT indexes cannot run in a transaction. Supabase migrations
+-- should handle this automatically, but verify that llm_extractions and page_ocr_text
+-- indexes build with CONCURRENT flag. If Supabase fails, disable CONCURRENT for those
+-- two indexes and run during a maintenance window when extraction/OCR workers are paused.
+--
 -- Rollback: DROP INDEX IF EXISTS idx_*

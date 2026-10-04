@@ -1,7 +1,7 @@
 """Audit ditto marks in extracted catalogue entries.
 
-Finds pages with potential ditto marks in key fields and shows:
-1. The catalogue entries extracted from that page
+Finds the top pages by ditto mark count in each field and shows:
+1. The catalogue entries extracted from those pages
 2. The full OCR text used for that extraction
 3. Context for how ditto marks appear in the raw data
 """
@@ -13,8 +13,16 @@ import psycopg2
 
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
-# Fields that commonly have ditto marks
-DITTO_FIELDS = ["printer", "pcity", "author", "publisher", "pubcity"]
+# Fields that commonly have ditto marks, with their ditto variants
+DITTO_PATTERNS = {
+    "author": ["ditto.", "ditto", "do.", "Do.", "-do-"],
+    "printer": ["ditto.", "ditto", "do.", "Do.", "-do-"],
+    "pcity": ["ditto.", "ditto", "do.", "Do.", "-do-"],
+    "publisher": ["ditto.", "ditto", "do.", "Do.", "-do-"],
+    "pubcity": ["ditto.", "ditto", "do.", "Do.", "-do-"],
+}
+
+TOP_N_PAGES = 5  # Show top 5 pages per field with most dittos
 
 DB_CONNECT_MAX_ATTEMPTS = 5
 
@@ -31,30 +39,44 @@ def db_connect():
             time.sleep(2**attempt)
 
 
-def find_pages_with_ditto():
-    """Find pages that have ditto marks in catalogue entries."""
+def find_top_pages_by_ditto_count(field_name):
+    """Find top pages with most ditto marks in a specific field."""
     with db_connect() as conn:
         with conn.cursor() as cur:
-            # Find pages where any entry has "ditto" or "do." in key fields
-            query = """
-                SELECT DISTINCT p.id, p.page_no, pf.folder, pf.name
-                FROM pages p
-                JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid
-                JOIN llm_extractions le ON le.page_id = p.id
-                JOIN catalogue_entries ce ON ce.extraction_id = le.id
-                WHERE le.status = 'success'
-                  AND (
-                    LOWER(ce.printer) SIMILAR TO '%ditto|do\.|do$'
-                    OR LOWER(ce.pcity) SIMILAR TO '%ditto|do\.|do$'
-                    OR LOWER(ce.author) SIMILAR TO '%ditto|do\.|do$'
-                    OR LOWER(ce.publisher) SIMILAR TO '%ditto|do\.|do$'
-                    OR LOWER(ce.pubcity) SIMILAR TO '%ditto|do\.|do$'
-                  )
-                ORDER BY p.id
-                LIMIT 10
+            # Count ditto marks per page for this field
+            # Using SIMILAR TO to match case-insensitive ditto patterns
+            query = f"""
+                WITH ditto_counts AS (
+                  SELECT
+                    p.id,
+                    p.page_no,
+                    pf.folder,
+                    pf.name,
+                    COUNT(*) as ditto_count
+                  FROM pages p
+                  JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid
+                  JOIN llm_extractions le ON le.page_id = p.id
+                  JOIN catalogue_entries ce ON ce.extraction_id = le.id
+                  WHERE le.status = 'success'
+                    AND ce.{field_name} IS NOT NULL
+                    AND LOWER(ce.{field_name}) SIMILAR TO '%(ditto|ditto\.|do|do\.|do\-|^\-do\-)%'
+                  GROUP BY p.id, p.page_no, pf.folder, pf.name
+                )
+                SELECT id, page_no, folder, name, ditto_count
+                FROM ditto_counts
+                ORDER BY ditto_count DESC
+                LIMIT {TOP_N_PAGES}
             """
             cur.execute(query)
-            return cur.fetchall()
+            return field_name, cur.fetchall()
+
+
+def is_ditto_mark(value):
+    """Check if a value is a ditto mark variant."""
+    if not value:
+        return False
+    lower = value.lower()
+    return any(x in lower for x in ["ditto", "do.", "-do-", "do"])
 
 
 def show_page_details(page_id, page_no, folder, name):
@@ -78,32 +100,54 @@ def show_page_details(page_id, page_no, folder, name):
             """, (page_id,))
 
             entries = cur.fetchall()
-            for extraction_id, model_tag, status, entry_index, printer, pcity, author, publisher, pubcity, title, date, serial in entries:
-                print(f"\n  Entry {entry_index} [model: {model_tag}]:")
-                print(f"    serial: {serial}")
-                print(f"    author: {author}")
-                print(f"    title: {title}")
-                print(f"    date: {date}")
-                print(f"    printer: {printer}")
-                print(f"    pcity: {pcity}")
-                print(f"    publisher: {publisher}")
-                print(f"    pubcity: {pubcity}")
+            ditto_entries = []
 
-                # Highlight ditto marks
-                for field_val, field_name in [
-                    (printer, "printer"),
-                    (pcity, "pcity"),
-                    (author, "author"),
-                    (publisher, "publisher"),
-                    (pubcity, "pubcity")
-                ]:
-                    if field_val and any(x in field_val.lower() for x in ["ditto", "do.", "do"]):
-                        print(f"    ⚠️  DITTO FOUND in {field_name}: '{field_val}'")
+            for extraction_id, model_tag, status, entry_index, printer, pcity, author, publisher, pubcity, title, date, serial in entries:
+                has_ditto = False
+                print(f"\n  Entry {entry_index}:")
+                print(f"    serial: {serial}")
+                print(f"    author: {author}", end="")
+                if is_ditto_mark(author):
+                    print(" ⚠️  DITTO", end="")
+                    has_ditto = True
+                print()
+
+                title_display = (title[:80] + "...") if title and len(title) > 80 else title
+                print(f"    title: {title_display}")
+                print(f"    date: {date}")
+                print(f"    printer: {printer}", end="")
+                if is_ditto_mark(printer):
+                    print(" ⚠️  DITTO", end="")
+                    has_ditto = True
+                print()
+
+                print(f"    pcity: {pcity}", end="")
+                if is_ditto_mark(pcity):
+                    print(" ⚠️  DITTO", end="")
+                    has_ditto = True
+                print()
+
+                print(f"    publisher: {publisher}", end="")
+                if is_ditto_mark(publisher):
+                    print(" ⚠️  DITTO", end="")
+                    has_ditto = True
+                print()
+
+                print(f"    pubcity: {pubcity}", end="")
+                if is_ditto_mark(pubcity):
+                    print(" ⚠️  DITTO", end="")
+                    has_ditto = True
+                print()
+
+                if has_ditto:
+                    ditto_entries.append(entry_index)
+
+            print(f"\n  Summary: {len(ditto_entries)} entries with ditto marks on this page")
 
             # Show OCR text for this page
-            print("\n--- FULL PAGE OCR TEXT ---")
+            print("\n--- FULL PAGE OCR TEXT (first 2000 chars) ---")
             cur.execute("""
-                SELECT raw_text, model_tag, status
+                SELECT raw_text, model_tag
                 FROM page_ocr_text
                 WHERE page_id = %s AND status = 'success'
                 ORDER BY created_at DESC
@@ -112,27 +156,48 @@ def show_page_details(page_id, page_no, folder, name):
 
             ocr_row = cur.fetchone()
             if ocr_row:
-                ocr_text, ocr_model, ocr_status = ocr_row
-                print(f"[OCR source: {ocr_model}]")
-                print(f"\n{ocr_text[:2000]}...")
+                ocr_text, ocr_model = ocr_row
+                print(f"\n[Source: {ocr_model}]\n")
+                print(ocr_text[:2000])
                 if len(ocr_text) > 2000:
-                    print(f"\n... (total {len(ocr_text)} characters)")
+                    print(f"\n... (text continues, total {len(ocr_text)} characters)")
             else:
                 print("(No OCR text found for this page)")
 
 
 def main():
     print("Auditing ditto marks in catalogue entries...")
-    print(f"Looking for pages with '{', '.join(DITTO_FIELDS)}' containing ditto variants")
+    print(f"Finding top {TOP_N_PAGES} pages per field with most ditto marks\n")
 
-    pages_with_ditto = find_pages_with_ditto()
-    print(f"\nFound {len(pages_with_ditto)} pages with ditto marks (showing up to 10):\n")
+    all_pages_seen = set()
 
-    for page_id, page_no, folder, name in pages_with_ditto:
+    for field_name in sorted(DITTO_PATTERNS.keys()):
+        print(f"\n{'='*80}")
+        print(f"TOP PAGES BY DITTO COUNT IN '{field_name.upper()}' FIELD")
+        print(f"{'='*80}")
+
+        field, pages = find_top_pages_by_ditto_count(field_name)
+
+        if not pages:
+            print(f"No pages found with ditto marks in {field}")
+            continue
+
+        print(f"Found {len(pages)} pages with ditto marks:\n")
+        for page_id, page_no, folder, name, ditto_count in pages:
+            print(f"  Page {page_no} ({folder}/{name}): {ditto_count} entries with ditto")
+            all_pages_seen.add((page_id, page_no, folder, name))
+
+    # Now show details for all unique pages we found
+    print(f"\n\n{'='*80}")
+    print(f"DETAILED VIEW: {len(all_pages_seen)} PAGES WITH DITTO MARKS")
+    print(f"{'='*80}")
+
+    for page_id, page_no, folder, name in sorted(all_pages_seen):
         show_page_details(page_id, page_no, folder, name)
 
     print(f"\n{'='*80}")
-    print("Audit complete")
+    print(f"Audit complete — reviewed {len(all_pages_seen)} unique pages")
+    print(f"{'='*80}")
 
 
 if __name__ == "__main__":

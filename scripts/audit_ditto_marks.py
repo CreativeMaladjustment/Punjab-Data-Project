@@ -77,11 +77,13 @@ def find_top_pages_by_ditto_count(field_name):
 
 
 def is_ditto_mark(value):
-    """Check if a value is a ditto mark variant."""
+    """Check if a value is a ditto mark variant.
+    Must match exactly (after lowercasing) to avoid false positives
+    from substrings like "do" in "Dodd Press" or "dodo"."""
     if not value:
         return False
     lower = value.lower()
-    return any(x in lower for x in ["ditto", "do.", "-do-", "do"])
+    return lower in ["ditto", "ditto.", "do", "do.", "-do-"]
 
 
 def show_page_details(page_id, page_no, folder, name):

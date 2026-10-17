@@ -85,12 +85,14 @@ from botocore.config import Config
 from psycopg2.extras import Json
 
 # Configure logging for GitHub Actions visibility
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
+# Only set our logger to DEBUG, not root (to avoid verbose dependency logs)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+logger.addHandler(handler)
+# Prevent duplicate logs by not propagating to root
+logger.propagate = False
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")

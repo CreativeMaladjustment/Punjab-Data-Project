@@ -70,6 +70,7 @@ OLLAMA_MODEL) this script has no reason to need.
 import base64
 import contextlib
 import json
+import logging
 import os
 import pathlib
 import re
@@ -82,6 +83,16 @@ import psycopg2
 import requests
 from botocore.config import Config
 from psycopg2.extras import Json
+
+# Configure logging for GitHub Actions visibility
+# Only set our logger to DEBUG, not root (to avoid verbose dependency logs)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+logger.addHandler(handler)
+# Prevent duplicate logs by not propagating to root
+logger.propagate = False
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
@@ -300,27 +311,44 @@ def db_connection():
 
 
 def db_save_page_ocr_text(page_id, model, model_tag, raw_text):
-    with db_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO page_ocr_text (page_id, model, model_tag, status, raw_text) "
-            "VALUES (%s, %s, %s, 'success', %s) "
-            "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
-            "status = 'success', raw_text = EXCLUDED.raw_text, error_message = NULL",
-            (page_id, model, model_tag, raw_text),
-        )
-        conn.commit()
+    text_size = len(raw_text.encode('utf-8')) if raw_text else 0
+    logger.info(f"[db_save_page_ocr_text] page_id={page_id}, model_tag={model_tag}, text_size={text_size} bytes")
+    try:
+        start_time = time.time()
+        with db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO page_ocr_text (page_id, model, model_tag, status, raw_text) "
+                "VALUES (%s, %s, %s, 'success', %s) "
+                "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
+                "status = 'success', raw_text = EXCLUDED.raw_text, error_message = NULL",
+                (page_id, model, model_tag, raw_text),
+            )
+            conn.commit()
+        elapsed = time.time() - start_time
+        logger.info(f"[db_save_page_ocr_text] SUCCESS: page_id={page_id}, elapsed={elapsed:.3f}s")
+    except Exception as e:
+        logger.error(f"[db_save_page_ocr_text] FAILED: page_id={page_id}, error={type(e).__name__}: {e}", exc_info=True)
+        raise
 
 
 def db_save_page_ocr_failure(page_id, model, model_tag, error_message):
-    with db_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO page_ocr_text (page_id, model, model_tag, status, error_message) "
-            "VALUES (%s, %s, %s, 'failed', %s) "
-            "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
-            "status = 'failed', error_message = EXCLUDED.error_message",
-            (page_id, model, model_tag, error_message),
-        )
-        conn.commit()
+    logger.info(f"[db_save_page_ocr_failure] page_id={page_id}, model_tag={model_tag}, error_msg_len={len(error_message) if error_message else 0}")
+    try:
+        start_time = time.time()
+        with db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO page_ocr_text (page_id, model, model_tag, status, error_message) "
+                "VALUES (%s, %s, %s, 'failed', %s) "
+                "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
+                "status = 'failed', error_message = EXCLUDED.error_message",
+                (page_id, model, model_tag, error_message),
+            )
+            conn.commit()
+        elapsed = time.time() - start_time
+        logger.info(f"[db_save_page_ocr_failure] SUCCESS: page_id={page_id}, elapsed={elapsed:.3f}s")
+    except Exception as e:
+        logger.error(f"[db_save_page_ocr_failure] FAILED: page_id={page_id}, error={type(e).__name__}: {e}", exc_info=True)
+        raise
 
 
 # Mirrors extract_with_llm.py's CLAIM_TIMEOUT_SECONDS/MAX_ATTEMPTS_PER_PAGE
@@ -500,61 +528,92 @@ def claim_next_page():
     identical shape, just no `model`/`model_tag` parameters since this
     script only ever runs against the one GEMINI_MODEL its process is
     configured for."""
-    # Worker hash for deterministic page distribution across concurrent workers.
-    # Replaced random() with (p.id % worker_hash) for 97% performance improvement.
-    worker_hash = (hash(socket.gethostname() + str(os.getpid())) % 10007) or 10007
+    logger.info(f"[claim_next_page] ENTRY: model_tag={MODEL_TAG}, model={GEMINI_MODEL}")
+    start_time = time.time()
 
-    params = {
-        "model_tag": MODEL_TAG,
-        "model": GEMINI_MODEL,
-        "claim_timeout": CLAIM_TIMEOUT_SECONDS,
-        "max_attempts": MAX_ATTEMPTS_PER_PAGE,
-        "worker_hash": worker_hash,
-        "source_model_tag": SOURCE_MODEL_TAG,
-        "allow_already_extracted": ALLOW_ALREADY_EXTRACTED,
-        "use_approval_check": USE_APPROVAL_CHECK,
-        # These two tags' own 'success' rows are an OCR-completion marker
-        # with zero catalogue_entries, not a real extraction verdict -- see
-        # GEMMA_OCR_ONLY_TAGS' comment -- so they're excluded from the
-        # any_le check above: a page Gemma merely OCR'd (nothing has
-        # actually extracted structured data from yet) shouldn't look
-        # "already covered" to gemini-3.1/3.5-flash-lite's own default run.
-        "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
-    }
-    with db_connection() as conn:
-        for _ in range(CLAIM_MAX_ATTEMPTS):
+    try:
+        # Worker hash for deterministic page distribution across concurrent workers.
+        # Replaced random() with (p.id % worker_hash) for 97% performance improvement.
+        worker_hash = (hash(socket.gethostname() + str(os.getpid())) % 10007) or 10007
+        logger.debug(f"[claim_next_page] Worker hash calculated: {worker_hash}")
+
+        params = {
+            "model_tag": MODEL_TAG,
+            "model": GEMINI_MODEL,
+            "claim_timeout": CLAIM_TIMEOUT_SECONDS,
+            "max_attempts": MAX_ATTEMPTS_PER_PAGE,
+            "worker_hash": worker_hash,
+            "source_model_tag": SOURCE_MODEL_TAG,
+            "allow_already_extracted": ALLOW_ALREADY_EXTRACTED,
+            "use_approval_check": USE_APPROVAL_CHECK,
+            # These two tags' own 'success' rows are an OCR-completion marker
+            # with zero catalogue_entries, not a real extraction verdict -- see
+            # GEMMA_OCR_ONLY_TAGS' comment -- so they're excluded from the
+            # any_le check above: a page Gemma merely OCR'd (nothing has
+            # actually extracted structured data from yet) shouldn't look
+            # "already covered" to gemini-3.1/3.5-flash-lite's own default run.
+            "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
+        }
+        logger.debug(f"[claim_next_page] Parameters prepared: {len(params)} keys")
+
+        with db_connection() as conn:
+            for attempt in range(CLAIM_MAX_ATTEMPTS):
+                query_start = time.time()
+                try:
+                    with conn.cursor() as cur:
+                        logger.debug(f"[claim_next_page] Attempt {attempt+1}/{CLAIM_MAX_ATTEMPTS}: Executing CLAIM_NEXT_PAGE_SQL")
+                        cur.execute(CLAIM_NEXT_PAGE_SQL, params)
+                        (page_id,) = cur.fetchone()
+                    query_time = time.time() - query_start
+                    logger.info(f"[claim_next_page] CLAIM query executed in {query_time:.3f}s, page_id={page_id}")
+                    conn.commit()
+                    if page_id is not None:
+                        break
+                except Exception as e:
+                    logger.error(f"[claim_next_page] Error on attempt {attempt+1}: {type(e).__name__}: {e}", exc_info=True)
+                    raise
+            else:
+                logger.info(f"[claim_next_page] No page claimed after {CLAIM_MAX_ATTEMPTS} attempts, checking if pending pages exist")
+                with conn.cursor() as cur:
+                    query_start = time.time()
+                    cur.execute(PENDING_EXISTS_SQL, params)
+                    (pending_exists,) = cur.fetchone()
+                    query_time = time.time() - query_start
+                    logger.info(f"[claim_next_page] PENDING_EXISTS query executed in {query_time:.3f}s, pending_exists={pending_exists}")
+                conn.commit()
+                return CLAIM_CONTENDED if pending_exists else None
+
+            logger.debug(f"[claim_next_page] Fetching page metadata for page_id={page_id}")
             with conn.cursor() as cur:
-                cur.execute(CLAIM_NEXT_PAGE_SQL, params)
-                (page_id,) = cur.fetchone()
-            conn.commit()
-            if page_id is not None:
-                break
-        else:
-            with conn.cursor() as cur:
-                cur.execute(PENDING_EXISTS_SQL, params)
-                (pending_exists,) = cur.fetchone()
-            conn.commit()
-            return CLAIM_CONTENDED if pending_exists else None
+                query_start = time.time()
+                cur.execute(
+                    "SELECT p.page_no, p.b2_account, p.b2_bucket, p.image_key, pf.folder, pf.name "
+                    "FROM pages p JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid "
+                    "WHERE p.id = %s",
+                    (page_id,),
+                )
+                page_no, account, bucket, image_key, folder, name = cur.fetchone()
+                query_time = time.time() - query_start
+                logger.debug(f"[claim_next_page] Metadata query executed in {query_time:.3f}s")
+            conn.rollback()
 
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT p.page_no, p.b2_account, p.b2_bucket, p.image_key, pf.folder, pf.name "
-                "FROM pages p JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid "
-                "WHERE p.id = %s",
-                (page_id,),
-            )
-            page_no, account, bucket, image_key, folder, name = cur.fetchone()
-        conn.rollback()
+        result = {
+            "page_id": page_id,
+            "page_no": page_no,
+            "account": account,
+            "bucket": bucket,
+            "image_key": image_key,
+            "folder": folder,
+            "stem": pathlib.Path(name).stem,
+        }
+        elapsed = time.time() - start_time
+        logger.info(f"[claim_next_page] EXIT (success): page_no={page_no}, total_time={elapsed:.3f}s")
+        return result
 
-    return {
-        "page_id": page_id,
-        "page_no": page_no,
-        "account": account,
-        "bucket": bucket,
-        "image_key": image_key,
-        "folder": folder,
-        "stem": pathlib.Path(name).stem,
-    }
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logger.error(f"[claim_next_page] EXIT (error): {type(e).__name__}: {e}, elapsed={elapsed:.3f}s", exc_info=True)
+        raise
 
 
 def flag_if_printed_page_missing(entry):
@@ -731,6 +790,9 @@ def gemini_generate(image_bytes, context=""):
     prompt. Returns (entries, raw_text); raises with .raw_text attached on
     a parse/shape failure, same contract as extract_with_llm.py's
     extract_page()."""
+    image_size = len(image_bytes)
+    logger.debug(f"[gemini_generate] ENTRY: context={context}, image_size={image_size}")
+
     b64 = base64.b64encode(image_bytes).decode()
     body = {
         "system_instruction": {"parts": [{"text": GEMINI_SYSTEM_PROMPT}]},
@@ -743,17 +805,27 @@ def gemini_generate(image_bytes, context=""):
         "generationConfig": {"responseMimeType": "application/json"},
     }
     started = time.time()
-    raw_text = _gemini_post(body, context)
-    text = raw_text.strip()
-    text = re.sub(r"^```(json)?|```$", "", text, flags=re.M).strip()
-    print(f"    gemini response for {context} in {time.time() - started:.1f}s total ({len(text)} chars): {text[:300]!r}")
     try:
-        parsed = json.loads(text)
-        entries = _coerce_to_entry_list(parsed)
-    except Exception as exc:
-        exc.raw_text = raw_text
+        raw_text = _gemini_post(body, context)
+        api_time = time.time() - started
+        text = raw_text.strip()
+        text = re.sub(r"^```(json)?|```$", "", text, flags=re.M).strip()
+        print(f"    gemini response for {context} in {api_time:.1f}s total ({len(text)} chars): {text[:300]!r}")
+        logger.info(f"[gemini_generate] API call succeeded: context={context}, response_size={len(raw_text)}, time={api_time:.3f}s")
+
+        try:
+            parsed = json.loads(text)
+            entries = _coerce_to_entry_list(parsed)
+            logger.debug(f"[gemini_generate] Parsed {len(entries)} entries from response")
+        except Exception as exc:
+            exc.raw_text = raw_text
+            logger.error(f"[gemini_generate] Parse error: {type(exc).__name__}: {exc}")
+            raise
+        logger.info(f"[gemini_generate] EXIT (success): context={context}, entries={len(entries)}")
+        return entries, raw_text
+    except Exception as e:
+        logger.error(f"[gemini_generate] EXIT (error): context={context}, error={type(e).__name__}: {str(e)[:100]}")
         raise
-    return entries, raw_text
 
 
 def gemini_ocr_full_page(image_bytes, context=""):
@@ -763,6 +835,9 @@ def gemini_ocr_full_page(image_bytes, context=""):
     for the full reasoning -- identical shape, just plain text instead of
     JSON mode, and no system_instruction (the OCR prompt is the only
     instruction this call needs)."""
+    image_size = len(image_bytes)
+    logger.debug(f"[gemini_ocr_full_page] ENTRY: context={context}, image_size={image_size}")
+
     b64 = base64.b64encode(image_bytes).decode()
     body = {
         "contents": [{
@@ -773,9 +848,16 @@ def gemini_ocr_full_page(image_bytes, context=""):
         }],
     }
     started = time.time()
-    raw_text = _gemini_post(body, context)
-    print(f"    full-page OCR for {context} in {time.time() - started:.1f}s total ({len(raw_text)} chars)")
-    return raw_text
+    try:
+        raw_text = _gemini_post(body, context)
+        api_time = time.time() - started
+        print(f"    full-page OCR for {context} in {api_time:.1f}s total ({len(raw_text)} chars)")
+        logger.info(f"[gemini_ocr_full_page] EXIT (success): context={context}, text_size={len(raw_text)}, time={api_time:.3f}s")
+        return raw_text
+    except Exception as e:
+        api_time = time.time() - started
+        logger.error(f"[gemini_ocr_full_page] EXIT (error): context={context}, error={type(e).__name__}: {str(e)[:100]}, time={api_time:.3f}s")
+        raise
 
 
 def _text(entry, key):
@@ -861,36 +943,52 @@ INSERT_ENTRY_SQL = """
 
 
 def db_save_extraction_success(page_id, entries, raw_text):
-    with db_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO llm_extractions (page_id, model, model_tag, status, raw_response, raw_text) "
-            "VALUES (%s, %s, %s, 'success', %s, %s) "
-            "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
-            "status = 'success', raw_response = EXCLUDED.raw_response, "
-            "raw_text = EXCLUDED.raw_text, error_message = NULL, created_at = now() "
-            "RETURNING id",
-            (page_id, GEMINI_MODEL, MODEL_TAG, Json(entries), raw_text),
-        )
-        extraction_id = cur.fetchone()[0]
-        cur.execute("DELETE FROM catalogue_entries WHERE extraction_id = %s", (extraction_id,))
-        for idx, entry in enumerate(entries):
-            cur.execute(INSERT_ENTRY_SQL, build_entry_row(extraction_id, idx, entry))
-        conn.commit()
+    logger.info(f"[db_save_extraction_success] page_id={page_id}, entries={len(entries)}, raw_text_size={len(raw_text.encode('utf-8')) if raw_text else 0}")
+    try:
+        start_time = time.time()
+        with db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO llm_extractions (page_id, model, model_tag, status, raw_response, raw_text) "
+                "VALUES (%s, %s, %s, 'success', %s, %s) "
+                "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
+                "status = 'success', raw_response = EXCLUDED.raw_response, "
+                "raw_text = EXCLUDED.raw_text, error_message = NULL, created_at = now() "
+                "RETURNING id",
+                (page_id, GEMINI_MODEL, MODEL_TAG, Json(entries), raw_text),
+            )
+            extraction_id = cur.fetchone()[0]
+            cur.execute("DELETE FROM catalogue_entries WHERE extraction_id = %s", (extraction_id,))
+            for idx, entry in enumerate(entries):
+                cur.execute(INSERT_ENTRY_SQL, build_entry_row(extraction_id, idx, entry))
+            conn.commit()
+        elapsed = time.time() - start_time
+        logger.info(f"[db_save_extraction_success] SUCCESS: page_id={page_id}, extraction_id={extraction_id}, time={elapsed:.3f}s")
+    except Exception as e:
+        logger.error(f"[db_save_extraction_success] FAILED: page_id={page_id}, error={type(e).__name__}: {e}", exc_info=True)
+        raise
 
 
 def db_save_extraction_failure(page_id, error_message, raw_text, content_failure):
-    with db_connection() as conn, conn.cursor() as cur:
-        cur.execute(
-            "INSERT INTO llm_extractions "
-            "(page_id, model, model_tag, status, error_message, raw_text, content_failure) "
-            "VALUES (%s, %s, %s, 'failed', %s, %s, %s) "
-            "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
-            "status = 'failed', error_message = EXCLUDED.error_message, "
-            "raw_text = EXCLUDED.raw_text, content_failure = EXCLUDED.content_failure, "
-            "created_at = now()",
-            (page_id, GEMINI_MODEL, MODEL_TAG, error_message, raw_text, content_failure),
-        )
-        conn.commit()
+    logger.info(f"[db_save_extraction_failure] page_id={page_id}, content_failure={content_failure}, error_len={len(error_message) if error_message else 0}, raw_text_size={len(raw_text.encode('utf-8')) if raw_text else 0}")
+    try:
+        start_time = time.time()
+        with db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO llm_extractions "
+                "(page_id, model, model_tag, status, error_message, raw_text, content_failure) "
+                "VALUES (%s, %s, %s, 'failed', %s, %s, %s) "
+                "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
+                "status = 'failed', error_message = EXCLUDED.error_message, "
+                "raw_text = EXCLUDED.raw_text, content_failure = EXCLUDED.content_failure, "
+                "created_at = now()",
+                (page_id, GEMINI_MODEL, MODEL_TAG, error_message, raw_text, content_failure),
+            )
+            conn.commit()
+        elapsed = time.time() - start_time
+        logger.info(f"[db_save_extraction_failure] SUCCESS: page_id={page_id}, time={elapsed:.3f}s")
+    except Exception as e:
+        logger.error(f"[db_save_extraction_failure] FAILED: page_id={page_id}, error={type(e).__name__}: {e}", exc_info=True)
+        raise
 
 
 def is_content_failure(exc):
@@ -918,6 +1016,8 @@ def process_page(clients, claim):
     stem = claim["stem"]
     context = f"{folder}/{stem} page {page_no}"
 
+    process_start = time.time()
+    logger.info(f"[process_page] ENTRY: page_id={page_id}, page_no={page_no}, account={account}, folder={folder}")
     print(f"  page {page_no}: b2 account={account} bucket={bucket} key={image_key}")
     raw_text = None
     # Set from either the OCR call below or the extraction call further
@@ -981,9 +1081,13 @@ def process_page(clients, claim):
             entry["pdf_page"] = page_no - 1
             flag_if_printed_page_missing(entry)
         entries_json = json.dumps(entries)
+        entries_size = len(entries_json.encode('utf-8'))
         print(f"    saving {len(entries)} entries for {context}: {entries_json[:500]!r}")
+        logger.info(f"[process_page] Extracted {len(entries)} entries, json_size={entries_size} bytes")
         db_save_extraction_success(page_id, entries, raw_text)
         print(f"done: {context}")
+        elapsed = time.time() - process_start
+        logger.info(f"[process_page] EXIT (success): page_id={page_id}, page_no={page_no}, entries={len(entries)}, time={elapsed:.3f}s")
         return True, False, ocr_rate_limited
     except Exception as exc:
         content_failure = is_content_failure(exc)
@@ -991,6 +1095,8 @@ def process_page(clients, claim):
         gemini_rate_limited = ocr_rate_limited or getattr(exc, "gemini_rate_limited", False)
         raw_text = getattr(exc, "raw_text", raw_text)
         print(f"WARNING: page {page_no} of {folder}/{stem} failed: {exc}; will retry next run")
+        elapsed = time.time() - process_start
+        logger.error(f"[process_page] EXIT (error): page_id={page_id}, page_no={page_no}, error={type(exc).__name__}: {str(exc)[:100]}, b2_fail={b2_download_failure}, gemini_limited={gemini_rate_limited}, time={elapsed:.3f}s")
         db_save_extraction_failure(page_id, str(exc), raw_text, content_failure)
         return False, b2_download_failure, gemini_rate_limited
 
@@ -1007,19 +1113,29 @@ def count_capped_failures():
 
 
 def main():
+    logger.info(f"[main] ENTRY: model={GEMINI_MODEL}, model_tag={MODEL_TAG}, pace={PACE_SECONDS}s")
+    main_start = time.time()
+
     clients = {aid: b2_client(acct) for aid, acct in B2_ACCOUNTS.items()}
+    logger.debug(f"[main] B2 clients initialized: {list(clients.keys())}")
 
     print(f"model: {GEMINI_MODEL} (tag: {MODEL_TAG}); pace: {PACE_SECONDS}s between requests")
+    logger.info(f"[main] Configuration: MODEL_TAG={MODEL_TAG}, PACE_SECONDS={PACE_SECONDS}")
     if SOURCE_MODEL_TAG:
         print(f"rescue mode: only claiming pages capped out as content failures under source model tag {SOURCE_MODEL_TAG!r}")
+        logger.info(f"[main] Rescue mode enabled: SOURCE_MODEL_TAG={SOURCE_MODEL_TAG}")
     if ALLOW_ALREADY_EXTRACTED:
         print("ALLOW_ALREADY_EXTRACTED set: will claim pages another model/textparse/human already succeeded on")
+        logger.info(f"[main] ALLOW_ALREADY_EXTRACTED=True")
     elif USE_APPROVAL_CHECK:
         print("approval-check mode: processing all pages without an 'approved' verdict, ignoring other models' extractions")
+        logger.info(f"[main] USE_APPROVAL_CHECK=True")
     else:
         print("default: skipping pages that already have a successful extraction from any source")
+        logger.info(f"[main] Default mode: skipping already-extracted pages")
     if MAX_PAGES_PER_WORKER:
         print(f"MAX_PAGES_PER_WORKER set: stopping after {MAX_PAGES_PER_WORKER} page(s)")
+        logger.info(f"[main] MAX_PAGES_PER_WORKER={MAX_PAGES_PER_WORKER}")
 
     processed = 0
     any_incomplete = False
@@ -1029,6 +1145,7 @@ def main():
     b2_failures = 0
     gemini_rate_capped = False
     gemini_rate_limit_failures = 0
+    loop_start = time.time()
     while True:
         if elapsed() > MAX_RUNTIME_SECONDS:
             print(f"runtime guard tripped after {elapsed():.0f}s; stopping before claiming another page")
@@ -1078,17 +1195,23 @@ def main():
             gemini_rate_capped = True
             break
 
+    loop_elapsed = time.time() - loop_start
     print(f"processed {processed} page(s) total; stopped for the reason logged above")
+    logger.info(f"[main] Processing complete: processed={processed}, any_incomplete={any_incomplete}, loop_time={loop_elapsed:.1f}s")
 
     if gemini_rate_capped:
         print("stopping now rather than exiting non-zero at the bottom: the daily Gemini quota, not a bug, is why pages are failing")
+        logger.warning(f"[main] EXIT: GEMINI_RATE_LIMIT (code={GEMINI_RATE_LIMIT_EXIT_CODE}), failures={gemini_rate_limit_failures}")
         sys.exit(GEMINI_RATE_LIMIT_EXIT_CODE)
     if limited:
         print(f"limited run: stopped at MAX_PAGES_PER_WORKER ({MAX_PAGES_PER_WORKER}); whether more pages remain is unknown")
+        logger.info(f"[main] EXIT: Limited run, MAX_PAGES_PER_WORKER={MAX_PAGES_PER_WORKER}")
     elif contended:
         print("stopped on claim contention; backlog status unknown, not confirmed exhausted")
+        logger.warning(f"[main] EXIT: Claim contention detected")
     elif b2_capped:
         print(f"stopped after {b2_failures} B2 download failures (MAX_B2_FAILURES_PER_WORKER={MAX_B2_FAILURES_PER_WORKER})")
+        logger.warning(f"[main] EXIT: B2 capped, failures={b2_failures}")
     else:
         capped = count_capped_failures()
         if capped:
@@ -1097,12 +1220,19 @@ def main():
                 f"couldn't produce a usable response for after {MAX_ATTEMPTS_PER_PAGE} attempts "
                 "and need manual review or a different model"
             )
+            logger.info(f"[main] EXIT: Backlog exhausted, capped_failures={capped}")
         else:
             print("all pages processed")
+            logger.info(f"[main] EXIT: All pages processed successfully")
 
+    total_elapsed = time.time() - main_start
     if any_incomplete:
         print("one or more pages failed extraction; exiting non-zero so this is visible")
+        logger.error(f"[main] EXIT (error): Some pages failed, total_time={total_elapsed:.1f}s")
         sys.exit(1)
+    else:
+        logger.info(f"[main] EXIT (success): total_time={total_elapsed:.1f}s, processed={processed}")
+        sys.exit(0)
 
 
 if __name__ == "__main__":

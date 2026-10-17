@@ -420,7 +420,7 @@ CLAIM_NEXT_PAGE_SQL = """
                  AND NOT EXISTS (
                    SELECT 1 FROM llm_extractions any_le
                    WHERE any_le.page_id = p.id AND any_le.status = 'success'
-                     AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
+                     AND NOT any_le.model_tag = ANY(%(gemma_ocr_only_tags)s::text[])
                  )
                )
              ))
@@ -497,7 +497,7 @@ PENDING_EXISTS_SQL = """
                  AND NOT EXISTS (
                    SELECT 1 FROM llm_extractions any_le
                    WHERE any_le.page_id = p.id AND any_le.status = 'success'
-                     AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
+                     AND NOT any_le.model_tag = ANY(%(gemma_ocr_only_tags)s::text[])
                  )
                )
              ))

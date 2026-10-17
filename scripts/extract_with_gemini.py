@@ -85,9 +85,9 @@ from botocore.config import Config
 from psycopg2.extras import Json
 
 # Configure logging for GitHub Actions visibility
-# Only set our logger to DEBUG, not root (to avoid verbose dependency logs)
+# Only set our logger to INFO, not root (to avoid verbose dependency logs)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 handler = logging.StreamHandler(sys.stdout)
 handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
 logger.addHandler(handler)

@@ -19,13 +19,22 @@ Paces requests at 2s apart (start-to-start) to stay under rate limits with margi
 Exits gracefully at 60 minutes to respect runner time limits; next hourly run continues.
 """
 import json
+import logging
 import os
 import re
 import sys
 import time
+import traceback
 
 import psycopg2
 import requests
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
@@ -94,11 +103,16 @@ def log_debug(msg):
 
 
 def db_connect():
+    logger.debug(f"[db_connect] Attempting database connection (max_attempts={DB_CONNECT_MAX_ATTEMPTS})")
     for attempt in range(1, DB_CONNECT_MAX_ATTEMPTS + 1):
         try:
-            return psycopg2.connect(SUPABASE_DB_URL)
+            conn = psycopg2.connect(SUPABASE_DB_URL)
+            logger.info(f"[db_connect] SUCCESS: Connected to database on attempt {attempt}")
+            return conn
         except psycopg2.OperationalError as exc:
+            logger.warning(f"[db_connect] Attempt {attempt}/{DB_CONNECT_MAX_ATTEMPTS} failed: {type(exc).__name__}: {exc}")
             if attempt == DB_CONNECT_MAX_ATTEMPTS:
+                logger.error(f"[db_connect] All connection attempts failed", exc_info=True)
                 raise
             print(f"DB connect attempt {attempt}/{DB_CONNECT_MAX_ATTEMPTS} failed; retrying", file=sys.stderr)
             time.sleep(2**attempt)
@@ -162,6 +176,10 @@ def detect_and_translate_page(ocr_text, model):
     Returns: {"languages": [...], "translations": [...]}
     Raises: RuntimeError on API error or unexpected response format
     """
+    func_start = time.time()
+    ocr_size = len(ocr_text.encode('utf-8'))
+    logger.debug(f"[detect_and_translate_page] ENTRY: model={model}, ocr_size={ocr_size}")
+
     wait_for_rate_limit()
 
     log_debug(f"OCR text length: {len(ocr_text)} characters")
@@ -265,56 +283,69 @@ def detect_and_translate_page(ocr_text, model):
         log_debug(f"Invalid structure, full result: {json.dumps(result, indent=2)}")
         raise RuntimeError(f"Invalid response structure: {result}")
 
+    elapsed = time.time() - func_start
+    logger.info(f"[detect_and_translate_page] EXIT (success): model={model}, languages={len(result.get('languages', []))}, translations={len(result.get('translations', []))}, time={elapsed:.3f}s")
     return result
 
 
 def save_languages_and_translations(page_id, model_tag, analysis_result):
     """Store detected languages and translations in database."""
+    func_start = time.time()
+    langs_count = len(analysis_result.get("languages", []))
+    trans_count = len(analysis_result.get("translations", []))
+    logger.debug(f"[save_languages_and_translations] ENTRY: page_id={page_id}, model_tag={model_tag}, languages={langs_count}, translations={trans_count}")
     log_debug(f"Saving results for page {page_id}")
 
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            # Insert detected languages
-            languages = analysis_result.get("languages", [])
-            log_debug(f"  Inserting {len(languages)} language(s)")
-            for lang_info in languages:
-                log_debug(f"    - {lang_info['language']} ({lang_info['code']})")
-                cur.execute(
-                    """
-                    INSERT INTO page_detected_languages (page_id, language, language_code, model_tag)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (page_id, language_code) DO NOTHING
-                    """,
-                    (page_id, lang_info["language"], lang_info["code"], model_tag)
-                )
-
-            # Insert translations (non-English only)
-            translations = analysis_result.get("translations", [])
-            log_debug(f"  Inserting {len(translations)} translation(s)")
-            for i, trans in enumerate(translations):
-                log_debug(f"    - Translation {i+1}: {trans['source_language']} → English")
-                log_debug(f"      Original: {len(trans['original_text'])} chars, Translated: {len(trans['english_translation'])} chars")
-                cur.execute(
-                    """
-                    INSERT INTO page_translations (
-                        page_id, source_language, source_language_code,
-                        original_text, translated_text, model_tag
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                # Insert detected languages
+                languages = analysis_result.get("languages", [])
+                log_debug(f"  Inserting {len(languages)} language(s)")
+                for lang_info in languages:
+                    log_debug(f"    - {lang_info['language']} ({lang_info['code']})")
+                    cur.execute(
+                        """
+                        INSERT INTO page_detected_languages (page_id, language, language_code, model_tag)
+                        VALUES (%s, %s, %s, %s)
+                        ON CONFLICT (page_id, language_code) DO NOTHING
+                        """,
+                        (page_id, lang_info["language"], lang_info["code"], model_tag)
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    """,
-                    (
-                        page_id,
-                        trans["source_language"],
-                        trans["source_code"],
-                        trans["original_text"],
-                        trans["english_translation"],
-                        model_tag
+
+                # Insert translations (non-English only)
+                translations = analysis_result.get("translations", [])
+                log_debug(f"  Inserting {len(translations)} translation(s)")
+                for i, trans in enumerate(translations):
+                    log_debug(f"    - Translation {i+1}: {trans['source_language']} → English")
+                    log_debug(f"      Original: {len(trans['original_text'])} chars, Translated: {len(trans['english_translation'])} chars")
+                    cur.execute(
+                        """
+                        INSERT INTO page_translations (
+                            page_id, source_language, source_language_code,
+                            original_text, translated_text, model_tag
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            page_id,
+                            trans["source_language"],
+                            trans["source_code"],
+                            trans["original_text"],
+                            trans["english_translation"],
+                            model_tag
+                        )
                     )
-                )
 
-        conn.commit()
+            conn.commit()
 
-    log_debug(f"  ✓ Saved to database")
+        elapsed = time.time() - func_start
+        logger.info(f"[save_languages_and_translations] EXIT (success): page_id={page_id}, languages={langs_count}, translations={trans_count}, time={elapsed:.3f}s")
+        log_debug(f"  ✓ Saved to database")
+    except Exception as e:
+        elapsed = time.time() - func_start
+        logger.error(f"[save_languages_and_translations] EXIT (error): page_id={page_id}, error={type(e).__name__}: {e}, time={elapsed:.3f}s", exc_info=True)
+        raise
 
 
 def get_pages_needing_language_detection():
@@ -326,41 +357,54 @@ def get_pages_needing_language_detection():
 
     Returns list of (page_id, ocr_text) tuples.
     """
-    with db_connect() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT DISTINCT ON (p.id) p.id, pot.raw_text
-                FROM pages p
-                JOIN page_ocr_text pot ON pot.page_id = p.id
-                WHERE pot.status = 'success'
-                  AND pot.raw_text IS NOT NULL
-                  AND NOT EXISTS (
-                    SELECT 1 FROM page_detected_languages pdl
-                    WHERE pdl.page_id = p.id
-                  )
-                  AND p.image_uploaded_at IS NOT NULL
-                  AND p.excluded_at IS NULL
-                ORDER BY p.id,
-                  CASE pot.model_tag
-                    WHEN 'gemma-4-31b-it' THEN 0
-                    WHEN 'gemma-4-26b-a4b-it' THEN 1
-                    ELSE 2
-                  END,
-                  pot.created_at
-                LIMIT %s
-                """,
-                (MAX_PAGES_PER_WORKER if MAX_PAGES_PER_WORKER else 1000000,)
-            )
-            return cur.fetchall()
+    logger.debug(f"[get_pages_needing_language_detection] ENTRY")
+    try:
+        with db_connect() as conn:
+            with conn.cursor() as cur:
+                query_start = time.time()
+                cur.execute(
+                    """
+                    SELECT DISTINCT ON (p.id) p.id, pot.raw_text
+                    FROM pages p
+                    JOIN page_ocr_text pot ON pot.page_id = p.id
+                    WHERE pot.status = 'success'
+                      AND pot.raw_text IS NOT NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM page_detected_languages pdl
+                        WHERE pdl.page_id = p.id
+                      )
+                      AND p.image_uploaded_at IS NOT NULL
+                      AND p.excluded_at IS NULL
+                    ORDER BY p.id,
+                      CASE pot.model_tag
+                        WHEN 'gemma-4-31b-it' THEN 0
+                        WHEN 'gemma-4-26b-a4b-it' THEN 1
+                        ELSE 2
+                      END,
+                      pot.created_at
+                    LIMIT %s
+                    """,
+                    (MAX_PAGES_PER_WORKER if MAX_PAGES_PER_WORKER else 1000000,)
+                )
+                results = cur.fetchall()
+                query_time = time.time() - query_start
+                logger.info(f"[get_pages_needing_language_detection] SUCCESS: fetched {len(results)} pages in {query_time:.3f}s")
+                return results
+    except Exception as e:
+        logger.error(f"[get_pages_needing_language_detection] FAILED: {type(e).__name__}: {e}", exc_info=True)
+        raise
 
 
 def main():
+    logger.info(f"[main] ENTRY: Language detection and translation worker starting")
+    start_time = time.time()
+
     print(f"Language detection and translation worker starting")
     print(f"Models: {' ↔ '.join(GEMINI_MODELS)} (alternating)")
     print(f"  Will skip models that hit rate limits; stops if all models disabled")
     print(f"Pace: {GEMINI_PACE_SECONDS}s between request starts")
     print(f"DEBUG mode: {'ON' if DEBUG else 'OFF'}")
+    logger.info(f"[main] Configuration: models={GEMINI_MODELS}, pace={GEMINI_PACE_SECONDS}s, debug={DEBUG}")
     if DEBUG:
         print(f"  (DEBUG enabled: processing < 20 pages)")
 
@@ -368,7 +412,9 @@ def main():
     pages_failed = 0
 
     try:
+        logger.info(f"[main] Fetching pages needing language detection...")
         pages = get_pages_needing_language_detection()
+        logger.info(f"[main] Found {len(pages)} pages needing language detection")
         print(f"Found {len(pages)} pages needing language detection")
         if DEBUG:
             log_debug(f"Pages to process: {[p[0] for p in pages]}")
@@ -474,17 +520,28 @@ def main():
 
     except Exception as exc:
         print(f"Fatal error: {exc}", file=sys.stderr)
+        elapsed_time = time.time() - start_time
+        logger.error(f"[main] FATAL ERROR: {type(exc).__name__}: {exc}, elapsed={elapsed_time:.1f}s", exc_info=True)
         if DEBUG:
-            import traceback
             log_debug(f"Fatal error details:")
             for line in traceback.format_exc().split('\n'):
                 log_debug(line)
         sys.exit(1)
 
+    elapsed_time = time.time() - start_time
     print(f"\n✓ Processed {pages_processed} pages, {pages_failed} failed ({elapsed():.0f}s elapsed)")
+    logger.info(f"[main] EXIT (success): processed={pages_processed}, failed={pages_failed}, total_time={elapsed_time:.1f}s")
     if pages_failed == 0:
         print("All done!")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit as e:
+        if e.code not in (0, 42):
+            logger.error(f"[__main__] Script exited with code {e.code}")
+        raise
+    except Exception as e:
+        logger.error(f"[__main__] Unhandled exception: {type(e).__name__}: {e}", exc_info=True)
+        sys.exit(1)

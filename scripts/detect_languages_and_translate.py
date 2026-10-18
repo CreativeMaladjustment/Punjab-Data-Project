@@ -48,10 +48,15 @@ SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 # By alternating, each model gets ~6 req/min (within limit with margin)
 GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
 GEMINI_MODEL_INDEX = 0  # Start with 3.5
-GEMINI_DISABLED_MODELS = set()  # Models that hit rate limits during this run
-GEMINI_BACKOFF_MODELS = {}  # Maps model -> backoff_until_time for 503 errors
+GEMINI_DISABLED_MODELS = set()  # Models permanently disabled (5+ rate limits in 6 min window)
+GEMINI_BACKOFF_MODELS = {}  # Maps model -> backoff_until_time for 503 errors or rate limit backoff
 GEMINI_BACKOFF_SECONDS = 120  # 2 minutes backoff for 503 errors
+GEMINI_RATE_LIMIT_BACKOFF_SECONDS = 300  # 5 minutes backoff for 429 errors (allow quota to reset)
 GEMINI_PACE_SECONDS = 3.0  # 3s from request start to next request start (10 RPM per model when alternating)
+# Rate limit error tracking: model -> list of recent error timestamps
+GEMINI_RATE_LIMIT_ERRORS = {model: [] for model in GEMINI_MODELS}
+GEMINI_RATE_LIMIT_ERROR_THRESHOLD = 5  # Disable after 5 errors
+GEMINI_RATE_LIMIT_WINDOW_SECONDS = 360  # Within 6-minute window
 
 DB_CONNECT_MAX_ATTEMPTS = 5
 RUNTIME_GUARD_EXIT_CODE = 42
@@ -479,24 +484,45 @@ def main():
                             for line in traceback.format_exc().split('\n'):
                                 log_debug(line)
 
-                # Check if this is a 429 rate limit error for permanent disable
+                # Check if this is a 429 rate limit error (temporary backoff, not permanent disable)
                 elif "rate limit hit (429)" in error_msg:
-                    # Extract which model hit the limit and disable it
-                    model_disabled = False
+                    # Extract which model hit the limit and add backoff
+                    model_backed_off = False
                     for model in GEMINI_MODELS:
                         if model in error_msg:
-                            GEMINI_DISABLED_MODELS.add(model)
-                            print(f"✗ {model} disabled (rate limit)")
-                            model_disabled = True
+                            # Track this error with timestamp
+                            GEMINI_RATE_LIMIT_ERRORS[model].append(time.time())
+
+                            # Remove errors older than 6-minute window
+                            cutoff_time = time.time() - GEMINI_RATE_LIMIT_WINDOW_SECONDS
+                            GEMINI_RATE_LIMIT_ERRORS[model] = [t for t in GEMINI_RATE_LIMIT_ERRORS[model] if t > cutoff_time]
+
+                            recent_errors = len(GEMINI_RATE_LIMIT_ERRORS[model])
+
+                            # Check if we've hit the threshold (5 errors in 6 minutes)
+                            if recent_errors >= GEMINI_RATE_LIMIT_ERROR_THRESHOLD:
+                                GEMINI_DISABLED_MODELS.add(model)
+                                print(f"✗ {model} disabled (5+ rate limits in 6 min)")
+                            else:
+                                # Temporary backoff, not permanent disable
+                                backoff_until = time.time() + GEMINI_RATE_LIMIT_BACKOFF_SECONDS
+                                GEMINI_BACKOFF_MODELS[model] = backoff_until
+                                print(f"⏸ {model} rate limit hit ({recent_errors}/{GEMINI_RATE_LIMIT_ERROR_THRESHOLD}) - backing off {GEMINI_RATE_LIMIT_BACKOFF_SECONDS}s")
+
+                            model_backed_off = True
                             break
 
-                    if model_disabled:
-                        # Check if other models still available
-                        if len(GEMINI_DISABLED_MODELS) < len(GEMINI_MODELS):
-                            print(f"  Continuing with remaining model(s)")
+                    if model_backed_off:
+                        # Check if other models still available (not in backoff, not disabled)
+                        available_models = [m for m in GEMINI_MODELS
+                                          if m not in GEMINI_DISABLED_MODELS
+                                          and (m not in GEMINI_BACKOFF_MODELS or GEMINI_BACKOFF_MODELS[m] <= time.time())]
+
+                        if available_models:
+                            print(f"  Retrying with available model(s)")
                             pages_failed += 1
                         else:
-                            print(f"✗ All models disabled - stopping")
+                            print(f"✗ All models disabled or backed off - stopping")
                             raise
                     else:
                         # Rate limit error but couldn't identify model, treat as fatal

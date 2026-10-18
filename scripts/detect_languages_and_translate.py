@@ -513,17 +513,36 @@ def main():
                             break
 
                     if model_backed_off:
-                        # Check if other models still available (not in backoff, not disabled)
+                        # Check if any models are permanently disabled
+                        if len(GEMINI_DISABLED_MODELS) == len(GEMINI_MODELS):
+                            # All models permanently disabled after hitting threshold
+                            print(f"✗ All models permanently disabled - stopping")
+                            raise
+
+                        # Check if other models are currently available (not in backoff, not disabled)
                         available_models = [m for m in GEMINI_MODELS
                                           if m not in GEMINI_DISABLED_MODELS
-                                          and (m not in GEMINI_BACKOFF_MODELS or GEMINI_BACKOFF_MODELS[m] <= time.time())]
+                                          and m not in GEMINI_BACKOFF_MODELS]
 
                         if available_models:
-                            print(f"  Retrying with available model(s)")
+                            # Other model(s) available now, will be used in next iteration
+                            print(f"  Will retry with {len(available_models)} available model(s)")
                             pages_failed += 1
                         else:
-                            print(f"✗ All models disabled or backed off - stopping")
-                            raise
+                            # All models are either backed off or disabled
+                            # Find the next model that will become available
+                            available_soon = [(m, GEMINI_BACKOFF_MODELS[m]) for m in GEMINI_MODELS
+                                            if m in GEMINI_BACKOFF_MODELS]
+                            if available_soon:
+                                # Get the model that will be available soonest
+                                next_model, backoff_until = min(available_soon, key=lambda x: x[1])
+                                wait_time = backoff_until - time.time()
+                                print(f"  All models backed off; will retry after {next_model} backoff expires ({wait_time:.0f}s)")
+                                pages_failed += 1
+                            else:
+                                # Shouldn't reach here, but handle just in case
+                                print(f"✗ Unable to determine next available model")
+                                raise
                     else:
                         # Rate limit error but couldn't identify model, treat as fatal
                         print(f"✗ {exc}")

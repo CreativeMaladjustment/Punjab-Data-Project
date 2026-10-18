@@ -51,7 +51,7 @@ GEMINI_MODEL_INDEX = 0  # Start with 3.5
 GEMINI_DISABLED_MODELS = set()  # Models that hit rate limits during this run
 GEMINI_BACKOFF_MODELS = {}  # Maps model -> backoff_until_time for 503 errors
 GEMINI_BACKOFF_SECONDS = 120  # 2 minutes backoff for 503 errors
-GEMINI_PACE_SECONDS = 2.0  # 2s from request start to next request start (15 RPM per model when alternating)
+GEMINI_PACE_SECONDS = 3.0  # 3s from request start to next request start (10 RPM per model when alternating)
 
 DB_CONNECT_MAX_ATTEMPTS = 5
 RUNTIME_GUARD_EXIT_CODE = 42

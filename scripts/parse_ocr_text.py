@@ -187,14 +187,18 @@ MAX_ATTEMPTS_PER_PAGE = 2
 # fetches that separately, deterministically, once the claim itself has
 # already committed; see its own docstring for why.
 CLAIM_NEXT_OCR_PAGE_SQL = """
-    WITH candidate AS (
-        SELECT p.id,
-               MAX(LENGTH(pot.raw_text)) AS max_ocr_length
+    ocr_lengths AS (
+        SELECT page_id, MAX(LENGTH(raw_text)) AS max_ocr_length
+        FROM page_ocr_text
+        WHERE status = 'success'
+        GROUP BY page_id
+    ),
+    candidate AS (
+        SELECT p.id
         FROM pages p
+        LEFT JOIN ocr_lengths ol ON ol.page_id = p.id
         LEFT JOIN llm_extractions le
             ON le.page_id = p.id AND le.model_tag = %(model_tag)s
-        LEFT JOIN page_ocr_text pot
-            ON pot.page_id = p.id AND pot.status = 'success'
         WHERE p.image_uploaded_at IS NOT NULL
           AND p.excluded_at IS NULL
           AND EXISTS (
@@ -215,8 +219,7 @@ CLAIM_NEXT_OCR_PAGE_SQL = """
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
-        GROUP BY p.id
-        ORDER BY max_ocr_length """ + ("DESC" if PRIORITIZE_LARGE_PAGES else "ASC") + """ NULLS LAST, random()  # nosec: sort direction from env var at load time, not user input
+        ORDER BY COALESCE(ol.max_ocr_length, 0) """ + ("DESC" if PRIORITIZE_LARGE_PAGES else "ASC") + """ NULLS LAST, random()  # nosec: sort direction from env var at load time, not user input
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),

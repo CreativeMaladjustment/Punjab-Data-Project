@@ -1,0 +1,43 @@
+name: Test Supabase Compression
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_id:
+        description: "Optional: specific page ID to test (omit for largest record)"
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  test_compression:
+    runs-on: ubuntu-latest
+    environment: b2-upload
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python 3
+        run: |
+          python3 --version
+          python3 -m pip --version
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install psycopg2-binary
+
+      - name: Test compression on large record
+        run: |
+          python3 scripts/test_compression.py
+        env:
+          PAGE_ID: ${{ inputs.page_id }}
+
+      - name: Summary
+        run: |
+          echo "## Compression Test Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "See job logs for detailed results." >> $GITHUB_STEP_SUMMARY

@@ -73,6 +73,11 @@ MODEL_TAG = f"textparse:{TEXT_MODEL_TAG}"
 # primary structured-extraction model changes later without a code edit here.
 PRIMARY_MODEL_TAG = os.environ.get("PRIMARY_MODEL_TAG", "glm-ocr")
 
+# Prioritize large OCR pages (> 20K chars) for timeout-resistant processing
+# Default: prioritize small pages (< 20K) for faster throughput
+# Set to 'true' to reverse: process large pages first (e.g., manual large-page cleanup)
+PRIORITIZE_LARGE_PAGES = os.environ.get("PRIORITIZE_LARGE_PAGES", "").lower() == "true"
+
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; same runner guard as extract_with_llm.py
@@ -182,16 +187,23 @@ MAX_ATTEMPTS_PER_PAGE = 2
 # fetches that separately, deterministically, once the claim itself has
 # already committed; see its own docstring for why.
 CLAIM_NEXT_OCR_PAGE_SQL = """
-    WITH candidate AS (
+    ocr_lengths AS (
+        SELECT page_id, MAX(LENGTH(raw_text)) AS max_ocr_length
+        FROM page_ocr_text
+        WHERE status = 'success'
+        GROUP BY page_id
+    ),
+    candidate AS (
         SELECT p.id
         FROM pages p
+        LEFT JOIN ocr_lengths ol ON ol.page_id = p.id
         LEFT JOIN llm_extractions le
             ON le.page_id = p.id AND le.model_tag = %(model_tag)s
         WHERE p.image_uploaded_at IS NOT NULL
           AND p.excluded_at IS NULL
           AND EXISTS (
-              SELECT 1 FROM page_ocr_text pot
-              WHERE pot.page_id = p.id AND pot.status = 'success'
+              SELECT 1 FROM page_ocr_text pot2
+              WHERE pot2.page_id = p.id AND pot2.status = 'success'
           )
           AND NOT EXISTS (
               SELECT 1 FROM llm_extractions primary_le
@@ -207,7 +219,7 @@ CLAIM_NEXT_OCR_PAGE_SQL = """
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
-        ORDER BY random()
+        ORDER BY COALESCE(ol.max_ocr_length, 0) """ + ("DESC" if PRIORITIZE_LARGE_PAGES else "ASC") + """ NULLS LAST, random()  # nosec: sort direction from env var at load time, not user input
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),

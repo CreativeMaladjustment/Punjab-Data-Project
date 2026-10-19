@@ -1,0 +1,60 @@
+name: Test Supabase Compression (Self-Hosted)
+
+on:
+  workflow_dispatch:
+    inputs:
+      page_id:
+        description: "Page ID to test (select from largest records)"
+        type: choice
+        required: false
+        default: "2228"
+        options:
+          - "2228 (163.9 KB)"
+          - "3270 (143.8 KB)"
+          - "4739 (128.3 KB)"
+          - "13792 (128.2 KB)"
+          - "13896 (128.1 KB)"
+          - "5216 (96.0 KB)"
+          - "17214 (87.1 KB)"
+          - "13899 (86.9 KB)"
+          - "16992 (85.7 KB)"
+          - "24625 (76.0 KB)"
+
+permissions:
+  contents: read
+
+jobs:
+  test_compression:
+    runs-on: self-hosted
+    timeout-minutes: 1440  # 24 hours - self-hosted can run much longer
+    environment: b2-upload
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Verify Python 3 is installed
+        run: |
+          python3 --version
+          python3 -m pip --version
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install psycopg2-binary
+
+      - name: Extract page ID and test compression
+        run: |
+          # Extract page ID from the selection (format: "2228 (163.9 KB)")
+          PAGE_ID=$(echo "${{ inputs.page_id }}" | cut -d' ' -f1)
+          echo "Testing page ID: $PAGE_ID"
+          PAGE_ID=$PAGE_ID python3 scripts/test_compression.py
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+
+      - name: Summary
+        run: |
+          echo "## Compression Test Complete (Self-Hosted)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Ran on self-hosted runner with 24-hour timeout." >> $GITHUB_STEP_SUMMARY
+          echo "See job logs for detailed results." >> $GITHUB_STEP_SUMMARY

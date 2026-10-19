@@ -26,6 +26,7 @@ permissions:
 jobs:
   test_compression:
     runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours - full GitHub-hosted runner limit
     environment: b2-upload
     env:
       SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}

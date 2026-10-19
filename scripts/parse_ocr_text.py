@@ -216,7 +216,7 @@ CLAIM_NEXT_OCR_PAGE_SQL = """
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
         GROUP BY p.id
-        ORDER BY max_ocr_length """ + ("DESC" if PRIORITIZE_LARGE_PAGES else "ASC") + """ NULLS LAST, random()
+        ORDER BY max_ocr_length """ + ("DESC" if PRIORITIZE_LARGE_PAGES else "ASC") + """ NULLS LAST, random()  # nosec: sort direction from env var at load time, not user input
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),

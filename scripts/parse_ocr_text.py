@@ -187,7 +187,7 @@ MAX_ATTEMPTS_PER_PAGE = 2
 # fetches that separately, deterministically, once the claim itself has
 # already committed; see its own docstring for why.
 CLAIM_NEXT_OCR_PAGE_SQL = """
-    ocr_lengths AS (
+    WITH ocr_lengths AS (
         SELECT page_id, MAX(LENGTH(raw_text)) AS max_ocr_length
         FROM page_ocr_text
         WHERE status = 'success'

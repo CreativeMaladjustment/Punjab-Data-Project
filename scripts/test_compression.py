@@ -33,6 +33,7 @@ def test_compression():
                 FROM pages p
                 LEFT JOIN page_ocr_text pot ON pot.page_id = p.id AND pot.status = 'success'
                 WHERE p.id = %s AND pot.raw_text IS NOT NULL
+                ORDER BY LENGTH(pot.raw_text) DESC
                 LIMIT 1
             """
             cur.execute(query, (int(page_id),))

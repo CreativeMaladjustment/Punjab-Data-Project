@@ -7,7 +7,7 @@ on:
         description: "Page ID to test (select from largest records)"
         type: choice
         required: false
-        default: "2228"
+        default: "2228 (163.9 KB)"
         options:
           - "2228 (163.9 KB)"
           - "3270 (143.8 KB)"

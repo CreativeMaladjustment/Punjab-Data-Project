@@ -183,15 +183,18 @@ MAX_ATTEMPTS_PER_PAGE = 2
 # already committed; see its own docstring for why.
 CLAIM_NEXT_OCR_PAGE_SQL = """
     WITH candidate AS (
-        SELECT p.id
+        SELECT p.id,
+               MAX(LENGTH(pot.raw_text)) AS max_ocr_length
         FROM pages p
         LEFT JOIN llm_extractions le
             ON le.page_id = p.id AND le.model_tag = %(model_tag)s
+        LEFT JOIN page_ocr_text pot
+            ON pot.page_id = p.id AND pot.status = 'success'
         WHERE p.image_uploaded_at IS NOT NULL
           AND p.excluded_at IS NULL
           AND EXISTS (
-              SELECT 1 FROM page_ocr_text pot
-              WHERE pot.page_id = p.id AND pot.status = 'success'
+              SELECT 1 FROM page_ocr_text pot2
+              WHERE pot2.page_id = p.id AND pot2.status = 'success'
           )
           AND NOT EXISTS (
               SELECT 1 FROM llm_extractions primary_le
@@ -207,7 +210,8 @@ CLAIM_NEXT_OCR_PAGE_SQL = """
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
-        ORDER BY random()
+        GROUP BY p.id
+        ORDER BY max_ocr_length ASC NULLS LAST, random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),

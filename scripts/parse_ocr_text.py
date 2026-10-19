@@ -73,6 +73,11 @@ MODEL_TAG = f"textparse:{TEXT_MODEL_TAG}"
 # primary structured-extraction model changes later without a code edit here.
 PRIMARY_MODEL_TAG = os.environ.get("PRIMARY_MODEL_TAG", "glm-ocr")
 
+# Prioritize large OCR pages (> 20K chars) for timeout-resistant processing
+# Default: prioritize small pages (< 20K) for faster throughput
+# Set to 'true' to reverse: process large pages first (e.g., manual large-page cleanup)
+PRIORITIZE_LARGE_PAGES = os.environ.get("PRIORITIZE_LARGE_PAGES", "").lower() == "true"
+
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; same runner guard as extract_with_llm.py
@@ -211,7 +216,7 @@ CLAIM_NEXT_OCR_PAGE_SQL = """
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
         GROUP BY p.id
-        ORDER BY max_ocr_length ASC NULLS LAST, random()
+        ORDER BY max_ocr_length """ + ("DESC" if PRIORITIZE_LARGE_PAGES else "ASC") + """ NULLS LAST, random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),

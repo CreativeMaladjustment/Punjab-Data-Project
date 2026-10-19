@@ -29,7 +29,7 @@ def test_compression():
         # Find the largest record(s)
         if page_id:
             query = """
-                SELECT p.id, p.title, pot.raw_text
+                SELECT p.id, pot.raw_text
                 FROM pages p
                 LEFT JOIN page_ocr_text pot ON pot.page_id = p.id AND pot.status = 'success'
                 WHERE p.id = %s AND pot.raw_text IS NOT NULL
@@ -38,7 +38,7 @@ def test_compression():
             cur.execute(query, (int(page_id),))
         else:
             query = """
-                SELECT p.id, p.title, pot.raw_text
+                SELECT p.id, pot.raw_text
                 FROM pages p
                 LEFT JOIN page_ocr_text pot ON pot.page_id = p.id AND pot.status = 'success'
                 WHERE pot.raw_text IS NOT NULL
@@ -52,7 +52,7 @@ def test_compression():
             print("No large records found", file=sys.stderr)
             sys.exit(1)
 
-        page_id, title, raw_text = result
+        page_id, raw_text = result
         original_size = len(raw_text.encode("utf-8"))
 
         # Test gzip compression
@@ -67,7 +67,6 @@ def test_compression():
         print(f"Compression Test Results")
         print(f"{'='*60}")
         print(f"Page ID:            {page_id}")
-        print(f"Title:              {title}")
         print(f"\nOriginal size:      {original_size:,} bytes ({original_size / 1024:.2f} KB)")
         print(f"Compressed size:    {compressed_size:,} bytes ({compressed_size / 1024:.2f} KB)")
         print(f"Compression ratio:  {compression_ratio:.2f}%")

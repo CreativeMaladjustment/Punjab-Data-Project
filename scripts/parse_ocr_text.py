@@ -186,6 +186,7 @@ MAX_ATTEMPTS_PER_PAGE = 2
 # selects a page id here (not which OCR row to use) -- claim_next_ocr_page()
 # fetches that separately, deterministically, once the claim itself has
 # already committed; see its own docstring for why.
+# nosec: SQL string concatenation is safe; sort direction from env var at load time, not user input
 CLAIM_NEXT_OCR_PAGE_SQL = """
     WITH ocr_lengths AS (
         SELECT page_id, MAX(LENGTH(raw_text)) AS max_ocr_length
@@ -219,7 +220,7 @@ CLAIM_NEXT_OCR_PAGE_SQL = """
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
-        ORDER BY COALESCE(ol.max_ocr_length, 0) """ + ("DESC" if PRIORITIZE_LARGE_PAGES else "ASC") + """ NULLS LAST, random()  # nosec: sort direction from env var at load time, not user input
+        ORDER BY COALESCE(ol.max_ocr_length, 0) """ + ("DESC" if PRIORITIZE_LARGE_PAGES else "ASC") + """ NULLS LAST, random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),

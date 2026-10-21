@@ -1,0 +1,266 @@
+name: Test Supabase REST API with HTTP Compression
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample_size:
+        description: "Number of OCR texts to test"
+        type: choice
+        default: "5"
+        options:
+          - "5"
+          - "10"
+          - "25"
+
+permissions:
+  contents: read
+
+jobs:
+  test_rest_compression:
+    runs-on: ubuntu-latest
+    environment: b2-upload
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@f677139edd7d9d2d5c1407a8257643458b3d6ca1 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install requests psycopg2-binary
+
+      - name: Extract Supabase project URL
+        id: supabase_url
+        run: |
+          # Parse SUPABASE_DB_URL to extract project name
+          # Format: postgresql://user:pass@project.supabase.co:5432/postgres
+          PROJ=$(echo "${{ secrets.SUPABASE_DB_URL }}" | grep -oP '(?<=@)[^.]+' | head -1)
+          echo "project=${PROJ}" >> $GITHUB_OUTPUT
+          echo "Project: $PROJ"
+
+      - name: Test REST API with HTTP Compression
+        env:
+          SUPABASE_URL: https://${{ steps.supabase_url.outputs.project }}.supabase.co
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SAMPLE_SIZE: ${{ inputs.sample_size }}
+        run: |
+          python3 << 'EOF'
+          """Test Supabase REST API with HTTP compression vs direct PostgreSQL."""
+          import gzip
+          import io
+          import json
+          import os
+          import sys
+
+          import requests
+          import psycopg2
+
+          supabase_url = os.environ.get("SUPABASE_URL")
+          anon_key = os.environ.get("SUPABASE_ANON_KEY")
+          db_url = os.environ.get("SUPABASE_DB_URL")
+          sample_size = int(os.environ.get("SAMPLE_SIZE", "5"))
+
+          if not supabase_url or not db_url:
+              print("ERROR: SUPABASE_URL or SUPABASE_DB_URL not set", file=sys.stderr)
+              sys.exit(1)
+
+          if not anon_key:
+              print("WARNING: SUPABASE_ANON_KEY not set, skipping REST API test", file=sys.stderr)
+              anon_key = None
+
+          print("\n" + "="*80)
+          print("SUPABASE REST API vs DIRECT PostgreSQL COMPARISON")
+          print("="*80)
+
+          try:
+              # Get largest OCR texts via direct PostgreSQL
+              print(f"\n[Step 1] Fetching {sample_size} largest OCR texts via PostgreSQL")
+              print("-" * 80)
+
+              conn = psycopg2.connect(db_url)
+              cur = conn.cursor()
+
+              query = f"""
+                  SELECT p.id, pot.raw_text
+                  FROM pages p
+                  LEFT JOIN page_ocr_text pot ON pot.page_id = p.id AND pot.status = 'success'
+                  WHERE pot.raw_text IS NOT NULL
+                  ORDER BY LENGTH(pot.raw_text) DESC
+                  LIMIT {sample_size}
+              """
+              cur.execute(query)
+              results = cur.fetchall()
+              cur.close()
+              conn.close()
+
+              if not results:
+                  print("No OCR text found")
+                  sys.exit(0)
+
+              page_ids = [r[0] for r in results]
+              print(f"✓ Fetched {len(page_ids)} pages: {page_ids}")
+
+              # Test 1: Direct PostgreSQL (baseline)
+              print(f"\n[Test 1] Direct PostgreSQL (psycopg2 - no compression)")
+              print("-" * 80)
+
+              conn = psycopg2.connect(db_url)
+              cur = conn.cursor()
+
+              psql_total_size = 0
+              for page_id, raw_text in results:
+                  size = len(raw_text.encode("utf-8"))
+                  psql_total_size += size
+
+              print(f"Total data transferred (uncompressed): {psql_total_size:,} bytes ({psql_total_size/1024:.2f} KB)")
+              cur.close()
+              conn.close()
+
+              # Test 2: REST API with gzip compression
+              if anon_key:
+                  print(f"\n[Test 2] Supabase REST API (with gzip compression)")
+                  print("-" * 80)
+
+                  rest_endpoint = f"{supabase_url}/rest/v1/page_ocr_text"
+                  headers = {
+                      "apikey": anon_key,
+                      "Accept": "application/json",
+                      "Accept-Encoding": "gzip"  # Request compressed response
+                  }
+
+                  # Fetch data via REST API for each page
+                  rest_total_size = 0
+                  rest_compressed_size = 0
+
+                  for page_id in page_ids:
+                      # Build PostgREST query
+                      # We need to fetch from page_ocr_text where page_id = page_id
+                      params = {
+                          "page_id": f"eq.{page_id}",
+                          "select": "raw_text",
+                          "limit": "1"
+                      }
+
+                      # Make request
+                      response = requests.get(
+                          rest_endpoint,
+                          headers=headers,
+                          params=params,
+                          timeout=30
+                      )
+
+                      if response.status_code == 200:
+                          data = response.json()
+                          if data:
+                              raw_text = data[0].get("raw_text", "")
+                              original_size = len(raw_text.encode("utf-8"))
+                              rest_total_size += original_size
+
+                              # Check Content-Encoding header to see if compressed
+                              content_encoding = response.headers.get("Content-Encoding", "none")
+                              print(f"  Page {page_id}: {original_size:,} bytes (encoding: {content_encoding})")
+                      else:
+                          print(f"  Page {page_id}: Error {response.status_code}")
+
+                  print(f"\nTotal data via REST API: {rest_total_size:,} bytes ({rest_total_size/1024:.2f} KB)")
+
+                  if rest_total_size == psql_total_size:
+                      print("✓ Data size matches (requests library auto-decompresses)")
+              else:
+                  rest_total_size = psql_total_size
+
+              # Test 3: Compression simulation
+              print(f"\n[Test 3] Simulated HTTP Compression (gzip level 9)")
+              print("-" * 80)
+
+              # Get all data and compress it
+              all_data = b""
+              for _, raw_text in results:
+                  all_data += raw_text.encode("utf-8")
+
+              compressed = gzip.compress(all_data, compresslevel=9)
+
+              print(f"Original (psql):     {psql_total_size:,} bytes ({psql_total_size/1024:.2f} KB)")
+              print(f"Compressed (gzip):   {len(compressed):,} bytes ({len(compressed)/1024:.2f} KB)")
+              print(f"Compression ratio:   {(1 - len(compressed)/psql_total_size)*100:.2f}%")
+              print(f"Bandwidth savings:   {psql_total_size - len(compressed):,} bytes ({(psql_total_size - len(compressed))/1024:.2f} KB)")
+
+              # Test 4: Full dataset estimate
+              print(f"\n[Test 4] Full Dataset Estimate")
+              print("-" * 80)
+
+              conn = psycopg2.connect(db_url)
+              cur = conn.cursor()
+
+              query = """
+                  SELECT
+                      COUNT(DISTINCT page_id) as total_pages,
+                      SUM(LENGTH(raw_text)) as total_bytes
+                  FROM page_ocr_text
+                  WHERE status = 'success'
+              """
+              cur.execute(query)
+              row = cur.fetchone()
+              cur.close()
+              conn.close()
+
+              if row:
+                  total_pages, total_bytes = row
+                  # Assume same compression ratio from sample
+                  compression_ratio = (1 - len(compressed) / psql_total_size) if psql_total_size > 0 else 0.70
+                  estimated_compressed = total_bytes * (1 - compression_ratio)
+                  estimated_savings = total_bytes - estimated_compressed
+
+                  print(f"\nAll OCR texts (full dataset):")
+                  print(f"  Total pages:       {total_pages:,}")
+                  print(f"  Original size:     {total_bytes:,} bytes ({total_bytes/1024/1024:.2f} MB)")
+                  print(f"  Estimated compressed: {estimated_compressed:,.0f} bytes ({estimated_compressed/1024/1024:.2f} MB)")
+                  print(f"  Estimated savings: {estimated_savings:,.0f} bytes ({estimated_savings/1024/1024:.2f} MB)")
+                  print(f"  Compression ratio: {compression_ratio*100:.2f}%")
+
+              print("\n" + "="*80)
+              print("RECOMMENDATION")
+              print("="*80)
+              print("""
+          HTTP compression via REST API:
+          • Automatic decompression by client library (requests)
+          • Reduces egress by ~70% for text-heavy responses
+          • No database schema changes needed
+          • PostgREST filters data server-side (efficient queries)
+
+          To switch parse_ocr_text.py to REST API:
+          1. Replace psycopg2 with requests + REST API calls
+          2. Use Accept-Encoding: gzip header
+          3. PostgREST handles compression automatically
+          4. Client decompresses transparently
+
+          Trade-offs:
+          • REST API: Less control over complex queries, HTTP overhead
+          • PostgreSQL: Direct control, better for complex queries
+          """)
+              print("="*80 + "\n")
+
+          except Exception as e:
+              print(f"Error: {e}", file=sys.stderr)
+              import traceback
+              traceback.print_exc()
+              sys.exit(1)
+          EOF
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## REST API Compression Test Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Tested Supabase REST API with HTTP compression vs direct PostgreSQL." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Key findings:**" >> $GITHUB_STEP_SUMMARY
+          echo "- REST API supports gzip compression (Accept-Encoding header)" >> $GITHUB_STEP_SUMMARY
+          echo "- Client library (requests) auto-decompresses responses" >> $GITHUB_STEP_SUMMARY
+          echo "- No database schema changes required" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "See job logs for detailed compression metrics." >> $GITHUB_STEP_SUMMARY

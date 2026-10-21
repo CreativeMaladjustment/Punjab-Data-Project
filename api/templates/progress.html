@@ -94,7 +94,7 @@
   <p class="lede">{{ "{:,}".format(total_pages) }} page images uploaded to Backblaze B2 and available to process. Each model works through the same backlog independently; a page is never done until a person has looked at it.</p>
 
   <section class="block">
-    <h2>Overall: pages with data extracted</h2>
+    <h2>Overall: pages with structured data extracted</h2>
     <div class="overall-card">
       <div class="overall-headline">
         <span class="num">{{ "{:,}".format(any_extracted_pages) }}</span>
@@ -105,11 +105,11 @@
         <div class="done" style="width:{{ any_extracted_pct }}%"></div>
       </div>
       <div class="bar-legend">
-        <span>{{ "{:,}".format(any_extracted_pages) }} have a successful extraction from at least one source</span>
-        <span>{{ "{:,}".format(total_pages - any_extracted_pages) }} have none yet</span>
+        <span>{{ "{:,}".format(any_extracted_pages) }} have structured catalogue entries from at least one source</span>
+        <span>{{ "{:,}".format(total_pages - any_extracted_pages) }} awaiting structured extraction</span>
       </div>
     </div>
-    <p class="remaining-note">The real goal, collapsed to one number: has <em>any</em> source — any model in the bake-off, the textparse:* OCR-text backfill, or a human correction — successfully produced output for this page, whether or not it's been reviewed yet. This is deliberately different from "reviewed &amp; approved" below, and from any single model's own progress — it only asks whether the page has data at all. The per-model breakdown below is unaffected by this number; it still tracks which model is doing the work and how well.</p>
+    <p class="remaining-note"><strong>What counts:</strong> Any successful <em>structured</em> extraction — from vision models (glm-ocr, Gemini, minicpm), text parsing (textparse:mistral, textparse:llama), or human correction. What's excluded: Full-page OCR transcriptions (Gemma-4 and other OCR-only runs) because transcribing text isn't the same as extracting structured catalogue entries from it. <strong>The remaining pages:</strong> ~741 have successful OCR transcriptions (ready for text-based parsing) and ~3 are completely stuck (attempted by all models, all failed). The <code>parse_ocr_text_*.yml</code> workflows automatically extract structured entries from OCR transcriptions, prioritizing the OCR-only pages first.</p>
 
     {% if progress_summary %}
     <div class="progress-detail">

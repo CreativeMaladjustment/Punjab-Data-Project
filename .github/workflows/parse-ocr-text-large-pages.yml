@@ -1,13 +1,14 @@
 # Companion to parse-ocr-text-self-hosted.yml: prioritizes OCR pages > 20K characters
-# for manual cleanup of timeout-prone large pages.
+# for cleanup of timeout-prone large pages.
 #
 # The default parse-ocr-text-self-hosted.yml workflow prioritizes smaller pages
 # (< 20K chars, ~80% of records) for faster throughput and lower timeout risk.
-# This workflow is for manually processing the remaining 19.38% of large pages
+# This workflow is for processing the remaining 19.38% of large pages
 # that are more prone to timeouts (see analysis in GitHub issue comments).
 #
-# Usage: Manual workflow_dispatch only — no schedule. Trigger when you want to
-# specifically target the backlog of large pages with a fresh timeout budget.
+# Usage: Runs on schedule every 6 hours (UTC), or trigger manually via workflow_dispatch
+# to override the model selection. Each run picks up where the previous one left off
+# via database-tracked claim/release mechanics.
 #
 # Data distribution (from page_ocr_text character length analysis):
 #   - < 5K:    55.50% (safe, fast)
@@ -23,12 +24,16 @@
 name: Parse structured entries from OCR text (large pages, self-hosted)
 
 on:
+  schedule:
+    # Every 6 hours: 0:00, 6:00, 12:00, 18:00 UTC
+    # Uses mistral:7b for fast, reliable processing
+    - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       text_model:
         description: "Ollama text model to run"
         type: choice
-        default: llama3.1:8b
+        default: mistral:7b
         options:
           - llama3.1:8b
           - llama3.2:3b
@@ -44,7 +49,7 @@ jobs:
     timeout-minutes: 350
     environment: b2-upload
     env:
-      TEXT_MODEL_INPUT: ${{ inputs.text_model || 'llama3.1:8b' }}
+      TEXT_MODEL_INPUT: ${{ inputs.text_model || 'mistral:7b' }}
       PRIORITIZE_LARGE_PAGES: "true"
     steps:
       - name: Checkout
@@ -91,7 +96,7 @@ jobs:
         id: run
         env:
           PYTHONUNBUFFERED: "1"
-          TEXT_MODEL: ${{ inputs.text_model || 'llama3.1:8b' }}
+          TEXT_MODEL: ${{ inputs.text_model || 'mistral:7b' }}
           MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |

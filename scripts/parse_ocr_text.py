@@ -78,6 +78,11 @@ PRIMARY_MODEL_TAG = os.environ.get("PRIMARY_MODEL_TAG", "glm-ocr")
 # Set to 'true' to reverse: process large pages first (e.g., manual large-page cleanup)
 PRIORITIZE_LARGE_PAGES = os.environ.get("PRIORITIZE_LARGE_PAGES", "").lower() == "true"
 
+# Prioritize pages that have successful OCR but NO structured extraction yet (backfill)
+# When true, filters to pages with page_ocr_text success but no llm_extractions success
+# Useful for dedicated backfill workflows that only process OCR-only pages
+PROCESS_OCR_ONLY_PAGES = os.environ.get("PROCESS_OCR_ONLY_PAGES", "").lower() == "true"
+
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
 
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; same runner guard as extract_with_llm.py
@@ -206,12 +211,17 @@ CLAIM_NEXT_OCR_PAGE_SQL = """
               SELECT 1 FROM page_ocr_text pot2
               WHERE pot2.page_id = p.id AND pot2.status = 'success'
           )
-          AND NOT EXISTS (
+          """ + ("""AND NOT EXISTS (
+              SELECT 1 FROM llm_extractions any_le
+              WHERE any_le.page_id = p.id
+                AND any_le.status = 'success'
+                AND any_le.model_tag <> ALL(ARRAY['gemma-4-31b-it', 'gemma-4-26b-a4b-it']::text[])
+          )""" if PROCESS_OCR_ONLY_PAGES else """AND NOT EXISTS (
               SELECT 1 FROM llm_extractions primary_le
               WHERE primary_le.page_id = p.id
                 AND primary_le.model_tag = %(primary_model_tag)s
                 AND primary_le.status = 'success'
-          )
+          )""") + """
           AND (
             le.id IS NULL
             OR (le.status = 'claimed'

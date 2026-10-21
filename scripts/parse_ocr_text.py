@@ -230,7 +230,7 @@ CLAIM_NEXT_OCR_PAGE_SQL = """
                 AND le.claimed_at < now() - %(claim_timeout)s * interval '1 second'
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
-        ORDER BY COALESCE(ol.max_ocr_length, 0) """ + ("DESC" if PRIORITIZE_LARGE_PAGES else "ASC") + """ NULLS LAST, random()  # nosec: sort direction from environment variable at load time, not user input
+        ORDER BY COALESCE(ol.max_ocr_length, 0) """ + ("DESC" if PRIORITIZE_LARGE_PAGES else "ASC") + """ NULLS LAST, random()
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),

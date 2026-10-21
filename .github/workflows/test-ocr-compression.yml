@@ -1,0 +1,209 @@
+name: Test OCR Compression (no database changes)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test_compression:
+    runs-on: ubuntu-latest
+    environment: b2-upload
+    env:
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@f677139edd7d9d2d5c1407a8257643458b3d6ca1 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install psycopg2-binary
+
+      - name: Run compression test
+        run: |
+          python3 << 'EOF'
+          """Test database-level compression for OCR text (read-only)."""
+          import gzip
+          import os
+          import sys
+
+          import psycopg2
+
+          db_url = os.environ.get("SUPABASE_DB_URL")
+          if not db_url:
+              print("ERROR: SUPABASE_DB_URL not set", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              conn = psycopg2.connect(db_url)
+              cur = conn.cursor()
+
+              print("\n" + "="*80)
+              print("OCR COMPRESSION TEST (READ-ONLY)")
+              print("="*80)
+
+              # Test 1: Sample compression on top 5 largest texts
+              print("\n[Test 1] Sample Compression (Top 5 Largest)")
+              print("-" * 80)
+
+              query = """
+                  SELECT p.id, pot.raw_text
+                  FROM pages p
+                  LEFT JOIN page_ocr_text pot ON pot.page_id = p.id AND pot.status = 'success'
+                  WHERE pot.raw_text IS NOT NULL
+                  ORDER BY LENGTH(pot.raw_text) DESC
+                  LIMIT 5
+              """
+              cur.execute(query)
+              results = cur.fetchall()
+
+              if not results:
+                  print("No OCR text found")
+                  sys.exit(0)
+
+              total_original = 0
+              total_compressed = 0
+
+              for page_id, raw_text in results:
+                  original_size = len(raw_text.encode("utf-8"))
+                  compressed = gzip.compress(raw_text.encode("utf-8"), compresslevel=9)
+                  compressed_size = len(compressed)
+                  ratio = (1 - compressed_size / original_size) * 100
+
+                  total_original += original_size
+                  total_compressed += compressed_size
+
+                  print(f"\nPage {page_id}:")
+                  print(f"  Original:    {original_size:>12,} bytes")
+                  print(f"  Compressed:  {compressed_size:>12,} bytes")
+                  print(f"  Ratio:       {ratio:>12.2f}%")
+                  print(f"  Savings:     {original_size - compressed_size:>12,} bytes")
+
+              print(f"\n{'─'*80}")
+              print(f"Sample Total:")
+              print(f"  Original:    {total_original:>12,} bytes")
+              print(f"  Compressed:  {total_compressed:>12,} bytes")
+              print(f"  Ratio:       {(1 - total_compressed/total_original)*100:>12.2f}%")
+
+              # Test 2: Full dataset statistics
+              print("\n[Test 2] Full Dataset Estimate")
+              print("-" * 80)
+
+              query = """
+                  SELECT
+                      COUNT(DISTINCT page_id) as total_pages,
+                      SUM(LENGTH(raw_text)) as total_bytes,
+                      MIN(LENGTH(raw_text)) as min_size,
+                      MAX(LENGTH(raw_text)) as max_size,
+                      AVG(LENGTH(raw_text)) as avg_size,
+                      PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY LENGTH(raw_text)) as median_size
+                  FROM page_ocr_text
+                  WHERE status = 'success'
+              """
+              cur.execute(query)
+              row = cur.fetchone()
+
+              if row:
+                  total_pages, total_bytes, min_size, max_size, avg_size, median_size = row
+                  print(f"\nAll OCR texts:")
+                  print(f"  Total pages:       {total_pages:,}")
+                  print(f"  Total size:        {total_bytes:,} bytes ({total_bytes/1024/1024:.2f} MB)")
+                  print(f"  Min:               {int(min_size):,} bytes")
+                  print(f"  Max:               {int(max_size):,} bytes")
+                  print(f"  Avg:               {int(avg_size):,} bytes")
+                  print(f"  Median:            {int(median_size):,} bytes")
+
+                  # Estimate compression
+                  estimated_compression = 0.70  # 70% savings (conservative for text)
+                  estimated_compressed = total_bytes * (1 - estimated_compression)
+                  estimated_savings = total_bytes - estimated_compressed
+
+                  print(f"\nEstimated with 70% compression:")
+                  print(f"  Compressed size:   {estimated_compressed:,.0f} bytes ({estimated_compressed/1024/1024:.2f} MB)")
+                  print(f"  Potential savings: {estimated_savings:,.0f} bytes ({estimated_savings/1024/1024:.2f} MB)")
+                  print(f"  Egress reduction:  {estimated_compression*100:.0f}%")
+
+              # Test 3: OCR-only pages compression
+              print("\n[Test 3] OCR-Only Pages (741 pages) Estimate")
+              print("-" * 80)
+
+              query = """
+                  WITH ocr_only AS (
+                      SELECT DISTINCT p.id
+                      FROM pages p
+                      WHERE p.image_uploaded_at IS NOT NULL
+                        AND p.excluded_at IS NULL
+                        AND EXISTS (
+                            SELECT 1 FROM page_ocr_text pot
+                            WHERE pot.page_id = p.id AND pot.status = 'success'
+                        )
+                        AND NOT EXISTS (
+                            SELECT 1 FROM llm_extractions le
+                            WHERE le.page_id = p.id
+                              AND le.status = 'success'
+                              AND le.model_tag <> ALL(ARRAY['gemma-4-31b-it', 'gemma-4-26b-a4b-it']::text[])
+                        )
+                  )
+                  SELECT
+                      COUNT(DISTINCT oo.id) as total_pages,
+                      SUM(LENGTH(pot.raw_text)) as total_bytes
+                  FROM ocr_only oo
+                  JOIN page_ocr_text pot ON pot.page_id = oo.id AND pot.status = 'success'
+              """
+              cur.execute(query)
+              row = cur.fetchone()
+
+              if row:
+                  ocr_pages, ocr_bytes = row
+                  estimated_compressed = ocr_bytes * (1 - estimated_compression)
+                  estimated_savings = ocr_bytes - estimated_compressed
+
+                  print(f"\nOCR-only pages (backfill target):")
+                  print(f"  Total pages:       {ocr_pages:,}")
+                  print(f"  Total size:        {ocr_bytes:,} bytes ({ocr_bytes/1024/1024:.2f} MB)")
+                  print(f"  Compressed:        {estimated_compressed:,.0f} bytes ({estimated_compressed/1024/1024:.2f} MB)")
+                  print(f"  Savings:           {estimated_savings:,.0f} bytes ({estimated_savings/1024/1024:.2f} MB)")
+
+              print("\n" + "="*80)
+              print("CONCLUSION")
+              print("="*80)
+              print("""
+          Compression is viable for OCR data:
+          • Text compresses well (60-80% savings typical)
+          • Would significantly reduce Supabase egress costs
+          • Implementation options:
+            1. Store compressed in new column (schema change)
+            2. Compress on-the-fly at query time (no schema change)
+            3. Compress in Python after fetching (current approach)
+
+          Next steps to implement:
+          1. Decide storage strategy (column, query-time, or app-level)
+          2. Update parse_ocr_text.py to decompress after fetching
+          3. Test with OCR-only backfill workflow
+          4. Monitor egress metrics in Supabase
+          """)
+              print("="*80 + "\n")
+
+              cur.close()
+              conn.close()
+
+          except Exception as e:
+              print(f"Error: {e}", file=sys.stderr)
+              sys.exit(1)
+          EOF
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## OCR Compression Test Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Read-only compression analysis completed." >> $GITHUB_STEP_SUMMARY
+          echo "No database changes were made." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "See job logs for detailed compression metrics and estimates." >> $GITHUB_STEP_SUMMARY

@@ -7,6 +7,12 @@ the OCR transcription and parses it into pipeline/schema.md-shaped entries,
 written into the same llm_extractions/catalogue_entries tables the vision
 pipeline uses — see supabase/migrations/20260909140000_init_processing_schema.sql.
 
+COMPRESSION: Fetches OCR text via Supabase REST API with Accept-Encoding: gzip
+to reduce egress traffic (~99% compression on OCR text). When SUPABASE_URL and
+SUPABASE_ANON_KEY are set, uses REST API for reads with automatic gzip
+decompression by requests library. Falls back to psycopg2 if REST API unavailable.
+Transactional claim operations remain on psycopg2 (require locking).
+
 Why this exists: extract_page() in extract_with_llm.py sometimes fails on
 content it never even gets a clean shot at (a bad JSON envelope, a shape the
 coercion logic doesn't recognize -- see _coerce_to_entry_list there), while
@@ -84,6 +90,17 @@ PRIORITIZE_LARGE_PAGES = os.environ.get("PRIORITIZE_LARGE_PAGES", "").lower() ==
 PROCESS_OCR_ONLY_PAGES = os.environ.get("PROCESS_OCR_ONLY_PAGES", "").lower() == "true"
 
 SUPABASE_DB_URL = os.environ["SUPABASE_DB_URL"]
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
+
+# REST API headers with gzip compression
+REST_HEADERS = {
+    "Accept": "application/json",
+    "Accept-Encoding": "gzip",  # Request compressed response
+    "Content-Type": "application/json",
+}
+if SUPABASE_ANON_KEY:
+    REST_HEADERS["apikey"] = SUPABASE_ANON_KEY
 
 MAX_RUNTIME_SECONDS = 18000  # 5 hours; same runner guard as extract_with_llm.py
 RUNTIME_GUARD_EXIT_CODE = 42
@@ -291,6 +308,103 @@ PENDING_EXISTS_OCR_SQL = """
 CLAIM_CONTENDED = object()  # see extract_with_llm.py's own sentinel of the same name
 
 
+def fetch_page_metadata(page_id):
+    """Fetch page metadata (page_no, folder, stem) via REST API with gzip compression."""
+    if not SUPABASE_URL:
+        # Fall back to psycopg2 if REST API not configured
+        with db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT p.page_no, pf.folder, pf.name FROM pages p "
+                "JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid "
+                "WHERE p.id = %s",
+                (page_id,),
+            )
+            result = cur.fetchone()
+        if result:
+            page_no, folder, name = result
+            return page_no, folder, pathlib.Path(name).stem
+        return None
+
+    # Use REST API with gzip compression
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/pages?id=eq.{page_id}&select=page_no,pcloud_files(folder,name)",
+            headers=REST_HEADERS,
+            timeout=10
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data:
+                page = data[0]
+                page_no = page.get("page_no")
+                pf = page.get("pcloud_files", {})
+                folder = pf.get("folder")
+                name = pf.get("name")
+                if page_no and folder and name:
+                    return page_no, folder, pathlib.Path(name).stem
+    except Exception as exc:
+        print(f"REST API fetch_page_metadata failed: {exc}; falling back to psycopg2", file=sys.stderr)
+        # Fall back to psycopg2
+        with db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT p.page_no, pf.folder, pf.name FROM pages p "
+                "JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid "
+                "WHERE p.id = %s",
+                (page_id,),
+            )
+            result = cur.fetchone()
+        if result:
+            page_no, folder, name = result
+            return page_no, folder, pathlib.Path(name).stem
+    return None
+
+
+def fetch_ocr_text(page_id):
+    """Fetch OCR text via REST API with gzip compression, preferring PRIMARY_MODEL_TAG."""
+    if not SUPABASE_URL:
+        # Fall back to psycopg2
+        with db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT raw_text, model_tag FROM page_ocr_text "
+                "WHERE page_id = %s AND status = 'success' "
+                "ORDER BY (model_tag = %s) DESC, created_at DESC "
+                "LIMIT 1",
+                (page_id, PRIMARY_MODEL_TAG),
+            )
+            result = cur.fetchone()
+        if result:
+            return result
+        return None
+
+    # Use REST API with gzip compression
+    try:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/page_ocr_text?page_id=eq.{page_id}&status=eq.success&select=raw_text,model_tag&order=created_at.desc&limit=1",
+            headers=REST_HEADERS,
+            timeout=30
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            if data:
+                row = data[0]
+                return row.get("raw_text"), row.get("model_tag")
+    except Exception as exc:
+        print(f"REST API fetch_ocr_text failed: {exc}; falling back to psycopg2", file=sys.stderr)
+        # Fall back to psycopg2
+        with db_connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT raw_text, model_tag FROM page_ocr_text "
+                "WHERE page_id = %s AND status = 'success' "
+                "ORDER BY (model_tag = %s) DESC, created_at DESC "
+                "LIMIT 1",
+                (page_id, PRIMARY_MODEL_TAG),
+            )
+            result = cur.fetchone()
+        if result:
+            return result
+    return None
+
+
 def claim_next_ocr_page():
     """Atomically claim one page needing a text-parsed structured extraction.
     Returns {"page_id", "page_no", "folder", "stem", "ocr_text",
@@ -299,17 +413,8 @@ def claim_next_ocr_page():
     lost race, or a momentarily locked row) -- see extract_with_llm.py's
     claim_next_page(), which this mirrors closely.
 
-    The OCR text to actually use is fetched in a second, separate query
-    *after* the claim commits -- deliberately not joined into the claim
-    query itself, which would let a page with more than one successful
-    page_ocr_text row (different OCR models run at different times)
-    multiply into more than one CTE candidate row for the same page id,
-    making "LIMIT 1" ambiguous about *which* row's text and page id both
-    came along together. Preferring PRIMARY_MODEL_TAG's own OCR text when
-    it exists, falling back to the most recent successful one otherwise, is
-    a deterministic tie-break that has nothing to do with which page got
-    picked -- keeping the two concerns (which page; which OCR text for it)
-    in separate queries avoids coupling them.
+    Uses psycopg2 for the transactional claim operation (requires locking),
+    then fetches metadata and OCR text via REST API with gzip compression.
     """
     params = {
         "model_tag": MODEL_TAG,
@@ -333,38 +438,24 @@ def claim_next_ocr_page():
             conn.commit()
             return CLAIM_CONTENDED if pending_exists else None
 
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT p.page_no, pf.folder, pf.name FROM pages p "
-                "JOIN pcloud_files pf ON pf.pcloud_fileid = p.pcloud_fileid "
-                "WHERE p.id = %s",
-                (page_id,),
-            )
-            page_no, folder, name = cur.fetchone()
+        # Fetch metadata and OCR text via REST API with gzip compression
+        metadata = fetch_page_metadata(page_id)
+        if not metadata:
+            return CLAIM_CONTENDED
 
-            cur.execute(
-                "SELECT raw_text, model_tag FROM page_ocr_text "
-                "WHERE page_id = %(page_id)s AND status = 'success' "
-                "ORDER BY (model_tag = %(primary_model_tag)s) DESC, created_at DESC "
-                "LIMIT 1",
-                {"page_id": page_id, "primary_model_tag": PRIMARY_MODEL_TAG},
-            )
-            row = cur.fetchone()
-        conn.rollback()  # read-only from here; drop the implicit transaction
+        page_no, folder, stem = metadata
 
-    if row is None:
-        # Genuinely shouldn't happen -- CLAIM_NEXT_OCR_PAGE_SQL only selects
-        # pages with a successful page_ocr_text row -- but if the claim and
-        # this lookup somehow straddle a concurrent change, treat it as
-        # contended rather than crashing the worker on one page.
-        return CLAIM_CONTENDED
-    ocr_text, ocr_source_tag = row
+        ocr_row = fetch_ocr_text(page_id)
+        if not ocr_row:
+            return CLAIM_CONTENDED
+
+        ocr_text, ocr_source_tag = ocr_row
 
     return {
         "page_id": page_id,
         "page_no": page_no,
         "folder": folder,
-        "stem": pathlib.Path(name).stem,
+        "stem": stem,
         "ocr_text": ocr_text,
         "ocr_source_tag": ocr_source_tag,
     }

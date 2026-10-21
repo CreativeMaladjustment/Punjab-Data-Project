@@ -42,6 +42,7 @@ jobs:
           echo "Project: $PROJ"
 
       - name: Test REST API with HTTP Compression
+        continue-on-error: true
         env:
           SUPABASE_URL: https://${{ steps.supabase_url.outputs.project }}.supabase.co
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}

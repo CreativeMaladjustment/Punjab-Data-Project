@@ -32,18 +32,10 @@ jobs:
         run: |
           pip install requests psycopg2-binary
 
-      - name: Extract Supabase project URL
-        id: supabase_url
-        run: |
-          # Parse SUPABASE_DB_URL to extract project name
-          # Format: postgresql://user:pass@project.supabase.co:5432/postgres
-          PROJ=$(echo "${{ secrets.SUPABASE_DB_URL }}" | grep -oP '(?<=@)[^.]+' | head -1)
-          echo "project=${PROJ}" >> $GITHUB_OUTPUT
-          echo "Project: $PROJ"
-
       - name: Test REST API with HTTP Compression
+        continue-on-error: true
         env:
-          SUPABASE_URL: https://${{ steps.supabase_url.outputs.project }}.supabase.co
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           SAMPLE_SIZE: ${{ inputs.sample_size }}

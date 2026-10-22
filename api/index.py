@@ -683,27 +683,33 @@ def _parse_not_extracted():
     return request.values.get("not_extracted") in ("1", "true", "yes")
 
 
+def _parse_large_pages():
+    # Same pattern as needs_review: read from either query string or POST form.
+    return request.values.get("large_pages") in ("1", "true", "yes")
+
+
 @app.route("/qc")
 @login_required
 def qc_index():
     needs_review = _parse_needs_review()
     not_extracted = _parse_not_extracted()
+    large_pages = _parse_large_pages()
     conn = db_connect()
     try:
         # image_uploaded_at IS NOT NULL: a placeholder page with no image
         # yet has nothing for a reviewer to look at (same predicate
         # fetch_qc_page()'s own lookup and prev/next use). excluded_at IS
         # NULL: skip straight past a page someone's already pulled out of
-        # processing, same as prev/next do. needs_review and not_extracted,
+        # processing, same as prev/next do. needs_review, not_extracted, and large_pages,
         # when set, additionally restrict to those subsets (see queries.py's
         # QC_FIRST_ID_SQL) -- lands on None (a 404 below) once that queue
         # is actually empty, rather than silently falling back to unfiltered.
-        first_id = fetch_qc_first_id(conn, needs_review=needs_review, not_extracted=not_extracted)
+        first_id = fetch_qc_first_id(conn, needs_review=needs_review, not_extracted=not_extracted, large_pages=large_pages)
     finally:
         conn.close()
     if first_id is None:
         abort(404)
-    return redirect(url_for("qc_page", page_id=first_id, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None)))
+    return redirect(url_for("qc_page", page_id=first_id, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None), large_pages=("1" if large_pages else None)))
 
 
 def _entries_for_display(entries):
@@ -751,11 +757,12 @@ def qc_page(page_id):
     model_tag = request.args.get("model_tag") or None
     needs_review = _parse_needs_review()
     not_extracted = _parse_not_extracted()
+    large_pages = _parse_large_pages()
     conn = db_connect()
     try:
-        data = fetch_qc_page(conn, page_id, model_tag, needs_review=needs_review, not_extracted=not_extracted)
+        data = fetch_qc_page(conn, page_id, model_tag, needs_review=needs_review, not_extracted=not_extracted, large_pages=large_pages)
         if data is not None:
-            page_rank, total_pages_available = fetch_qc_position(conn, page_id, needs_review=needs_review, not_extracted=not_extracted)
+            page_rank, total_pages_available = fetch_qc_position(conn, page_id, needs_review=needs_review, not_extracted=not_extracted, large_pages=large_pages)
     finally:
         conn.close()
     if data is None:
@@ -796,6 +803,7 @@ def qc_page(page_id):
         total_pages_available=total_pages_available,
         needs_review=needs_review,
         not_extracted=not_extracted,
+        large_pages=large_pages,
         catalogue_fields=CATALOGUE_ENTRY_FIELDS,
         bool_fields=CATALOGUE_ENTRY_BOOL_FIELDS,
         json_fields=CATALOGUE_ENTRY_JSON_FIELDS,
@@ -809,12 +817,13 @@ def qc_page(page_id):
 def qc_goto():
     """Backs the QC page's "go to page N" jump -- N is the same 1-indexed
     rank the "page N of M" counter shows (see fetch_qc_position()), under
-    whichever filters (needs_review, not_extracted) are currently active,
+    whichever filters (needs_review, not_extracted, large_pages) are currently active,
     so typing the number already on screen for a *different* page still lands
     somewhere sensible rather than on an unrelated id. model_tag, when present,
     is forwarded to the redirect unchanged -- same as Prev/Next."""
     needs_review = _parse_needs_review()
     not_extracted = _parse_not_extracted()
+    large_pages = _parse_large_pages()
     model_tag = request.args.get("model_tag") or None
     try:
         rank = int(request.args.get("n", ""))
@@ -822,13 +831,13 @@ def qc_goto():
         abort(400)
     conn = db_connect()
     try:
-        page_id = fetch_qc_id_at_rank(conn, rank, needs_review=needs_review, not_extracted=not_extracted)
+        page_id = fetch_qc_id_at_rank(conn, rank, needs_review=needs_review, not_extracted=not_extracted, large_pages=large_pages)
     finally:
         conn.close()
     if page_id is None:
         abort(404)
     return redirect(
-        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None))
+        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None), large_pages=("1" if large_pages else None))
     )
 
 
@@ -863,15 +872,16 @@ def qc_verdict():
     form_model_tag = request.form.get("model_tag") or None
     needs_review = _parse_needs_review()
     not_extracted = _parse_not_extracted()
+    large_pages = _parse_large_pages()
     if extraction_id is None or verdict not in ("approved", "needs_reprocessing"):
         abort(400)
 
     conn = db_connect()
     try:
         # apply_qc_verdict() returns the next page_id to navigate to, along with
-        # the model_tag to use. It uses needs_review and not_extracted to apply
+        # the model_tag to use. It uses needs_review, not_extracted, and large_pages to apply
         # the same filters as the current QC view when finding the next page.
-        result, page_id, model_tag = apply_qc_verdict(conn, extraction_id, verdict, note, needs_review=needs_review, not_extracted=not_extracted, model_tag=form_model_tag)
+        result, page_id, model_tag = apply_qc_verdict(conn, extraction_id, verdict, note, needs_review=needs_review, not_extracted=not_extracted, large_pages=large_pages, model_tag=form_model_tag)
     finally:
         conn.close()
     if result == "not_found":
@@ -891,7 +901,7 @@ def qc_verdict():
         # No more pages available in the current filter, redirect to QC home
         return redirect(url_for("qc_home"))
     return redirect(
-        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None))
+        url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None), large_pages=("1" if large_pages else None))
     )
 
 

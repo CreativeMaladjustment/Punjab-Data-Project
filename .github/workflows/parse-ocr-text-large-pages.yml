@@ -97,6 +97,7 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
           TEXT_MODEL: ${{ inputs.text_model || 'mistral:7b' }}
+          OLLAMA_NUM_CTX: "32768"
           MAX_PAGES_PER_WORKER: "2000"
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |

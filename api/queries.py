@@ -722,16 +722,15 @@ CATALOGUE_ENTRY_INT_FIELDS = {"pdf_page", "printed_page", "serial"}
 CATALOGUE_ENTRY_BOOL_FIELDS = {"title_native"}
 CATALOGUE_ENTRY_JSON_FIELDS = {"flags"}
 
-# The nine queries below all embed filter logic for needs_review and/or
-# not_extracted. needs_review=True shows only pages with a non-human
-# extraction that's either successful with no qc_reviews verdict yet, or
-# a capped content failure (content_failed_capped). not_extracted=True shows
-# only pages with no non-human extractions at all. Both are spliced in as
-# short-circuit-on-bind-parameter idioms (NOT %(needs_review)s OR EXISTS...
-# and NOT %(not_extracted)s OR NOT EXISTS...) so when False they always
-# match. Each query below is its own fully static string literal rather than
-# fragments joined with `+` -- see extract_with_gemini.py's CLAIM_NEXT_PAGE_SQL
-# comment on why this matters for code-scanning Bandit rules.
+# The nine queries below all embed filter logic for needs_review, not_extracted, and/or large_pages.
+# needs_review=True shows only pages with a non-human extraction that's either successful with no
+# qc_reviews verdict yet, or a capped content failure (content_failed_capped).
+# not_extracted=True shows only pages with no non-human extractions at all.
+# large_pages=True shows only pages with OCR text > 50K characters.
+# All are spliced in as short-circuit-on-bind-parameter idioms (NOT %(needs_review)s OR EXISTS...
+# and NOT %(not_extracted)s OR NOT EXISTS...) so when False they always match.
+# Each query below is its own fully static string literal rather than fragments joined with `+`
+# -- see extract_with_gemini.py's CLAIM_NEXT_PAGE_SQL comment on why this matters for code-scanning Bandit rules.
 QC_FIRST_ID_SQL = """
     SELECT min(id) FROM pages p
     WHERE image_uploaded_at IS NOT NULL AND excluded_at IS NULL
@@ -760,6 +759,12 @@ QC_FIRST_ID_SQL = """
         WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
           AND qr.verdict = 'approved'
       )))
+      AND (NOT %(large_pages)s OR EXISTS (
+        SELECT 1 FROM page_ocr_text pot
+        WHERE pot.page_id = p.id
+          AND pot.status = 'success'
+          AND LENGTH(pot.raw_text) > 50000
+      ))
 """
 
 QC_NEXT_ID_SQL = """
@@ -790,6 +795,12 @@ QC_NEXT_ID_SQL = """
         WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
           AND qr.verdict = 'approved'
       )))
+      AND (NOT %(large_pages)s OR EXISTS (
+        SELECT 1 FROM page_ocr_text pot
+        WHERE pot.page_id = p.id
+          AND pot.status = 'success'
+          AND LENGTH(pot.raw_text) > 50000
+      ))
 """
 
 QC_PREV_ID_SQL = """
@@ -820,6 +831,12 @@ QC_PREV_ID_SQL = """
         WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
           AND qr.verdict = 'approved'
       )))
+      AND (NOT %(large_pages)s OR EXISTS (
+        SELECT 1 FROM page_ocr_text pot
+        WHERE pot.page_id = p.id
+          AND pot.status = 'success'
+          AND LENGTH(pot.raw_text) > 50000
+      ))
 """
 
 # rank/total in one round trip (rank counts pages with id <= page_id,
@@ -858,6 +875,12 @@ QC_POSITION_SQL = """
         WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
           AND qr.verdict = 'approved'
       )))
+      AND (NOT %(large_pages)s OR EXISTS (
+        SELECT 1 FROM page_ocr_text pot
+        WHERE pot.page_id = p.id
+          AND pot.status = 'success'
+          AND LENGTH(pot.raw_text) > 50000
+      ))
 """
 
 # Backs the "go to page N" jump: N is the same 1-indexed rank
@@ -892,12 +915,18 @@ QC_ID_AT_RANK_SQL = """
         WHERE qr.extraction_id IN (SELECT id FROM llm_extractions WHERE page_id = p.id)
           AND qr.verdict = 'approved'
       )))
+      AND (NOT %(large_pages)s OR EXISTS (
+        SELECT 1 FROM page_ocr_text pot
+        WHERE pot.page_id = p.id
+          AND pot.status = 'success'
+          AND LENGTH(pot.raw_text) > 50000
+      ))
     ORDER BY id
     OFFSET %(offset)s LIMIT 1
 """
 
 
-def fetch_qc_page(conn, page_id, model_tag=None, needs_review=False, not_extracted=False):
+def fetch_qc_page(conn, page_id, model_tag=None, needs_review=False, not_extracted=False, large_pages=False):
     """Everything the QC template needs for one page: its image location,
     every model_tag that has attempted it, the selected extraction (default:
     the first model_tag) and its entries, any existing human correction, the
@@ -998,10 +1027,12 @@ def fetch_qc_page(conn, page_id, model_tag=None, needs_review=False, not_extract
         # see QC_NEXT_ID_SQL/QC_PREV_ID_SQL's own "needs review" clause.
         # not_extracted, when set, additionally skips to pages with no
         # non-human extractions yet.
+        # large_pages, when set, additionally skips to pages with OCR text > 50K chars.
         nav_params = {
             "page_id": page_id,
             "needs_review": needs_review,
             "not_extracted": not_extracted,
+            "large_pages": large_pages,
             "human_tag": HUMAN_MODEL_TAG,
             "max_attempts": MAX_ATTEMPTS_PER_PAGE,
             "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
@@ -1027,9 +1058,9 @@ def fetch_qc_page(conn, page_id, model_tag=None, needs_review=False, not_extract
     }
 
 
-def fetch_qc_first_id(conn, needs_review=False, not_extracted=False):
+def fetch_qc_first_id(conn, needs_review=False, not_extracted=False, large_pages=False):
     """id of the first image-available, non-excluded page (optionally
-    restricted to needs_review and/or not_extracted, see QC_FIRST_ID_SQL)
+    restricted to needs_review and/or not_extracted, or large_pages, see QC_FIRST_ID_SQL)
     -- backs qc_index()'s redirect to a real page to land on. Returns None if
     nothing matches (an empty backlog, or an all-caught-up filter)."""
     with conn.cursor() as cur:
@@ -1038,6 +1069,7 @@ def fetch_qc_first_id(conn, needs_review=False, not_extracted=False):
             {
                 "needs_review": needs_review,
                 "not_extracted": not_extracted,
+                "large_pages": large_pages,
                 "human_tag": HUMAN_MODEL_TAG,
                 "max_attempts": MAX_ATTEMPTS_PER_PAGE,
                 "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
@@ -1047,7 +1079,7 @@ def fetch_qc_first_id(conn, needs_review=False, not_extracted=False):
     return first_id
 
 
-def fetch_qc_position(conn, page_id, needs_review=False, not_extracted=False):
+def fetch_qc_position(conn, page_id, needs_review=False, not_extracted=False, large_pages=False):
     """(rank, total) of page_id among every image-available, non-excluded
     page, ordered by id -- backs the QC page's "page N of M" counter. rank
     counts pages with id <= page_id, so it's meaningful even though prev/next
@@ -1057,7 +1089,7 @@ def fetch_qc_position(conn, page_id, needs_review=False, not_extracted=False):
     way) -- a harmless cosmetic wrinkle while sitting on an excluded page,
     not a data problem.
 
-    needs_review and not_extracted, when set, restrict both rank and total
+    needs_review, not_extracted, and large_pages, when set, restrict both rank and total
     to those respective subsets prev/next walk (see QC_POSITION_SQL) --
     computed in one round trip so they can't drift out of sync."""
     with conn.cursor() as cur:
@@ -1067,6 +1099,7 @@ def fetch_qc_position(conn, page_id, needs_review=False, not_extracted=False):
                 "page_id": page_id,
                 "needs_review": needs_review,
                 "not_extracted": not_extracted,
+                "large_pages": large_pages,
                 "human_tag": HUMAN_MODEL_TAG,
                 "max_attempts": MAX_ATTEMPTS_PER_PAGE,
                 "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
@@ -1076,7 +1109,7 @@ def fetch_qc_position(conn, page_id, needs_review=False, not_extracted=False):
     return rank, total
 
 
-def fetch_qc_id_at_rank(conn, rank, needs_review=False, not_extracted=False):
+def fetch_qc_id_at_rank(conn, rank, needs_review=False, not_extracted=False, large_pages=False):
     """The page id at 1-indexed rank among the same ordered set
     fetch_qc_position() counts -- backs the QC page's "go to page N" jump.
     Returns None if rank is out of range (including rank < 1, since
@@ -1089,6 +1122,7 @@ def fetch_qc_id_at_rank(conn, rank, needs_review=False, not_extracted=False):
             {
                 "needs_review": needs_review,
                 "not_extracted": not_extracted,
+                "large_pages": large_pages,
                 "human_tag": HUMAN_MODEL_TAG,
                 "max_attempts": MAX_ATTEMPTS_PER_PAGE,
                 "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
@@ -1099,7 +1133,7 @@ def fetch_qc_id_at_rank(conn, rank, needs_review=False, not_extracted=False):
     return row[0] if row else None
 
 
-def apply_qc_verdict(conn, extraction_id, verdict, note, needs_review=False, not_extracted=False, model_tag=None):
+def apply_qc_verdict(conn, extraction_id, verdict, note, needs_review=False, not_extracted=False, large_pages=False, model_tag=None):
     """Atomically validate and apply a QC verdict against extraction_id.
     Returns ("ok" | "not_found" | "claimed", next_page_id, model_tag) --
     next_page_id/model_tag are None unless the row was found. After recording
@@ -1193,6 +1227,7 @@ def apply_qc_verdict(conn, extraction_id, verdict, note, needs_review=False, not
                 "page_id": page_id,
                 "needs_review": needs_review,
                 "not_extracted": not_extracted,
+                "large_pages": large_pages,
                 "human_tag": HUMAN_MODEL_TAG,
                 "gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS),
                 "max_attempts": MAX_ATTEMPTS_PER_PAGE,

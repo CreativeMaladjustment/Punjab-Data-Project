@@ -1183,6 +1183,27 @@ def qc_canonical_page(page_id):
             response.raise_for_status()
             entries = response.json()
 
+            # Attach English title translations (lookup table); best-effort
+            try:
+                titles = sorted({e["title"] for e in entries if e.get("title")})
+                if titles:
+                    quoted = ",".join('"' + t.replace("\\", "\\\\").replace('"', '\\"') + '"' for t in titles)
+                    tr = requests.get(
+                        urljoin(supabase_url, "/rest/v1/title_translations"),
+                        params={'original_title': f'in.({quoted})', 'select': 'original_title,is_english,english_translation'},
+                        headers=headers,
+                        timeout=10
+                    )
+                    if tr.ok:
+                        by_title = {r["original_title"]: r for r in tr.json()}
+                        for e in entries:
+                            r = by_title.get(e.get("title"))
+                            if r:
+                                e["title_is_english"] = r["is_english"]
+                                e["title_translation"] = r["english_translation"]
+            except (requests.RequestException, ValueError, KeyError) as e:
+                logger.warning(f"Title translation lookup failed: {e}")
+
             data = {
                 "page_id": canonical["page_id"],
                 "extraction_id": canonical.get("extraction_id"),

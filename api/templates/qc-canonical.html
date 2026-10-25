@@ -20,6 +20,7 @@
   .entry { background: rgba(0,0,0,0.02); border: 1px solid var(--border-soft); padding: 16px; margin-bottom: 12px; border-radius: 4px; }
   .entry-index { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
   .entry-title { font-size: 15px; font-weight: 500; margin-bottom: 12px; }
+  .entry-title-en { font-weight: 400; color: var(--muted); }
   .entry-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; font-size: 13px; }
   .entry-field { display: flex; flex-direction: column; gap: 4px; }
   .field-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
@@ -100,7 +101,7 @@
         <div class="entry">
           <div class="entry-index">Entry {{ entry.entry_index + 1 }}</div>
           {% if entry.title %}
-            <div class="entry-title">{{ entry.title }}</div>
+            <div class="entry-title">{{ entry.title }}{% if entry.title_translation and not entry.title_is_english %} <span class="entry-title-en">({{ entry.title_translation }})</span>{% endif %}</div>
           {% endif %}
 
           <div class="entry-fields">

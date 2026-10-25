@@ -523,10 +523,8 @@ def fetch_dashboard_data(conn):
 # HUMAN_MODEL_TAG sorted first picks exactly one extraction_id per page
 # under that rule.
 _CANONICAL_EXTRACTION_PER_PAGE_SQL = """
-    SELECT DISTINCT ON (page_id) page_id, id AS extraction_id
-    FROM llm_extractions
-    WHERE status = 'success' AND model_tag IN (%(human_tag)s, %(primary_tag)s)
-    ORDER BY page_id, (model_tag = %(human_tag)s) DESC
+    SELECT page_id, extraction_id
+    FROM page_extractions_canonical
 """
 
 # copies is stored as free text, not a number (see supabase/migrations'
@@ -571,7 +569,7 @@ def fetch_corpus_stats(conn):
     so callers get a well-formed all-zero dict rather than needing to
     special-case a NULL row."""
     with conn.cursor() as cur:
-        cur.execute(CORPUS_LIVE_STATS_SQL, {"human_tag": HUMAN_MODEL_TAG, "primary_tag": PRIMARY_MODEL_TAG})
+        cur.execute(CORPUS_LIVE_STATS_SQL)
         cols = [d.name for d in cur.description]
         row = dict(zip(cols, cur.fetchone()))
     return {

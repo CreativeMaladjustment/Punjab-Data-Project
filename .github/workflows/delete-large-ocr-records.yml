@@ -1,0 +1,130 @@
+name: Delete large OCR records (>20K) to force re-OCR
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "DELETE_LARGE_OCR" to confirm deletion'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  delete_ocr:
+    runs-on: ubuntu-latest
+    environment: b2-upload
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate confirmation
+        env:
+          CONFIRM_INPUT: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM_INPUT" != "DELETE_LARGE_OCR" ]; then
+            echo "❌ Confirmation failed. Must enter exactly: DELETE_LARGE_OCR"
+            exit 1
+          fi
+          echo "✅ Confirmed: will delete OCR records > 20K"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install psycopg2-binary
+
+      - name: Create deletion script
+        run: |
+          cat > delete_large_ocr.py << 'SCRIPT'
+          #!/usr/bin/env python3
+          """Delete OCR records > 20K to force re-OCR."""
+          import os
+          import sys
+          import psycopg2
+          
+          db_url = os.environ.get("SUPABASE_DB_URL")
+          if not db_url:
+              print("ERROR: SUPABASE_DB_URL not set", file=sys.stderr)
+              sys.exit(1)
+          
+          conn = psycopg2.connect(db_url)
+          cur = conn.cursor()
+          
+          print("\n" + "="*80)
+          print("DELETING: Large OCR Records > 20K")
+          print("="*80)
+          
+          # Check what will be deleted
+          cur.execute("""
+            SELECT COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE model_tag = 'glm-ocr') as glm_count,
+                   COUNT(*) FILTER (WHERE model_tag = 'gemma-4-31b-it') as gemma_31b,
+                   COUNT(*) FILTER (WHERE model_tag = 'gemma-4-26b-a4b-it') as gemma_26b
+            FROM page_ocr_text
+            WHERE status = 'success' AND LENGTH(raw_text) > 20000
+          """)
+          total, glm, gemma_31b, gemma_26b = cur.fetchone()
+          
+          print(f"\n📊 Records > 20K to DELETE:")
+          print(f"  Total: {total}")
+          print(f"    - glm-ocr: {glm}")
+          print(f"    - gemma-4-31b-it: {gemma_31b}")
+          print(f"    - gemma-4-26b-a4b-it: {gemma_26b}")
+          
+          # Show sample
+          print(f"\n📋 Sample of largest records:")
+          cur.execute("""
+            SELECT p.id, pot.model_tag, LENGTH(pot.raw_text) as size
+            FROM page_ocr_text pot
+            JOIN pages p ON p.id = pot.page_id
+            WHERE pot.status = 'success' AND LENGTH(pot.raw_text) > 20000
+            ORDER BY LENGTH(pot.raw_text) DESC
+            LIMIT 10
+          """)
+          for row in cur.fetchall():
+              print(f"  Page {row[0]:6} | {row[1]:30} | {row[2]:8} bytes")
+          
+          # Delete
+          print("\n🗑️  Deleting...")
+          cur.execute("""
+            DELETE FROM page_ocr_text
+            WHERE status = 'success' AND LENGTH(raw_text) > 20000
+          """)
+          deleted = cur.rowcount
+          conn.commit()
+          
+          print(f"✅ Deleted {deleted} OCR records")
+          
+          # Show remaining
+          cur.execute("""
+            SELECT COUNT(*) FROM page_ocr_text WHERE status = 'success'
+          """)
+          remaining = cur.fetchone()[0]
+          print(f"  Remaining successful OCR records: {remaining}")
+          
+          conn.close()
+          print("="*80 + "\n")
+          SCRIPT
+
+      - name: Delete large OCR records
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          python3 delete_large_ocr.py
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## OCR Deletion Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Deleted all OCR records with raw_text > 20K bytes." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Impact:**" >> $GITHUB_STEP_SUMMARY
+          echo "- These pages will be re-OCR'd on next workflow run" >> $GITHUB_STEP_SUMMARY
+          echo "- Likely removes corrupted/garbled records (especially gemma models)" >> $GITHUB_STEP_SUMMARY
+          echo "- Keeps smaller, cleaner OCR records intact" >> $GITHUB_STEP_SUMMARY

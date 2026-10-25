@@ -64,12 +64,21 @@
   table.browser td.col-title, table.browser td.col-title_en { min-width: 340px; max-width: 520px; white-space: normal; }
   table.browser td.col-publisher { min-width: 260px; max-width: 380px; white-space: normal; }
   table.browser td.col-date { min-width: 150px; max-width: none; }
+  table.browser td.col-reviewer_note { min-width: 260px; max-width: 360px; white-space: normal; overflow: visible; }
+  textarea.note { width: 100%; min-height: 54px; font: 400 12.5px/1.4 "IBM Plex Sans", sans-serif; padding: 6px 8px; border: 1px solid var(--input-border); background: var(--input-bg); color: var(--ink); resize: vertical; }
+  textarea.note.dirty { border-color: var(--brick); }
+  .note-status { display: block; font: 400 11px/1.4 "IBM Plex Mono", monospace; color: var(--muted); min-height: 15px; }
+  .note-status.err { color: var(--brick); }
+  .save-bar { display: flex; align-items: center; gap: 14px; margin: 0 0 12px; }
+  .save-bar button { font: 500 13px/1 "IBM Plex Sans", sans-serif; padding: 9px 16px; background: var(--brick); color: var(--panel); border: none; cursor: pointer; }
+  .save-bar button:disabled { opacity: .5; cursor: default; }
+  #save-all-status { font: 400 12.5px/1 "IBM Plex Sans", sans-serif; color: var(--muted); }
   .notice { padding: 24px; background: var(--panel); border: 1px solid var(--border); color: var(--body-text); }
 {% endblock %}
 {% block content %}
 <main>
   <h1>Canonical review</h1>
-  <p class="lede">One row per entry from the winning extraction of each page. Filter or sort on any column. A page id opens the QC review (image and extraction); “parsed” opens that page’s canonical detail. Values shown are the normalized spellings; <code style="font-family:'IBM Plex Mono', monospace; font-size:13px; background:var(--border-soft); padding:1px 5px;">title_en</code> is the English translation of non-English titles.</p>
+  <p class="lede">One row per entry from the winning extraction of each page. Filter or sort on any column. A page id opens the QC review (image and extraction); “image” opens the page scan directly in a new tab. Values shown are the normalized spellings; <code style="font-family:'IBM Plex Mono', monospace; font-size:13px; background:var(--border-soft); padding:1px 5px;">title_en</code> is the English translation of non-English titles.</p>
 
   {% if missing_view %}
     <div class="notice">The <code>canonical_entries_view</code> view doesn’t exist yet — run the “Apply Supabase migrations” workflow.</div>
@@ -77,6 +86,11 @@
   <div class="list-meta">
     <div class="rowcount">{{ "{:,}".format(total) }} entr{{ 'ies' if total != 1 else 'y' }}</div>
     <div class="pageinfo">page {{ page }} of {{ total_pages }} &middot; {{ per_page }} per page</div>
+  </div>
+
+  <div class="save-bar">
+    <button type="button" id="save-all" disabled>Save all notes on this page</button>
+    <span id="save-all-status">Notes save as you leave each box; use this to save everything at once.</span>
   </div>
 
   <form method="get" id="filter-form">
@@ -107,13 +121,16 @@
         <tbody>
           {% for row in rows %}
           <tr>
-            <td><a href="{{ url_for('qc_canonical_page', page_id=row.page_id) }}">parsed</a></td>
+            <td><a href="{{ url_for('qc_image', page_id=row.page_id) }}" target="_blank" rel="noopener">image</a></td>
             {% for col in columns %}
-            <td class="col-{{ col }}" title="{{ (row[col] | string) | truncate(500) if row[col] is not none else '' }}">
-              {%- if row[col] is none -%}
+            <td class="col-{{ col }}"{% if col != 'reviewer_note' %} title="{{ (row[col] | string) | truncate(500) if row[col] is not none else '' }}"{% endif %}>
+              {%- if row[col] is none and col != 'reviewer_note' -%}
                 <span class="muted">&mdash;</span>
+              {%- elif col == 'reviewer_note' -%}
+                <textarea class="note" data-page="{{ row.page_id }}" data-entry="{{ row.entry_index }}" data-orig="{{ row.reviewer_note or '' }}" aria-label="Note for page {{ row.page_id }} entry {{ row.entry_index + 1 }}">{{ row.reviewer_note or '' }}</textarea>
+                <span class="note-status"></span>
               {%- elif col == 'page_id' -%}
-                <a href="{{ url_for('qc_page', page_id=row.page_id, model_tag=row.model_tag) }}">{{ row.page_id }}</a>
+                <a href="{{ url_for('qc_page', page_id=row.page_id, model_tag=row.model_tag) }}" target="_blank" rel="noopener">{{ row.page_id }}</a>
               {%- else -%}
                 {{ (row[col] | string) | truncate(200) }}
               {%- endif -%}
@@ -152,4 +169,58 @@
   </div>
   {% endif %}
 </main>
+<script>
+(function () {
+  var url = {{ url_for('qc_canonical_notes') | tojson }};
+  var boxes = Array.prototype.slice.call(document.querySelectorAll('textarea.note'));
+  var saveAll = document.getElementById('save-all');
+  var allStatus = document.getElementById('save-all-status');
+  if (!saveAll) return;
+
+  function statusEl(box) { return box.parentNode.querySelector('.note-status'); }
+  function isDirty(box) { return box.value !== box.getAttribute('data-orig'); }
+  function refresh() {
+    var n = boxes.filter(isDirty).length;
+    saveAll.disabled = n === 0;
+    if (n) allStatus.textContent = n + ' unsaved note' + (n === 1 ? '' : 's');
+  }
+  function item(box) {
+    return { page_id: +box.getAttribute('data-page'), entry_index: +box.getAttribute('data-entry'), note: box.value };
+  }
+  function post(items, onDone, onFail) {
+    fetch(url, { method: 'POST', credentials: 'same-origin',
+                 headers: { 'Content-Type': 'application/json' },
+                 body: JSON.stringify({ notes: items }) })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(onDone).catch(onFail);
+  }
+  function save(targets, label) {
+    if (!targets.length) return;
+    var sent = targets.map(function (b) { return b.value; });
+    targets.forEach(function (b) { var s = statusEl(b); s.className = 'note-status'; s.textContent = 'saving…'; });
+    post(targets.map(item), function () {
+      targets.forEach(function (b, i) {
+        // only mark clean if the text wasn't edited again while saving
+        if (b.value === sent[i]) { b.setAttribute('data-orig', sent[i]); b.classList.remove('dirty'); }
+        statusEl(b).textContent = 'saved ✓';
+      });
+      refresh();
+      if (label) allStatus.textContent = 'Saved ' + targets.length + ' note' + (targets.length === 1 ? '' : 's') + ' ✓';
+    }, function () {
+      targets.forEach(function (b) { var s = statusEl(b); s.className = 'note-status err'; s.textContent = 'not saved — try again'; });
+      if (label) allStatus.textContent = 'Save failed — nothing was lost, try again.';
+    });
+  }
+
+  boxes.forEach(function (box) {
+    box.addEventListener('input', function () { box.classList.toggle('dirty', isDirty(box)); statusEl(box).textContent = ''; refresh(); });
+    box.addEventListener('blur', function () { if (isDirty(box)) save([box], false); });
+  });
+  saveAll.addEventListener('click', function () { save(boxes.filter(isDirty), true); });
+  window.addEventListener('beforeunload', function (e) {
+    if (boxes.some(isDirty)) { e.preventDefault(); e.returnValue = ''; }
+  });
+  refresh();
+})();
+</script>
 {% endblock %}

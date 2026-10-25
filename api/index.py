@@ -1173,10 +1173,10 @@ def qc_canonical_page(page_id):
             canonical = canonical_rows[0]
 
             # Fetch catalogue entries
-            entries_url = urljoin(supabase_url, "/rest/v1/catalogue_entries")
+            entries_url = urljoin(supabase_url, "/rest/v1/catalogue_entries_canonical")
             response = requests.get(
                 entries_url,
-                params={'extraction_id': f'eq.{canonical["extraction_id"]}', 'order': 'entry_index.asc', 'select': '*'},
+                params={'page_id': f'eq.{page_id}', 'order': 'entry_index.asc', 'select': '*'},
                 headers=headers,
                 timeout=10
             )
@@ -1185,7 +1185,7 @@ def qc_canonical_page(page_id):
 
             data = {
                 "page_id": canonical["page_id"],
-                "extraction_id": canonical["extraction_id"],
+                "extraction_id": canonical.get("extraction_id"),
                 "model_tag": canonical["model_tag"],
                 "priority": canonical["priority"],
                 "entry_count": canonical["entry_count"],

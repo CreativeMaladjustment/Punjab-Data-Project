@@ -27,7 +27,7 @@ jobs:
             echo "❌ Confirmation failed. Must enter exactly: DELETE_SUSPICIOUS_OCR"
             exit 1
           fi
-          echo "✅ Confirmed: will delete suspicious OCR records > 1K"
+          echo "✅ Confirmed: will delete all suspicious OCR records (any size)"
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -49,7 +49,7 @@ jobs:
           cur = conn.cursor()
 
           print("\n" + "="*80)
-          print("DELETING: Suspicious OCR Records (Meta-content > 1K)")
+          print("DELETING: All Suspicious OCR Records (any size)")
           print("="*80)
 
           cur.execute("""
@@ -59,7 +59,6 @@ jobs:
                 SELECT pot.id
                 FROM page_ocr_text pot
                 WHERE pot.status = 'success'
-                  AND LENGTH(pot.raw_text) > 1000
                   AND (
                     pot.raw_text ILIKE '%transcribe the text%'
                     OR pot.raw_text ILIKE '%provided image%'
@@ -90,9 +89,10 @@ jobs:
         run: |
           echo "## Suspicious OCR Deletion Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Deleted OCR records (>1K) containing:" >> $GITHUB_STEP_SUMMARY
+          echo "Deleted all OCR records (any size) containing:" >> $GITHUB_STEP_SUMMARY
           echo "- Transcription instructions" >> $GITHUB_STEP_SUMMARY
           echo "- Image analysis meta-content" >> $GITHUB_STEP_SUMMARY
           echo "- User prompts and corrections" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "These will be re-OCR'd on next workflow run." >> $GITHUB_STEP_SUMMARY
+          echo "**Note:** Going forward, new extractions will have on-the-fly validation" >> $GITHUB_STEP_SUMMARY
+          echo "that retries and cleans problematic OCR automatically." >> $GITHUB_STEP_SUMMARY

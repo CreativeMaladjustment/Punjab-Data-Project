@@ -310,9 +310,63 @@ def db_connection():
         conn.close()
 
 
-def db_save_page_ocr_text(page_id, model, model_tag, raw_text):
+SUSPICIOUS_OCR_PATTERNS = [
+    '%transcribe the text%',
+    '%provided image%',
+    '%user wants me%',
+    '%image analysis%',
+    '%transcription plan%',
+    '%correction/review%',
+]
+
+
+def has_suspicious_ocr_content(text):
+    if not text or len(text) < 1000:
+        return False
+    text_lower = text.lower()
+    suspicious_keywords = [
+        'transcribe the text',
+        'provided image',
+        'user wants me',
+        'image analysis',
+        'transcription plan',
+        'correction/review',
+    ]
+    return any(kw in text_lower for kw in suspicious_keywords)
+
+
+def db_save_page_ocr_text(page_id, model, model_tag, raw_text, image_bytes=None):
     text_size = len(raw_text.encode('utf-8')) if raw_text else 0
     logger.info(f"[db_save_page_ocr_text] page_id={page_id}, model_tag={model_tag}, text_size={text_size} bytes")
+
+    # Check if output contains suspicious meta-content (transcription instructions, etc.)
+    # This typically affects gemma models where API response contains reasoning text mixed with OCR
+    if has_suspicious_ocr_content(raw_text) and image_bytes is not None:
+        logger.warning(f"[db_save_page_ocr_text] Suspicious content detected in {model_tag} OCR for page {page_id}, "
+                      f"retrying immediately...")
+        try:
+            # Retry OCR once to compare against suspicious output
+            raw_text_retry = gemini_ocr_full_page(image_bytes, context=f"page_id={page_id}")
+            retry_size = len(raw_text_retry.encode('utf-8')) if raw_text_retry else 0
+
+            # If retry also has suspicious content, keep original
+            if has_suspicious_ocr_content(raw_text_retry):
+                logger.warning(f"[db_save_page_ocr_text] Retry also suspicious (size={retry_size}), keeping original")
+            # If retry is cleaner (no suspicious content), use it instead
+            elif not has_suspicious_ocr_content(raw_text_retry):
+                logger.info(f"[db_save_page_ocr_text] Retry clean (size={retry_size}), replacing original")
+                raw_text = raw_text_retry
+                text_size = retry_size
+            # If suspicious in different way, keep original (smaller/shorter is preferable when both bad)
+            elif retry_size > text_size:
+                logger.warning(f"[db_save_page_ocr_text] Retry larger and also suspicious, keeping original")
+            else:
+                logger.info(f"[db_save_page_ocr_text] Retry smaller, using it")
+                raw_text = raw_text_retry
+                text_size = retry_size
+        except Exception as e:
+            logger.warning(f"[db_save_page_ocr_text] Retry failed ({type(e).__name__}), keeping original: {e}")
+
     try:
         start_time = time.time()
         with db_connection() as conn, conn.cursor() as cur:
@@ -325,7 +379,7 @@ def db_save_page_ocr_text(page_id, model, model_tag, raw_text):
             )
             conn.commit()
         elapsed = time.time() - start_time
-        logger.info(f"[db_save_page_ocr_text] SUCCESS: page_id={page_id}, elapsed={elapsed:.3f}s")
+        logger.info(f"[db_save_page_ocr_text] SUCCESS: page_id={page_id}, text_size={text_size}, elapsed={elapsed:.3f}s")
     except Exception as e:
         logger.error(f"[db_save_page_ocr_text] FAILED: page_id={page_id}, error={type(e).__name__}: {e}", exc_info=True)
         raise
@@ -1051,7 +1105,7 @@ def process_page(clients, claim):
             # fall back on, so it propagates to the except block below like
             # any other page failure.
             page_text = gemini_ocr_full_page(image_bytes, context=context)
-            db_save_page_ocr_text(page_id, GEMINI_MODEL, MODEL_TAG, page_text)
+            db_save_page_ocr_text(page_id, GEMINI_MODEL, MODEL_TAG, page_text, image_bytes=image_bytes)
             # Zero entries deliberately -- see GEMMA_OCR_ONLY_TAGS' comment.
             # This llm_extractions row exists only so claim_next_page()'s
             # existing claim/retry machinery keeps working unchanged (a
@@ -1069,7 +1123,7 @@ def process_page(clients, claim):
         # extract_with_llm.py's process_page() treats its own OCR call.
         try:
             page_text = gemini_ocr_full_page(image_bytes, context=context)
-            db_save_page_ocr_text(page_id, GEMINI_MODEL, MODEL_TAG, page_text)
+            db_save_page_ocr_text(page_id, GEMINI_MODEL, MODEL_TAG, page_text, image_bytes=image_bytes)
         except Exception as exc:
             ocr_rate_limited = getattr(exc, "gemini_rate_limited", False)
             print(f"WARNING: full-page OCR failed for {context}: {exc}")

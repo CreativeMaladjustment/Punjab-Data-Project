@@ -1438,3 +1438,17 @@ def count_canonical_qc_pages(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM page_extractions_canonical")
         return cur.fetchone()[0]
+
+
+def fetch_field_value_map(conn, fields, raw_values):
+    """Canonical value for each raw (field, raw_value) from field_value_map.
+    Returns {(field, raw_value): canonical_value}."""
+    if not fields or not raw_values:
+        return {}
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT field, raw_value, canonical_value
+            FROM field_value_map
+            WHERE field = ANY(%s) AND raw_value = ANY(%s)
+        """, (list(fields), list(raw_values)))
+        return {(f, r): c for f, r, c in cur.fetchall()}

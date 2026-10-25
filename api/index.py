@@ -1097,6 +1097,45 @@ CANONICAL_ENTRY_DISPLAY_FIELDS = [
 ]
 
 
+# Fields whose raw values are normalized via the generic field_value_map table
+# (keep in sync with map_new_field_values() in the field_value_map migration).
+CANONICAL_MAPPED_FIELDS = ["lang", "pubcity", "pcity", "publisher", "printer"]
+
+
+def load_value_map(entries, use_rest, supabase_url=None, headers=None):
+    """{(field, raw_value): canonical_value} for the entries' mapped fields.
+    Best-effort: returns {} if the lookup is unavailable."""
+    raw_values = sorted({e[f] for e in entries for f in CANONICAL_MAPPED_FIELDS if e.get(f)})
+    if not raw_values:
+        return {}
+    try:
+        if use_rest:
+            import requests
+            from urllib.parse import urljoin
+            quote = lambda t: '"' + t.replace("\\", "\\\\").replace('"', '\\"') + '"'
+            resp = requests.get(
+                urljoin(supabase_url, "/rest/v1/field_value_map"),
+                params={
+                    'field': 'in.(' + ",".join(CANONICAL_MAPPED_FIELDS) + ')',
+                    'raw_value': 'in.(' + ",".join(quote(v) for v in raw_values) + ')',
+                    'select': 'field,raw_value,canonical_value',
+                },
+                headers=headers,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return {(r["field"], r["raw_value"]): r["canonical_value"] for r in resp.json()}
+        conn = db_connect()
+        try:
+            from queries import fetch_field_value_map
+            return fetch_field_value_map(conn, CANONICAL_MAPPED_FIELDS, raw_values)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"field_value_map lookup failed: {e}")
+        return {}
+
+
 @app.route("/qc-canonical")
 @login_required
 def qc_canonical_index():
@@ -1271,11 +1310,23 @@ def qc_canonical_page(page_id):
                 conn.close()
 
     entries = [e for e in (data.get("entries") or []) if isinstance(e, dict)]
+    value_map = load_value_map(
+        entries,
+        use_rest=bool(supabase_url and supabase_key),
+        supabase_url=supabase_url,
+        headers=None if not (supabase_url and supabase_key) else {
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+        },
+    )
     for e in entries:
-        e["display_fields"] = [
-            (label, "" if e.get(key) in (None, "", {}, []) else str(e.get(key)))
-            for key, label in CANONICAL_ENTRY_DISPLAY_FIELDS
-        ]
+        fields = []
+        for key, label in CANONICAL_ENTRY_DISPLAY_FIELDS:
+            raw = e.get(key)
+            raw = "" if raw in (None, "", {}, []) else str(raw)
+            shown = value_map.get((key, raw), raw)
+            fields.append((label, shown, raw if shown != raw else ""))
+        e["display_fields"] = fields
     data["entries"] = entries
 
     return render_template("qc-canonical.html",

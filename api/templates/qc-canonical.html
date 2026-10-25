@@ -24,6 +24,7 @@
   .entry-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; font-size: 13px; }
   .entry-field { display: flex; flex-direction: column; gap: 4px; }
   .field-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .field-orig { color: var(--muted); font-size: 11px; }
   .field-value { font-family: "IBM Plex Mono", monospace; word-break: break-all; }
 
   .nav-buttons { display: flex; gap: 12px; margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--border); }
@@ -105,10 +106,10 @@
           {% endif %}
 
           <div class="entry-fields">
-            {% for label, v in entry.display_fields %}
+            {% for label, v, orig in entry.display_fields %}
               <div class="entry-field">
                 <div class="field-label">{{ label }}</div>
-                <div class="field-value">{% if v %}{{ v }}{% else %}<span style="opacity:.4">—</span>{% endif %}</div>
+                <div class="field-value">{% if v %}{{ v }}{% if orig %} <span class="field-orig" title="As printed / extracted">[{{ orig }}]</span>{% endif %}{% else %}<span style="opacity:.4">—</span>{% endif %}</div>
               </div>
             {% endfor %}
           </div>

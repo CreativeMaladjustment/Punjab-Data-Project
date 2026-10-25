@@ -115,6 +115,7 @@
         <a href="{{ url_for('progress') }}" class="{{ 'active' if active == 'progress' else '' }}">Progress</a>
         <a href="{{ url_for('qc_index') }}" class="{{ 'active' if active == 'qc' else '' }}">QC review</a>
         <a href="{{ url_for('qc_canonical_index') }}" class="{{ 'active' if active == 'qc_canonical' else '' }}">Canonical review</a>
+        <a href="{{ url_for('bulk_errors') }}" class="{{ 'active' if active == 'bulk_errors' else '' }}">Bulk errors</a>
         <a href="{{ url_for('tables_index') }}" class="{{ 'active' if active == 'tables' else '' }}">Tables</a>
         <a href="{{ url_for('method') }}" class="{{ 'active' if active == 'method' else '' }}">Method</a>
         <a href="{{ url_for('sources') }}" class="{{ 'active' if active == 'sources' else '' }}">Sources</a>

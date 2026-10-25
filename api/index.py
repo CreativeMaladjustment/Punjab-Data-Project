@@ -73,9 +73,16 @@ from queries import (
     CATALOGUE_ENTRY_BOOL_FIELDS,
     CATALOGUE_ENTRY_FIELDS,
     CATALOGUE_ENTRY_INT_FIELDS,
+    BULK_VALUE_FIELDS,
     CATALOGUE_ENTRY_JSON_FIELDS,
+    TITLE_JUNK_PATTERNS,
     apply_page_exclusion,
     apply_qc_verdict,
+    fetch_bulk_entries,
+    fetch_title_junk_summary,
+    fetch_title_junk_titles,
+    fetch_value_groups,
+    set_canonical_value,
     fetch_catalogue_entries_summaries,
     fetch_corpus_stats,
     fetch_dashboard_data,
@@ -1335,6 +1342,83 @@ def qc_canonical_page(page_id):
                          position=position,
                          total=total_canonical,
                          active='qc_canonical')
+
+
+BULK_ENTRIES_PAGE_SIZE = 100
+
+
+@app.route("/bulk-errors")
+@login_required
+def bulk_errors():
+    """Grouped counts of variant spellings (lang, cities, publisher, printer)
+    and junk titles, with drill-down to the entries behind each."""
+    field = request.args.get("field", "lang")
+    variants_only = request.args.get("all") != "1"
+    conn = db_connect()
+    try:
+        if field == "title_junk":
+            pattern = request.args.get("pattern")
+            if pattern is not None and pattern not in TITLE_JUNK_PATTERNS:
+                abort(400)
+            summary = fetch_title_junk_summary(conn)
+            titles = fetch_title_junk_titles(conn, pattern) if pattern else []
+            return render_template(
+                "bulk-errors.html", active="bulk_errors", field=field,
+                fields=BULK_VALUE_FIELDS, summary=summary, pattern=pattern,
+                pattern_label=TITLE_JUNK_PATTERNS[pattern][0] if pattern else None,
+                titles=titles, groups=[], variants_only=variants_only)
+        if field not in BULK_VALUE_FIELDS:
+            abort(400)
+        groups = fetch_value_groups(conn, field, variants_only=variants_only)
+    finally:
+        conn.close()
+    return render_template(
+        "bulk-errors.html", active="bulk_errors", field=field,
+        fields=BULK_VALUE_FIELDS, groups=groups, variants_only=variants_only,
+        summary=[], pattern=None, pattern_label=None, titles=[])
+
+
+@app.route("/bulk-errors/entries")
+@login_required
+def bulk_errors_entries():
+    field = request.args.get("field", "")
+    canonical = request.args.get("canonical")
+    raw = request.args.get("raw")
+    title = request.args.get("title")
+    page = max(request.args.get("page", 1, type=int), 1)
+    if title is None and field not in BULK_VALUE_FIELDS:
+        abort(400)
+    if title is None and canonical is None and raw is None:
+        abort(400)
+    conn = db_connect()
+    try:
+        rows, total = fetch_bulk_entries(
+            conn, field, canonical=canonical, raw=raw, title=title,
+            limit=BULK_ENTRIES_PAGE_SIZE, offset=(page - 1) * BULK_ENTRIES_PAGE_SIZE)
+    finally:
+        conn.close()
+    label = title if title is not None else (canonical if canonical is not None else raw)
+    return render_template(
+        "bulk-errors-entries.html", active="bulk_errors", field=field or "title",
+        label=label, rows=rows, total=total, page=page,
+        page_size=BULK_ENTRIES_PAGE_SIZE, canonical=canonical, raw=raw, title=title)
+
+
+@app.route("/bulk-errors/map", methods=["POST"])
+@login_required
+def bulk_errors_map():
+    field = request.form.get("field", "")
+    canonical = request.form.get("canonical", "")
+    new_value = request.form.get("new_value", "")
+    raw_value = request.form.get("raw_value") or None
+    if field not in BULK_VALUE_FIELDS or not new_value.strip():
+        abort(400)
+    conn = db_connect()
+    try:
+        set_canonical_value(conn, field, canonical, new_value, raw_value=raw_value)
+    finally:
+        conn.close()
+    return redirect(url_for("bulk_errors", field=field, all=("1" if request.form.get("all") == "1" else None)))
 
 
 @app.route("/healthz")

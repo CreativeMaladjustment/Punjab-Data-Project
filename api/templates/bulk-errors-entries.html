@@ -1,0 +1,48 @@
+{% extends "_layout.html" %}
+{% block title %}Bulk errors entries — Punjab Data Project{% endblock %}
+{% block extra_style %}
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 24px 96px; }
+  h1 { margin: 0 0 8px; font-size: 24px; font-weight: 400; }
+  .lede { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+  .lede a { color: var(--brick); }
+  table.ent { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--panel); border: 1px solid var(--border); }
+  .ent th { text-align: left; font: 500 10.5px/1 "IBM Plex Mono", monospace; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .ent td { padding: 8px 12px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  .ent .mono { font-family: "IBM Plex Mono", monospace; white-space: nowrap; }
+  .ent a { color: var(--brick); text-decoration: none; }
+  .ent a:hover { text-decoration: underline; }
+  .pager { display: flex; gap: 12px; margin-top: 20px; align-items: center; font-size: 13px; }
+  .pager a { padding: 8px 14px; background: var(--border); color: var(--ink); text-decoration: none; border-radius: 4px; }
+{% endblock %}
+{% block content %}
+<main>
+  <h1>{{ label }}</h1>
+  <p class="lede">
+    {{ '{:,}'.format(total) }} entr{{ 'y' if total == 1 else 'ies' }}
+    {% if title is none %}· field <strong>{{ field }}</strong>{% else %}· exact title{% endif %}
+    · <a href="{{ url_for('bulk_errors', field=(field if title is none else 'title_junk')) }}">← back to bulk errors</a>
+  </p>
+  <table class="ent">
+    <tr><th>Page</th><th>#</th><th>Title</th>{% if title is none %}<th>{{ field }}</th>{% endif %}<th>Source</th><th>Open</th></tr>
+    {% for r in rows %}
+      <tr>
+        <td class="mono">{{ r.page_id }}</td>
+        <td class="mono">{{ r.entry_index + 1 }}</td>
+        <td>{{ r.title or '—' }}</td>
+        {% if title is none %}<td>{{ r.value }}</td>{% endif %}
+        <td class="mono">{{ r.model_tag }}</td>
+        <td class="mono">
+          <a href="{{ url_for('qc_canonical_page', page_id=r.page_id) }}">parsed</a> ·
+          <a href="{{ url_for('qc_page', page_id=r.page_id) }}">raw / image</a>
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+  <div class="pager">
+    {% set args = {'field': field if title is none else None, 'canonical': canonical, 'raw': raw, 'title': title} %}
+    {% if page > 1 %}<a href="{{ url_for('bulk_errors_entries', page=page-1, **args) }}">← Previous</a>{% endif %}
+    <span>Page {{ page }} of {{ ((total + page_size - 1) // page_size) or 1 }}</span>
+    {% if page * page_size < total %}<a href="{{ url_for('bulk_errors_entries', page=page+1, **args) }}">Next →</a>{% endif %}
+  </div>
+</main>
+{% endblock %}

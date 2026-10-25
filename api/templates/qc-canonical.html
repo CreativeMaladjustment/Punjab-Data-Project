@@ -83,54 +83,22 @@
           {% endif %}
 
           <div class="entry-fields">
-            {% if entry.author %}
+            {% for key, label in [
+              ('author','Author'),('title_native','Title native'),('gloss','Gloss'),
+              ('publisher','Publisher'),('pubcity','Pub. City'),('pp_verbatim','Pub. verbatim'),
+              ('printer','Printer'),('pcity','Printer City'),('printer_verbatim','Printer verbatim'),
+              ('date','Date'),('copies','Copies'),('price','Price'),('edition','Edition'),
+              ('format','Format'),('method','Method'),('educ','Education'),('copyright','Copyright'),
+              ('lang','Language'),('char_qualifier','Script'),('topic','Topic'),('section','Section'),
+              ('serial','Serial'),('reg','Reg.'),('quarter','Quarter'),('pdf_page','PDF page'),
+              ('printed_page','Printed page'),('marks','Marks'),('flags','Flags'),('notes','Notes')
+            ] %}
+              {% set v = entry.get(key) %}
               <div class="entry-field">
-                <div class="field-label">Author</div>
-                <div class="field-value">{{ entry.author }}</div>
+                <div class="field-label">{{ label }}</div>
+                <div class="field-value">{% if v is none or v == '' or v == {} or v == [] %}<span style="opacity:.4">—</span>{% else %}{{ v }}{% endif %}</div>
               </div>
-            {% endif %}
-            {% if entry.publisher %}
-              <div class="entry-field">
-                <div class="field-label">Publisher</div>
-                <div class="field-value">{{ entry.publisher }}</div>
-              </div>
-            {% endif %}
-            {% if entry.pubcity %}
-              <div class="entry-field">
-                <div class="field-label">Pub. City</div>
-                <div class="field-value">{{ entry.pubcity }}</div>
-              </div>
-            {% endif %}
-            {% if entry.date %}
-              <div class="entry-field">
-                <div class="field-label">Date</div>
-                <div class="field-value">{{ entry.date }}</div>
-              </div>
-            {% endif %}
-            {% if entry.copies %}
-              <div class="entry-field">
-                <div class="field-label">Copies</div>
-                <div class="field-value">{{ entry.copies }}</div>
-              </div>
-            {% endif %}
-            {% if entry.price %}
-              <div class="entry-field">
-                <div class="field-label">Price</div>
-                <div class="field-value">{{ entry.price }}</div>
-              </div>
-            {% endif %}
-            {% if entry.lang %}
-              <div class="entry-field">
-                <div class="field-label">Language</div>
-                <div class="field-value">{{ entry.lang }}</div>
-              </div>
-            {% endif %}
-            {% if entry.notes %}
-              <div class="entry-field">
-                <div class="field-label">Notes</div>
-                <div class="field-value">{{ entry.notes }}</div>
-              </div>
-            {% endif %}
+            {% endfor %}
           </div>
         </div>
       {% endfor %}

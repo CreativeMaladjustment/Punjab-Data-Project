@@ -1386,19 +1386,7 @@ def fetch_canonical_qc_page(conn, page_id):
                 pec.model_tag,
                 pec.priority,
                 pec.entry_count,
-                json_agg(json_build_object(
-                    'id', ce.id,
-                    'entry_index', ce.entry_index,
-                    'title', ce.title,
-                    'author', ce.author,
-                    'publisher', ce.publisher,
-                    'pubcity', ce.pubcity,
-                    'date', ce.date,
-                    'copies', ce.copies,
-                    'price', ce.price,
-                    'lang', ce.lang,
-                    'notes', ce.notes
-                ) ORDER BY ce.entry_index) as entries
+                json_agg(to_jsonb(ce) ORDER BY ce.entry_index) as entries
             FROM page_extractions_canonical pec
             LEFT JOIN catalogue_entries ce ON ce.extraction_id = pec.extraction_id
             WHERE pec.page_id = %s

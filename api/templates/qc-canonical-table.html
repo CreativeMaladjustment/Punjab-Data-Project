@@ -59,8 +59,11 @@
   .page-sizes a, .page-sizes strong { margin-left: 8px; }
   table.browser td a { color: var(--brick); text-decoration: none; }
   table.browser td a:hover { text-decoration: underline; }
-  table.browser { min-width: 1400px; }
+  table.browser { min-width: 1200px; }
   table.browser td { max-width: 260px; }
+  table.browser td.col-title, table.browser td.col-title_en { min-width: 340px; max-width: 520px; white-space: normal; }
+  table.browser td.col-publisher { min-width: 260px; max-width: 380px; white-space: normal; }
+  table.browser td.col-date { min-width: 150px; max-width: none; }
   .notice { padding: 24px; background: var(--panel); border: 1px solid var(--border); color: var(--body-text); }
 {% endblock %}
 {% block content %}
@@ -106,7 +109,7 @@
           <tr>
             <td><a href="{{ url_for('qc_canonical_page', page_id=row.page_id) }}">parsed</a></td>
             {% for col in columns %}
-            <td title="{{ (row[col] | string) | truncate(500) if row[col] is not none else '' }}">
+            <td class="col-{{ col }}" title="{{ (row[col] | string) | truncate(500) if row[col] is not none else '' }}">
               {%- if row[col] is none -%}
                 <span class="muted">&mdash;</span>
               {%- elif col == 'page_id' -%}

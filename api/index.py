@@ -1144,6 +1144,7 @@ def load_value_map(entries, use_rest, supabase_url=None, headers=None):
 
 
 CANONICAL_VIEW = "canonical_entries_view"
+CANONICAL_HIDDEN_COLUMNS = {"model_tag", "priority", "quarter", "pdf_page", "printed_page", "marks", "flags"}
 
 
 @app.route("/qc-canonical")
@@ -1165,7 +1166,10 @@ def qc_canonical_index():
 
     conn = db_connect()
     try:
-        columns = list_columns(conn, CANONICAL_VIEW)
+        all_columns = list_columns(conn, CANONICAL_VIEW)
+        # Hidden columns are fetched (the page-id link needs model_tag) but
+        # not shown, filtered or sorted.
+        columns = [c for c in all_columns if c not in CANONICAL_HIDDEN_COLUMNS]
         if not columns:
             return render_template(
                 "qc-canonical-table.html", active="qc_canonical", columns=[], rows=[],
@@ -1183,7 +1187,7 @@ def qc_canonical_index():
         sort_dir = request.args.get("dir")
         if sort_dir not in ("asc", "desc"):
             sort_dir = "asc"
-        rows, total = fetch_table_page(conn, CANONICAL_VIEW, columns, filters, sort_col, sort_dir, page, per_page)
+        rows, total = fetch_table_page(conn, CANONICAL_VIEW, all_columns, filters, sort_col, sort_dir, page, per_page)
     finally:
         conn.close()
 

@@ -1143,21 +1143,56 @@ def load_value_map(entries, use_rest, supabase_url=None, headers=None):
         return {}
 
 
+CANONICAL_VIEW = "canonical_entries_view"
+
+
 @app.route("/qc-canonical")
 @login_required
 def qc_canonical_index():
-    """Show first page with a canonical extraction."""
+    """Canonical entries as one filterable, sortable row per entry; each page id
+    links to the QC review (image + extraction), "parsed" to the detail view."""
+    try:
+        per_page = int(request.args.get("per_page", 50))
+    except ValueError:
+        per_page = 50
+    if per_page not in TABLE_PAGE_SIZES:
+        per_page = 50
+    try:
+        page = int(request.args.get("page", 1))
+    except ValueError:
+        page = 1
+    page = min(max(page, 1), MAX_TABLE_PAGE)
+
     conn = db_connect()
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT MIN(page_id) FROM page_extractions_canonical")
-            first_id = cur.fetchone()[0]
+        columns = list_columns(conn, CANONICAL_VIEW)
+        if not columns:
+            return render_template(
+                "qc-canonical-table.html", active="qc_canonical", columns=[], rows=[],
+                filters={}, sort_col=None, sort_dir="asc", page=1, per_page=per_page,
+                total=0, total_pages=1, page_sizes=TABLE_PAGE_SIZES, link_params={},
+                missing_view=True)
+        filters = {}
+        for col in columns:
+            value = request.args.get(f"filter_{col}", "").strip()
+            if value:
+                filters[col] = value
+        sort_col = request.args.get("sort")
+        if sort_col not in columns:
+            sort_col = None
+        sort_dir = request.args.get("dir")
+        if sort_dir not in ("asc", "desc"):
+            sort_dir = "asc"
+        rows, total = fetch_table_page(conn, CANONICAL_VIEW, columns, filters, sort_col, sort_dir, page, per_page)
     finally:
         conn.close()
 
-    if first_id is None:
-        return redirect(url_for("qc_index"))
-    return redirect(url_for("qc_canonical_page", page_id=first_id))
+    total_pages = max(math.ceil(total / per_page), 1)
+    return render_template(
+        "qc-canonical-table.html", active="qc_canonical", columns=columns, rows=rows,
+        filters=filters, sort_col=sort_col, sort_dir=sort_dir, page=page, per_page=per_page,
+        total=total, total_pages=total_pages, page_sizes=TABLE_PAGE_SIZES,
+        link_params={f"filter_{c}": v for c, v in filters.items()}, missing_view=False)
 
 
 @app.route("/qc-canonical/<int:page_id>")

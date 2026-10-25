@@ -1,0 +1,152 @@
+{% extends "_layout.html" %}
+{% block title %}Canonical review — Punjab Data Project{% endblock %}
+{% block extra_style %}
+  main { max-width: 1600px; margin: 0 auto; padding: 48px 32px 96px; }
+  h1 { font: 400 30px/1.2 "IBM Plex Serif", Georgia, serif; margin: 0 0 8px; }
+  .lede { font: 400 15px/1.6 "IBM Plex Sans", sans-serif; color: var(--body-text); margin: 0 0 36px; max-width: 70ch; }
+
+  .layout { display: grid; grid-template-columns: 240px minmax(0,1fr); gap: 24px; align-items: start; }
+  @media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }
+
+  .side-nav { background: var(--panel); border: 1px solid var(--border); position: sticky; top: 88px; }
+  @media (max-width: 760px) { .side-nav { position: static; } }
+  .side-row {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 10px; padding: 12px 16px;
+    border-bottom: 1px solid var(--border-soft); text-decoration: none;
+    color: var(--body-text); background: transparent;
+  }
+  .side-row:last-child { border-bottom: none; }
+  .side-row:hover { background: var(--tint); color: var(--ink); }
+  .side-row.active { background: var(--tint); color: var(--ink); }
+  .side-row .name { font: 400 13px/1.3 "IBM Plex Mono", monospace; }
+  .side-row .kind { font: 400 10px/1 "IBM Plex Mono", monospace; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted-2); }
+
+  .list-meta { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 14px; flex-wrap: wrap; }
+  .list-meta .rowcount { font: 400 13px/1 "IBM Plex Mono", monospace; color: var(--body-text); }
+  .list-meta .pageinfo { font: 400 12px/1 "IBM Plex Mono", monospace; color: var(--muted); }
+
+  .table-scroll { border: 1px solid var(--border); background: var(--panel); overflow-x: auto; }
+  table.browser { width: 100%; min-width: 900px; }
+  table.browser th {
+    text-align: left; font: 500 10.5px/1 "IBM Plex Mono", monospace; letter-spacing: 0.06em; text-transform: uppercase;
+    color: var(--muted); padding: 12px 14px; border-bottom: 1px solid var(--border); white-space: nowrap;
+  }
+  table.browser th a { color: inherit; text-decoration: none; }
+  table.browser th a:hover { color: var(--ink); }
+  .filter-row th { padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--tint-2); }
+  .filter-row input {
+    width: 100%; min-width: 70px; font: 400 11.5px/1 "IBM Plex Mono", monospace; padding: 5px 7px;
+    border: 1px solid var(--input-border); background: var(--input-bg); color: var(--ink);
+  }
+  table.browser td {
+    font: 400 12.5px/1.4 "IBM Plex Mono", monospace; padding: 10px 14px; border-bottom: 1px solid var(--border-soft);
+    color: var(--body-text); white-space: nowrap; max-width: 230px; overflow: hidden; text-overflow: ellipsis;
+  }
+  .muted { color: var(--muted); }
+
+  .filter-actions { margin-top: 12px; display: flex; align-items: center; gap: 16px; }
+  .filter-actions button {
+    font: 500 13px/1 "IBM Plex Sans", sans-serif; padding: 9px 16px; background: var(--dark); color: var(--panel);
+    border: none; cursor: pointer;
+  }
+  .filter-actions button:hover { background: var(--dark-hover); }
+  .filter-actions a { font: 400 12.5px/1 "IBM Plex Sans", sans-serif; color: var(--muted); }
+
+  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 0 0; flex-wrap: wrap; font: 400 12.5px/1 "IBM Plex Sans", sans-serif; color: var(--body-text); }
+  .pager { display: flex; align-items: center; gap: 10px; }
+  .pager a { color: var(--body-text); }
+  .pager .disabled { color: var(--muted-2); }
+  .page-sizes a, .page-sizes strong { margin-left: 8px; }
+  table.browser td a { color: var(--brick); text-decoration: none; }
+  table.browser td a:hover { text-decoration: underline; }
+  table.browser { min-width: 1400px; }
+  table.browser td { max-width: 260px; }
+  .notice { padding: 24px; background: var(--panel); border: 1px solid var(--border); color: var(--body-text); }
+{% endblock %}
+{% block content %}
+<main>
+  <h1>Canonical review</h1>
+  <p class="lede">One row per entry from the winning extraction of each page. Filter or sort on any column. A page id opens the QC review (image and extraction); “parsed” opens that page’s canonical detail. Values shown are the normalized spellings; <code style="font-family:'IBM Plex Mono', monospace; font-size:13px; background:var(--border-soft); padding:1px 5px;">title_en</code> is the English translation of non-English titles.</p>
+
+  {% if missing_view %}
+    <div class="notice">The <code>canonical_entries_view</code> view doesn’t exist yet — run the “Apply Supabase migrations” workflow.</div>
+  {% else %}
+  <div class="list-meta">
+    <div class="rowcount">{{ "{:,}".format(total) }} entr{{ 'ies' if total != 1 else 'y' }}</div>
+    <div class="pageinfo">page {{ page }} of {{ total_pages }} &middot; {{ per_page }} per page</div>
+  </div>
+
+  <form method="get" id="filter-form">
+    <input type="hidden" name="sort" value="{{ sort_col or '' }}">
+    <input type="hidden" name="dir" value="{{ sort_dir }}">
+    <input type="hidden" name="page" value="1">
+    <input type="hidden" name="per_page" value="{{ per_page }}">
+    <div class="table-scroll">
+      <table class="browser">
+        <thead>
+          <tr>
+            <th></th>
+            {% for col in columns %}
+            <th>
+              <a href="{{ url_for('qc_canonical_index', sort=col, dir=('desc' if sort_col == col and sort_dir == 'asc' else 'asc'), page=1, per_page=per_page, **link_params) }}">
+                {{ col }}{% if sort_col == col %} {{ '▲' if sort_dir == 'asc' else '▼' }}{% endif %}
+              </a>
+            </th>
+            {% endfor %}
+          </tr>
+          <tr class="filter-row">
+            <th></th>
+            {% for col in columns %}
+            <th><input type="text" name="filter_{{ col }}" value="{{ filters.get(col, '') }}" placeholder="filter" aria-label="Filter {{ col }}"></th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in rows %}
+          <tr>
+            <td><a href="{{ url_for('qc_canonical_page', page_id=row.page_id) }}">parsed</a></td>
+            {% for col in columns %}
+            <td title="{{ (row[col] | string) | truncate(500) if row[col] is not none else '' }}">
+              {%- if row[col] is none -%}
+                <span class="muted">&mdash;</span>
+              {%- elif col == 'page_id' -%}
+                <a href="{{ url_for('qc_page', page_id=row.page_id, model_tag=row.model_tag) }}">{{ row.page_id }}</a>
+              {%- else -%}
+                {{ (row[col] | string) | truncate(200) }}
+              {%- endif -%}
+            </td>
+            {% endfor %}
+          </tr>
+          {% else %}
+          <tr><td colspan="{{ (columns | length) + 1 }}" class="muted">No entries match these filters.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="filter-actions">
+      <button type="submit">Apply filters</button>
+      <a href="{{ url_for('qc_canonical_index') }}">Clear filters</a>
+    </div>
+  </form>
+
+  <div class="toolbar">
+    <div class="pager">
+      {% if page > 1 %}
+        <a href="{{ url_for('qc_canonical_index', sort=sort_col, dir=sort_dir, page=page - 1, per_page=per_page, **link_params) }}">&laquo; Prev</a>
+      {% else %}<span class="disabled">&laquo; Prev</span>{% endif %}
+      <span>Page {{ page }} of {{ total_pages }}</span>
+      {% if page < total_pages %}
+        <a href="{{ url_for('qc_canonical_index', sort=sort_col, dir=sort_dir, page=page + 1, per_page=per_page, **link_params) }}">Next &raquo;</a>
+      {% else %}<span class="disabled">Next &raquo;</span>{% endif %}
+    </div>
+    <div class="page-sizes">
+      Rows per page:
+      {% for size in page_sizes %}
+        {% if size == per_page %}<strong>{{ size }}</strong>
+        {% else %}<a href="{{ url_for('qc_canonical_index', sort=sort_col, dir=sort_dir, page=1, per_page=size, **link_params) }}">{{ size }}</a>{% endif %}
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</main>
+{% endblock %}

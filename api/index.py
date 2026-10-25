@@ -1116,7 +1116,7 @@ def qc_canonical_page(page_id):
         # Fallback to direct connection if REST API not configured
         conn = db_connect()
         try:
-            from api.queries import fetch_canonical_qc_page, count_canonical_qc_pages
+            from queries import fetch_canonical_qc_page, count_canonical_qc_pages
             data = fetch_canonical_qc_page(conn, page_id)
             if not data:
                 abort(404)
@@ -1223,7 +1223,7 @@ def qc_canonical_page(page_id):
             # Fall back to direct connection
             conn = db_connect()
             try:
-                from api.queries import fetch_canonical_qc_page, count_canonical_qc_pages
+                from queries import fetch_canonical_qc_page, count_canonical_qc_pages
                 data = fetch_canonical_qc_page(conn, page_id)
                 if not data:
                     abort(404)

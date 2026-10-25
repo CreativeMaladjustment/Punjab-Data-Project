@@ -1240,7 +1240,8 @@ def qc_canonical_page(page_id):
                          page_id=page_id,
                          data=data,
                          position=position,
-                         total=total_canonical)
+                         total=total_canonical,
+                         active='qc_canonical')
 
 
 @app.route("/healthz")

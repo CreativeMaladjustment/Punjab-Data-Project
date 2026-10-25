@@ -24,10 +24,10 @@
 name: Parse structured entries from OCR text (large pages, self-hosted)
 
 on:
-  schedule:
-    # Every 6 hours: 0:00, 6:00, 12:00, 18:00 UTC
-    # Uses mistral:7b for fast, reliable processing
-    - cron: '0 */6 * * *'
+  # schedule:
+  #   # Every 6 hours: 0:00, 6:00, 12:00, 18:00 UTC
+  #   # Uses mistral:7b for fast, reliable processing
+  #   - cron: '0 */6 * * *'
   workflow_dispatch:
     inputs:
       text_model:

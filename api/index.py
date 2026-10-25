@@ -50,8 +50,6 @@ import re
 import sys
 from datetime import timedelta
 
-import requests
-
 # Vercel's Python runtime imports this file directly by path (see
 # vc_init.py in its traceback), which does not add this file's own
 # directory to sys.path the way running `python index.py` normally would

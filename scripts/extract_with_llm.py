@@ -468,7 +468,11 @@ CLAIM_NEXT_PAGE_SQL = """
                  WHERE any_le.page_id = p.id
                    AND any_le.status = 'success'
                    AND any_le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
-               ) AS has_no_extraction
+               ) AS has_no_extraction,
+               EXISTS (
+                 SELECT 1 FROM page_detected_languages pdl
+                 WHERE pdl.page_id = p.id
+               ) AS has_language_analysis
         FROM pages p
         LEFT JOIN llm_extractions le
             ON le.page_id = p.id AND le.model_tag = %(model_tag)s
@@ -483,7 +487,7 @@ CLAIM_NEXT_PAGE_SQL = """
                 AND (NOT le.content_failure OR le.attempt_count < %(max_attempts)s))
           )
           {source_filter}
-        ORDER BY has_no_extraction DESC, CASE WHEN le.id IS NULL THEN 0 ELSE 1 END, (p.id %% %(worker_hash)s)
+        ORDER BY has_no_extraction DESC, has_language_analysis DESC, CASE WHEN le.id IS NULL THEN 0 ELSE 1 END, (p.id %% %(worker_hash)s)
         LIMIT 1
         FOR UPDATE OF p SKIP LOCKED
     ),

@@ -1418,7 +1418,11 @@ def bulk_errors_map():
         set_canonical_value(conn, field, canonical, new_value, raw_value=raw_value)
     finally:
         conn.close()
-    return redirect(url_for("bulk_errors", field=field, all=("1" if request.form.get("all") == "1" else None)))
+    # Redirect only to the fixed bulk_errors endpoint; the field is re-selected
+    # from the server-side allowlist rather than echoing request data.
+    safe_field = next(f for f in BULK_VALUE_FIELDS if f == field)
+    show_all = "1" if request.form.get("all") == "1" else None
+    return redirect(url_for("bulk_errors", field=safe_field, all=show_all))
 
 
 @app.route("/healthz")

@@ -130,7 +130,7 @@
                 <textarea class="note" data-page="{{ row.page_id }}" data-entry="{{ row.entry_index }}" data-orig="{{ row.reviewer_note or '' }}" aria-label="Note for page {{ row.page_id }} entry {{ row.entry_index + 1 }}">{{ row.reviewer_note or '' }}</textarea>
                 <span class="note-status"></span>
               {%- elif col == 'page_id' -%}
-                <a href="{{ url_for('qc_page', page_id=row.page_id, model_tag=row.model_tag) }}">{{ row.page_id }}</a>
+                <a href="{{ url_for('qc_page', page_id=row.page_id, model_tag=row.model_tag) }}" target="_blank" rel="noopener">{{ row.page_id }}</a>
               {%- else -%}
                 {{ (row[col] | string) | truncate(200) }}
               {%- endif -%}

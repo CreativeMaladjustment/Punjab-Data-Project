@@ -1,0 +1,121 @@
+{% extends "_layout.html" %}
+{% block title %}Bulk errors — Punjab Data Project{% endblock %}
+{% block extra_style %}
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 24px 96px; }
+  h1 { margin: 0 0 8px; font-size: 28px; font-weight: 400; }
+  .lede { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }
+  .tab { padding: 7px 12px; border: 1px solid var(--border); border-radius: 4px; font-size: 13px; text-decoration: none; color: var(--body-text); background: var(--panel); }
+  .tab.on { background: var(--dark); color: var(--panel); border-color: var(--dark); }
+  .opts { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+  .opts a { color: var(--brick); }
+  table.grp { width: 100%; border-collapse: collapse; font-size: 13px; background: var(--panel); border: 1px solid var(--border); }
+  .grp th { text-align: left; font: 500 10.5px/1 "IBM Plex Mono", monospace; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  .grp td { padding: 8px 12px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  .grp .num { font-family: "IBM Plex Mono", monospace; text-align: right; white-space: nowrap; }
+  .grp .canon { font-weight: 500; }
+  .grp a { color: var(--brick); text-decoration: none; }
+  .grp a:hover { text-decoration: underline; }
+  .member { display: flex; justify-content: space-between; gap: 12px; padding: 2px 0; }
+  .member .st { color: var(--muted); font-size: 11px; margin-left: 6px; }
+  details.edit { margin-top: 6px; font-size: 12px; }
+  details.edit summary { cursor: pointer; color: var(--muted); }
+  form.inline { display: flex; gap: 6px; margin-top: 6px; }
+  form.inline input[type=text] { padding: 5px 8px; border: 1px solid var(--input-border); background: var(--input-bg); font-size: 12px; min-width: 160px; }
+  form.inline button { padding: 5px 10px; border: none; background: var(--dark); color: var(--panel); border-radius: 3px; font-size: 12px; cursor: pointer; }
+  .empty { padding: 40px 20px; text-align: center; color: var(--muted); }
+{% endblock %}
+{% block content %}
+<main>
+  <h1>Bulk errors</h1>
+  <p class="lede">Variant spellings and misplaced values across the canonical entries. Click a count to see the entries, with links to the parsed result and the raw page.</p>
+
+  <div class="tabs">
+    {% for f in fields %}
+      <a class="tab {{ 'on' if f == field else '' }}" href="{{ url_for('bulk_errors', field=f) }}">{{ f }}</a>
+    {% endfor %}
+    <a class="tab {{ 'on' if field == 'title_junk' else '' }}" href="{{ url_for('bulk_errors', field='title_junk') }}">title errors</a>
+  </div>
+
+  {% if field == 'title_junk' %}
+    <table class="grp">
+      <tr><th>Pattern</th><th class="num">Entries</th><th class="num">Distinct titles</th></tr>
+      {% for s in summary %}
+        <tr>
+          <td><a href="{{ url_for('bulk_errors', field='title_junk', pattern=s.key) }}">{{ s.label }}</a>{% if s.key == pattern %} ◂{% endif %}</td>
+          <td class="num">{{ '{:,}'.format(s.entries) }}</td>
+          <td class="num">{{ '{:,}'.format(s.distinct_titles) }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+    {% if pattern %}
+      <h2 style="font-weight:400;font-size:20px;margin:28px 0 12px">{{ pattern_label }}</h2>
+      {% if titles %}
+      <table class="grp">
+        <tr><th>Title as extracted</th><th class="num">Count</th></tr>
+        {% for t in titles %}
+          <tr>
+            <td>{{ t.title }}</td>
+            <td class="num"><a href="{{ url_for('bulk_errors_entries', title=t.title) }}">{{ '{:,}'.format(t.n) }}</a></td>
+          </tr>
+        {% endfor %}
+      </table>
+      {% else %}<div class="empty">No titles match this pattern.</div>{% endif %}
+    {% endif %}
+  {% else %}
+    <div class="opts">
+      {% if variants_only %}Showing only values with more than one spelling.
+        <a href="{{ url_for('bulk_errors', field=field, all=1) }}">Show all values</a>
+      {% else %}Showing all values.
+        <a href="{{ url_for('bulk_errors', field=field) }}">Only values with variants</a>
+      {% endif %}
+    </div>
+    {% if groups %}
+    <table class="grp">
+      <tr><th>Canonical value</th><th class="num">Entries</th><th>Spellings found (as extracted)</th></tr>
+      {% for g in groups %}
+        <tr>
+          <td class="canon">
+            <a href="{{ url_for('bulk_errors_entries', field=field, canonical=g.canonical) }}">{{ g.canonical }}</a>
+            <details class="edit">
+              <summary>Rename / merge</summary>
+              <form class="inline" method="post" action="{{ url_for('bulk_errors_map') }}">
+                <input type="hidden" name="field" value="{{ field }}">
+                <input type="hidden" name="canonical" value="{{ g.canonical }}">
+                {% if not variants_only %}<input type="hidden" name="all" value="1">{% endif %}
+                <input type="text" name="new_value" value="{{ g.canonical }}" aria-label="New canonical value">
+                <button type="submit">Set for all {{ g.variants }}</button>
+              </form>
+            </details>
+          </td>
+          <td class="num">{{ '{:,}'.format(g.total) }}</td>
+          <td>
+            {% for m in g.members %}
+              <div class="member">
+                <span><a href="{{ url_for('bulk_errors_entries', field=field, raw=m.raw) }}">{{ m.raw }}</a>{% if m.status == 'approved' %}<span class="st">approved</span>{% endif %}</span>
+                <span class="num">{{ '{:,}'.format(m.n) }}</span>
+              </div>
+              {% if m.raw != g.canonical %}
+              <details class="edit">
+                <summary>Move “{{ m.raw }}” elsewhere</summary>
+                <form class="inline" method="post" action="{{ url_for('bulk_errors_map') }}">
+                  <input type="hidden" name="field" value="{{ field }}">
+                  <input type="hidden" name="canonical" value="{{ g.canonical }}">
+                  <input type="hidden" name="raw_value" value="{{ m.raw }}">
+                  {% if not variants_only %}<input type="hidden" name="all" value="1">{% endif %}
+                  <input type="text" name="new_value" value="{{ m.raw }}" aria-label="Canonical value for this spelling">
+                  <button type="submit">Set</button>
+                </form>
+              </details>
+              {% endif %}
+            {% endfor %}
+          </td>
+        </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+      <div class="empty">Nothing to show — no values with multiple spellings.</div>
+    {% endif %}
+  {% endif %}
+</main>
+{% endblock %}

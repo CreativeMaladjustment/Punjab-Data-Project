@@ -13,6 +13,7 @@ easy to find and check against the actual schema (see supabase/
 migrations/) without wading through Flask routing code.
 """
 import psycopg2.sql
+from psycopg2 import sql
 from psycopg2.extras import Json
 
 TOTAL_PAGES_SQL = """
@@ -1452,3 +1453,160 @@ def fetch_field_value_map(conn, fields, raw_values):
             WHERE field = ANY(%s) AND raw_value = ANY(%s)
         """, (list(fields), list(raw_values)))
         return {(f, r): c for f, r, c in cur.fetchall()}
+
+
+# ---------------------------------------------------------------------------
+# Bulk errors: value-variant groups and junk-title detection over the
+# canonical entries (catalogue_entries_canonical + field_value_map)
+# ---------------------------------------------------------------------------
+
+BULK_VALUE_FIELDS = ["lang", "pubcity", "pcity", "publisher", "printer"]
+
+# Title patterns that indicate a value landed in the wrong field.
+# key -> (label, case-insensitive regex applied to title)
+TITLE_JUNK_PATTERNS = {
+    "price_prefix": ("Starts with 'Price'", r"^\s*price\y"),
+    "copies_prefix": ("Starts with 'Copies'", r"^\s*cop(y|ies)\y"),
+    "ditto": ("Ditto / do.", r"^\s*(ditto|do\.?)\s*$"),
+    "no_letters": ("No letters (digits/punctuation only)", r"^[^[:alpha:]]*$"),
+}
+
+
+def fetch_value_groups(conn, field, variants_only=True, limit=500):
+    """Canonical-value groups for a mapped field.
+    Returns [{canonical, total, variants, members: [{raw, n, status}]}], biggest first."""
+    if field not in BULK_VALUE_FIELDS:
+        raise ValueError(f"unsupported field {field!r}")
+    query = sql.SQL("""
+        SELECT m.canonical_value,
+               SUM(c.n) AS total,
+               COUNT(*) AS variants,
+               json_agg(json_build_object('raw', m.raw_value, 'n', c.n, 'status', m.status)
+                        ORDER BY c.n DESC) AS members
+        FROM (
+            SELECT {col} AS raw, COUNT(*) AS n
+            FROM catalogue_entries_canonical
+            WHERE {col} IS NOT NULL AND btrim({col}) <> ''
+            GROUP BY {col}
+        ) c
+        JOIN field_value_map m ON m.field = %s AND m.raw_value = c.raw
+        GROUP BY m.canonical_value
+        HAVING (NOT %s) OR COUNT(*) > 1
+        ORDER BY SUM(c.n) DESC
+        LIMIT %s
+    """).format(col=sql.Identifier(field))
+    with conn.cursor() as cur:
+        cur.execute(query, (field, variants_only, limit))
+        return [
+            {"canonical": r[0], "total": int(r[1]), "variants": r[2], "members": r[3]}
+            for r in cur.fetchall()
+        ]
+
+
+def fetch_title_junk_summary(conn):
+    """[{key, label, entries, distinct_titles}] for every title junk pattern."""
+    out = []
+    with conn.cursor() as cur:
+        for key, (label, regex) in TITLE_JUNK_PATTERNS.items():
+            cur.execute("""
+                SELECT COUNT(*), COUNT(DISTINCT title)
+                FROM catalogue_entries_canonical
+                WHERE title IS NULL OR title ~* %s
+            """ if key == "no_letters" else """
+                SELECT COUNT(*), COUNT(DISTINCT title)
+                FROM catalogue_entries_canonical
+                WHERE title ~* %s
+            """, (regex,))
+            entries, distinct = cur.fetchone()
+            out.append({"key": key, "label": label, "entries": entries, "distinct_titles": distinct})
+    return out
+
+
+def fetch_title_junk_titles(conn, pattern_key, limit=500):
+    """[{title, n}] distinct junk titles for a pattern, most frequent first."""
+    if pattern_key not in TITLE_JUNK_PATTERNS:
+        raise ValueError(f"unsupported pattern {pattern_key!r}")
+    regex = TITLE_JUNK_PATTERNS[pattern_key][1]
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT title, COUNT(*) AS n
+            FROM catalogue_entries_canonical
+            WHERE title ~* %s
+            GROUP BY title
+            ORDER BY n DESC, title
+            LIMIT %s
+        """, (regex, limit))
+        return [{"title": t, "n": n} for t, n in cur.fetchall()]
+
+
+def fetch_bulk_entries(conn, field, canonical=None, raw=None, title=None, limit=100, offset=0):
+    """Entries behind a group/variant/title, each with ids for linking to the
+    parsed (/qc-canonical/<page_id>) and raw (/qc/<page_id>) views.
+    Exactly one of canonical (all variants of a canonical value), raw (one
+    spelling) or title (one exact title) selects the rows.
+    Returns (rows, total)."""
+    base = sql.SQL("""
+        FROM catalogue_entries_canonical cec
+        {join}
+        WHERE {cond}
+    """)
+    if title is not None:
+        q = base.format(join=sql.SQL(""), cond=sql.SQL("cec.title = %s"))
+        params = (title,)
+        shown = sql.SQL("cec.title")
+    elif field in BULK_VALUE_FIELDS and canonical is not None:
+        col = sql.SQL("cec.{}").format(sql.Identifier(field))
+        q = base.format(
+            join=sql.SQL("JOIN field_value_map m ON m.field = %s AND m.raw_value = ") + col,
+            cond=sql.SQL("m.canonical_value = %s"))
+        params = (field, canonical)
+        shown = col
+    elif field in BULK_VALUE_FIELDS and raw is not None:
+        col = sql.SQL("cec.{}").format(sql.Identifier(field))
+        q = base.format(join=sql.SQL(""), cond=col + sql.SQL(" = %s"))
+        params = (raw,)
+        shown = col
+    else:
+        raise ValueError("no selector")
+
+    with conn.cursor() as cur:
+        cur.execute(sql.SQL("SELECT COUNT(*) ") + q, params)
+        total = cur.fetchone()[0]
+        cur.execute(
+            sql.SQL("SELECT cec.page_id, cec.entry_index, cec.title, ") + shown +
+            sql.SQL(" AS value, cec.model_tag ") + q +
+            sql.SQL(" ORDER BY cec.page_id, cec.entry_index LIMIT %s OFFSET %s"),
+            params + (limit, offset))
+        rows = [
+            {"page_id": r[0], "entry_index": r[1], "title": r[2], "value": r[3], "model_tag": r[4]}
+            for r in cur.fetchall()
+        ]
+    return rows, total
+
+
+def set_canonical_value(conn, field, canonical, new_value, raw_value=None):
+    """Approve a new canonical spelling.
+    raw_value None: every variant currently mapped to `canonical` moves to new_value.
+    raw_value set:  only that one spelling moves to new_value.
+    Returns number of rows changed."""
+    if field not in BULK_VALUE_FIELDS:
+        raise ValueError(f"unsupported field {field!r}")
+    new_value = new_value.strip()
+    if not new_value:
+        raise ValueError("empty canonical value")
+    with conn.cursor() as cur:
+        if raw_value is None:
+            cur.execute("""
+                UPDATE field_value_map
+                SET canonical_value = %s, status = 'approved', updated_at = now()
+                WHERE field = %s AND canonical_value = %s
+            """, (new_value, field, canonical))
+        else:
+            cur.execute("""
+                UPDATE field_value_map
+                SET canonical_value = %s, status = 'approved', updated_at = now()
+                WHERE field = %s AND raw_value = %s
+            """, (new_value, field, raw_value))
+        changed = cur.rowcount
+    conn.commit()
+    return changed

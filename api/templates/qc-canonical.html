@@ -77,9 +77,9 @@
       <div class="meta-item">
         <div class="meta-label">Priority</div>
         <div class="meta-value">
-          {% if data.priority == 1 %}textparse:*
-          {% elif data.priority == 2 %}vision model
-          {% elif data.priority == 3 %}human:review
+          {% if data.priority == 1 %}human:review
+          {% elif data.priority == 2 %}textparse:*
+          {% elif data.priority == 3 %}vision model
           {% else %}unknown{% endif %}
         </div>
       </div>

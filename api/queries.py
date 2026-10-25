@@ -1386,8 +1386,13 @@ def fetch_canonical_qc_page(conn, page_id):
                 pec.model_tag,
                 pec.priority,
                 pec.entry_count,
-                (SELECT COALESCE(json_agg(to_jsonb(cec) ORDER BY cec.entry_index), '[]'::json)
+                (SELECT COALESCE(json_agg(
+                            to_jsonb(cec) || jsonb_build_object(
+                                'title_is_english', tt.is_english,
+                                'title_translation', tt.english_translation
+                            ) ORDER BY cec.entry_index), '[]'::json)
                  FROM catalogue_entries_canonical cec
+                 LEFT JOIN title_translations tt ON tt.original_title = cec.title
                  WHERE cec.page_id = pec.page_id) AS entries
             FROM page_extractions_canonical pec
             WHERE pec.page_id = %s

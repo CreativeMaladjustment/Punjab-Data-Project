@@ -1386,11 +1386,11 @@ def fetch_canonical_qc_page(conn, page_id):
                 pec.model_tag,
                 pec.priority,
                 pec.entry_count,
-                json_agg(to_jsonb(ce) ORDER BY ce.entry_index) as entries
+                (SELECT COALESCE(json_agg(to_jsonb(cec) ORDER BY cec.entry_index), '[]'::json)
+                 FROM catalogue_entries_canonical cec
+                 WHERE cec.page_id = pec.page_id) AS entries
             FROM page_extractions_canonical pec
-            LEFT JOIN catalogue_entries ce ON ce.extraction_id = pec.extraction_id
             WHERE pec.page_id = %s
-            GROUP BY pec.page_id, pec.extraction_id, pec.model_tag, pec.priority, pec.entry_count
         """, (page_id,))
 
         row = cur.fetchone()

@@ -44,10 +44,13 @@ Vercel-account login. Two env vars are required for this:
                          import time.
 """
 import functools
+import logging
 import os
 import re
 import sys
 from datetime import timedelta
+
+import requests
 
 # Vercel's Python runtime imports this file directly by path (see
 # vc_init.py in its traceback), which does not add this file's own
@@ -392,6 +395,8 @@ app = Flask(
     __name__,
     template_folder=os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"),
 )
+
+logger = logging.getLogger(__name__)
 
 # app.secret_key is what Flask/itsdangerous signs the session cookie with.
 # Read (not generated) so it's stable across cold starts -- a randomly
@@ -1101,26 +1106,122 @@ def qc_canonical_index():
 @app.route("/qc-canonical/<int:page_id>")
 @login_required
 def qc_canonical_page(page_id):
-    """Display canonical extraction + catalogue entries for manual review."""
-    conn = db_connect()
-    try:
-        from api.queries import fetch_canonical_qc_page, count_canonical_qc_pages
+    """Display canonical extraction + catalogue entries for manual review.
+    Uses REST API + gzip compression for database queries."""
+    import requests
 
-        data = fetch_canonical_qc_page(conn, page_id)
-        if not data:
-            abort(404)
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_ANON_KEY")
 
-        total_canonical = count_canonical_qc_pages(conn)
+    if not supabase_url or not supabase_key:
+        # Fallback to direct connection if REST API not configured
+        conn = db_connect()
+        try:
+            from api.queries import fetch_canonical_qc_page, count_canonical_qc_pages
+            data = fetch_canonical_qc_page(conn, page_id)
+            if not data:
+                abort(404)
+            total_canonical = count_canonical_qc_pages(conn)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) FROM page_extractions_canonical WHERE page_id <= %s
+                """, (page_id,))
+                position = cur.fetchone()[0]
+        finally:
+            conn.close()
+    else:
+        # Use REST API + compression
+        headers = {
+            "Authorization": f"Bearer {supabase_key}",
+            "Accept-Encoding": "gzip",
+            "Content-Type": "application/json",
+        }
 
-        # Calculate position in canonical set
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT COUNT(*) FROM page_extractions_canonical WHERE page_id <= %s
-        """, (page_id,))
-        position = cur.fetchone()[0]
+        # Fetch canonical extraction + entries
+        try:
+            response = requests.get(
+                f"{supabase_url}/rest/v1/page_extractions_canonical?page_id=eq.{page_id}&select=*",
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            canonical_rows = response.json()
 
-    finally:
-        conn.close()
+            if not canonical_rows:
+                abort(404)
+
+            canonical = canonical_rows[0]
+
+            # Fetch catalogue entries
+            response = requests.get(
+                f"{supabase_url}/rest/v1/catalogue_entries?extraction_id=eq.{canonical['extraction_id']}&order=entry_index.asc&select=*",
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            entries = response.json()
+
+            data = {
+                "page_id": canonical["page_id"],
+                "extraction_id": canonical["extraction_id"],
+                "model_tag": canonical["model_tag"],
+                "priority": canonical["priority"],
+                "entry_count": canonical["entry_count"],
+                "entries": entries,
+                "prev_id": None,
+                "next_id": None,
+            }
+
+            # Fetch prev/next page ids
+            response = requests.get(
+                f"{supabase_url}/rest/v1/page_extractions_canonical?page_id=lt.{page_id}&order=page_id.desc&limit=1&select=page_id",
+                headers=headers,
+                timeout=10
+            )
+            if response.ok and response.json():
+                data["prev_id"] = response.json()[0]["page_id"]
+
+            response = requests.get(
+                f"{supabase_url}/rest/v1/page_extractions_canonical?page_id=gt.{page_id}&order=page_id.asc&limit=1&select=page_id",
+                headers=headers,
+                timeout=10
+            )
+            if response.ok and response.json():
+                data["next_id"] = response.json()[0]["page_id"]
+
+            # Get total count
+            response = requests.get(
+                f"{supabase_url}/rest/v1/page_extractions_canonical?select=count()&count=exact",
+                headers=headers,
+                timeout=10
+            )
+            total_canonical = int(response.headers.get("content-range", "0-0/0").split("/")[-1]) if response.ok else 0
+
+            # Get position
+            response = requests.get(
+                f"{supabase_url}/rest/v1/page_extractions_canonical?page_id=lte.{page_id}&select=count()&count=exact",
+                headers=headers,
+                timeout=10
+            )
+            position = int(response.headers.get("content-range", "0-0/0").split("/")[-1]) if response.ok else 1
+
+        except requests.RequestException as e:
+            logger.warning(f"REST API failed, falling back to direct connection: {e}")
+            # Fall back to direct connection
+            conn = db_connect()
+            try:
+                from api.queries import fetch_canonical_qc_page, count_canonical_qc_pages
+                data = fetch_canonical_qc_page(conn, page_id)
+                if not data:
+                    abort(404)
+                total_canonical = count_canonical_qc_pages(conn)
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT COUNT(*) FROM page_extractions_canonical WHERE page_id <= %s
+                    """, (page_id,))
+                    position = cur.fetchone()[0]
+            finally:
+                conn.close()
 
     return render_template("qc-canonical.html",
                          page_id=page_id,

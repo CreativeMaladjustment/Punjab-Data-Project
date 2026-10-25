@@ -1,0 +1,99 @@
+name: Delete suspicious OCR records (meta-content)
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "DELETE_SUSPICIOUS_OCR" to confirm deletion'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  delete_ocr:
+    runs-on: ubuntu-latest
+    environment: b2-upload
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate confirmation
+        env:
+          CONFIRM_INPUT: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM_INPUT" != "DELETE_SUSPICIOUS_OCR" ]; then
+            echo "❌ Confirmation failed. Must enter exactly: DELETE_SUSPICIOUS_OCR"
+            exit 1
+          fi
+          echo "✅ Confirmed: will delete 3,268 suspicious OCR records"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install psycopg2-binary
+
+      - name: Delete suspicious OCR records
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          python3 << 'SCRIPT'
+          import os
+          import psycopg2
+
+          conn = psycopg2.connect(os.environ["SUPABASE_DB_URL"])
+          cur = conn.cursor()
+
+          print("\n" + "="*80)
+          print("DELETING: Suspicious OCR Records (Meta-content > 10K)")
+          print("="*80)
+
+          cur.execute("""
+            DELETE FROM page_ocr_text
+            WHERE id IN (
+              WITH suspicious AS (
+                SELECT pot.id
+                FROM page_ocr_text pot
+                WHERE pot.status = 'success'
+                  AND LENGTH(pot.raw_text) > 10000
+                  AND (
+                    pot.raw_text ILIKE '%transcribe the text%'
+                    OR pot.raw_text ILIKE '%provided image%'
+                    OR pot.raw_text ILIKE '%guidelines%'
+                    OR pot.raw_text ILIKE '%user wants me%'
+                    OR pot.raw_text ILIKE '%image analysis%'
+                    OR pot.raw_text ILIKE '%transcription plan%'
+                    OR pot.raw_text ILIKE '%correction/review%'
+                  )
+              )
+              SELECT id FROM suspicious
+            )
+          """)
+          deleted = cur.rowcount
+          conn.commit()
+
+          print(f"✅ Deleted {deleted} suspicious OCR records")
+
+          cur.execute("SELECT COUNT(*) FROM page_ocr_text WHERE status = 'success'")
+          remaining = cur.fetchone()[0]
+          print(f"   Remaining successful OCR records: {remaining}")
+          print("="*80 + "\n")
+
+          conn.close()
+          SCRIPT
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Suspicious OCR Deletion Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Deleted 3,268 OCR records (>10K) containing:" >> $GITHUB_STEP_SUMMARY
+          echo "- Transcription instructions" >> $GITHUB_STEP_SUMMARY
+          echo "- Image analysis meta-content" >> $GITHUB_STEP_SUMMARY
+          echo "- Guidelines text" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "These will be re-OCR'd on next workflow run." >> $GITHUB_STEP_SUMMARY

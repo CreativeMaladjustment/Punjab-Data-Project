@@ -1109,6 +1109,7 @@ def qc_canonical_page(page_id):
     """Display canonical extraction + catalogue entries for manual review.
     Uses REST API + gzip compression for database queries."""
     import requests
+    from urllib.parse import urljoin, urlencode, urlparse
 
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_ANON_KEY")
@@ -1130,6 +1131,12 @@ def qc_canonical_page(page_id):
         finally:
             conn.close()
     else:
+        # Validate supabase_url is a Supabase domain to prevent SSRF
+        parsed = urlparse(supabase_url)
+        if not parsed.netloc.endswith('.supabase.co'):
+            logger.error(f"Invalid SUPABASE_URL domain: {parsed.netloc}")
+            abort(500)
+
         # Use REST API + compression
         headers = {
             "Authorization": f"Bearer {supabase_key}",
@@ -1139,8 +1146,9 @@ def qc_canonical_page(page_id):
 
         # Fetch canonical extraction + entries
         try:
+            canonical_url = urljoin(supabase_url, "/rest/v1/page_extractions_canonical")
             response = requests.get(
-                f"{supabase_url}/rest/v1/page_extractions_canonical?page_id=eq.{page_id}&select=*",
+                f"{canonical_url}?{urlencode({'page_id': f'eq.{page_id}', 'select': '*'})}",
                 headers=headers,
                 timeout=10
             )
@@ -1153,8 +1161,9 @@ def qc_canonical_page(page_id):
             canonical = canonical_rows[0]
 
             # Fetch catalogue entries
+            entries_url = urljoin(supabase_url, "/rest/v1/catalogue_entries")
             response = requests.get(
-                f"{supabase_url}/rest/v1/catalogue_entries?extraction_id=eq.{canonical['extraction_id']}&order=entry_index.asc&select=*",
+                f"{entries_url}?{urlencode({'extraction_id': f'eq.{canonical[\"extraction_id\"]}', 'order': 'entry_index.asc', 'select': '*'})}",
                 headers=headers,
                 timeout=10
             )
@@ -1174,7 +1183,7 @@ def qc_canonical_page(page_id):
 
             # Fetch prev/next page ids
             response = requests.get(
-                f"{supabase_url}/rest/v1/page_extractions_canonical?page_id=lt.{page_id}&order=page_id.desc&limit=1&select=page_id",
+                f"{canonical_url}?{urlencode({'page_id': f'lt.{page_id}', 'order': 'page_id.desc', 'limit': '1', 'select': 'page_id'})}",
                 headers=headers,
                 timeout=10
             )
@@ -1182,7 +1191,7 @@ def qc_canonical_page(page_id):
                 data["prev_id"] = response.json()[0]["page_id"]
 
             response = requests.get(
-                f"{supabase_url}/rest/v1/page_extractions_canonical?page_id=gt.{page_id}&order=page_id.asc&limit=1&select=page_id",
+                f"{canonical_url}?{urlencode({'page_id': f'gt.{page_id}', 'order': 'page_id.asc', 'limit': '1', 'select': 'page_id'})}",
                 headers=headers,
                 timeout=10
             )
@@ -1191,7 +1200,7 @@ def qc_canonical_page(page_id):
 
             # Get total count
             response = requests.get(
-                f"{supabase_url}/rest/v1/page_extractions_canonical?select=count()&count=exact",
+                f"{canonical_url}?{urlencode({'select': 'count()', 'count': 'exact'})}",
                 headers=headers,
                 timeout=10
             )
@@ -1199,7 +1208,7 @@ def qc_canonical_page(page_id):
 
             # Get position
             response = requests.get(
-                f"{supabase_url}/rest/v1/page_extractions_canonical?page_id=lte.{page_id}&select=count()&count=exact",
+                f"{canonical_url}?{urlencode({'page_id': f'lte.{page_id}', 'select': 'count()', 'count': 'exact'})}",
                 headers=headers,
                 timeout=10
             )

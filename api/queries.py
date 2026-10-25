@@ -197,13 +197,8 @@ REVIEWED_PER_MODEL_SQL = """
 # a page a human corrected by hand, with no model ever succeeding on it,
 # is still a page with data extracted from it.
 PAGES_ANY_EXTRACTED_SQL = """
-    SELECT count(DISTINCT le.page_id)
-    FROM llm_extractions le
-    JOIN pages p ON p.id = le.page_id
-    WHERE le.status = 'success'
-      AND le.model_tag <> ALL(%(gemma_ocr_only_tags)s)
-      AND p.image_uploaded_at IS NOT NULL
-      AND p.excluded_at IS NULL
+    SELECT COUNT(*)
+    FROM page_extractions_canonical
 """
 
 # Detailed progress for the two primary extraction models
@@ -407,7 +402,7 @@ def fetch_dashboard_data(conn):
         cur.execute(TOTAL_PAGES_SQL)
         (total_pages,) = cur.fetchone()
 
-        cur.execute(PAGES_ANY_EXTRACTED_SQL, {"gemma_ocr_only_tags": list(GEMMA_OCR_ONLY_TAGS)})
+        cur.execute(PAGES_ANY_EXTRACTED_SQL)
         (any_extracted_pages,) = cur.fetchone()
 
         cur.execute(

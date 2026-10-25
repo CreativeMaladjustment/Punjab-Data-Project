@@ -1081,6 +1081,54 @@ def qc_save_edit():
     )
 
 
+@app.route("/qc-canonical")
+@login_required
+def qc_canonical_index():
+    """Show first page with a canonical extraction."""
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MIN(page_id) FROM page_extractions_canonical")
+            first_id = cur.fetchone()[0]
+    finally:
+        conn.close()
+
+    if first_id is None:
+        return redirect(url_for("qc_index"))
+    return redirect(url_for("qc_canonical_page", page_id=first_id))
+
+
+@app.route("/qc-canonical/<int:page_id>")
+@login_required
+def qc_canonical_page(page_id):
+    """Display canonical extraction + catalogue entries for manual review."""
+    conn = db_connect()
+    try:
+        from api.queries import fetch_canonical_qc_page, count_canonical_qc_pages
+
+        data = fetch_canonical_qc_page(conn, page_id)
+        if not data:
+            abort(404)
+
+        total_canonical = count_canonical_qc_pages(conn)
+
+        # Calculate position in canonical set
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) FROM page_extractions_canonical WHERE page_id <= %s
+        """, (page_id,))
+        position = cur.fetchone()[0]
+
+    finally:
+        conn.close()
+
+    return render_template("qc-canonical.html",
+                         page_id=page_id,
+                         data=data,
+                         position=position,
+                         total=total_canonical)
+
+
 @app.route("/healthz")
 def healthz():
     return {"ok": True}

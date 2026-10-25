@@ -1417,14 +1417,16 @@ def fetch_canonical_qc_page(conn, page_id):
             WHERE page_id < %s
             ORDER BY page_id DESC LIMIT 1
         """, (page_id,))
-        prev_id = cur.fetchone()[0] if cur.fetchone() else None
+        row = cur.fetchone()
+        prev_id = row[0] if row else None
 
         cur.execute("""
             SELECT page_id FROM page_extractions_canonical
             WHERE page_id > %s
             ORDER BY page_id ASC LIMIT 1
         """, (page_id,))
-        next_id = cur.fetchone()[0] if cur.fetchone() else None
+        row = cur.fetchone()
+        next_id = row[0] if row else None
 
         return {
             "page_id": page_id,

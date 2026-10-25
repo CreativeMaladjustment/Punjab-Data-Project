@@ -1,0 +1,100 @@
+name: Apply Supabase migrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "APPLY_MIGRATIONS" to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  apply_migrations:
+    runs-on: ubuntu-latest
+    environment: b2-upload
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate confirmation
+        env:
+          CONFIRM_INPUT: ${{ inputs.confirm }}
+        run: |
+          if [ "$CONFIRM_INPUT" != "APPLY_MIGRATIONS" ]; then
+            echo "❌ Confirmation failed. Must enter exactly: APPLY_MIGRATIONS"
+            exit 1
+          fi
+          echo "✅ Confirmed: will apply pending migrations"
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install psycopg2-binary
+
+      - name: Apply migrations
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          python3 << 'SCRIPT'
+          import os
+          import glob
+          import psycopg2
+
+          db_url = os.environ.get("SUPABASE_DB_URL")
+          if not db_url:
+              print("ERROR: SUPABASE_DB_URL not set", file=sys.stderr)
+              exit(1)
+
+          conn = psycopg2.connect(db_url)
+          cur = conn.cursor()
+
+          print("\n" + "="*80)
+          print("APPLYING MIGRATIONS")
+          print("="*80)
+
+          migration_files = sorted(glob.glob("supabase/migrations/*.sql"))
+
+          for migration_file in migration_files:
+              filename = os.path.basename(migration_file)
+              print(f"\n📋 {filename}")
+
+              try:
+                  with open(migration_file, 'r') as f:
+                      sql = f.read()
+
+                  cur.execute(sql)
+                  conn.commit()
+                  print(f"  ✅ Applied")
+              except psycopg2.errors.UniqueViolation as e:
+                  # Table/function already exists - idempotent, safe to skip
+                  conn.rollback()
+                  print(f"  ℹ️  Already exists (idempotent) - skipped")
+              except Exception as e:
+                  conn.rollback()
+                  print(f"  ❌ Error: {type(e).__name__}: {str(e)[:200]}")
+                  raise
+
+          conn.close()
+          print("\n" + "="*80)
+          print("✅ All migrations applied successfully!")
+          print("="*80 + "\n")
+          SCRIPT
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Migrations Applied" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Applied all pending migrations from supabase/migrations/" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Created:" >> $GITHUB_STEP_SUMMARY
+          echo "- \`page_extractions_canonical\` table" >> $GITHUB_STEP_SUMMARY
+          echo "- \`select_canonical_extraction()\` function" >> $GITHUB_STEP_SUMMARY
+          echo "- \`refresh_canonical_extractions()\` function" >> $GITHUB_STEP_SUMMARY
+          echo "- Automatic triggers for keeping data in sync" >> $GITHUB_STEP_SUMMARY

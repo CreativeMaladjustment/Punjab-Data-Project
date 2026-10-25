@@ -1148,7 +1148,8 @@ def qc_canonical_page(page_id):
         try:
             canonical_url = urljoin(supabase_url, "/rest/v1/page_extractions_canonical")
             response = requests.get(
-                f"{canonical_url}?{urlencode({'page_id': f'eq.{page_id}', 'select': '*'})}",
+                canonical_url,
+                params={'page_id': f'eq.{page_id}', 'select': '*'},
                 headers=headers,
                 timeout=10
             )
@@ -1163,7 +1164,8 @@ def qc_canonical_page(page_id):
             # Fetch catalogue entries
             entries_url = urljoin(supabase_url, "/rest/v1/catalogue_entries")
             response = requests.get(
-                f"{entries_url}?{urlencode({'extraction_id': f'eq.{canonical[\"extraction_id\"]}', 'order': 'entry_index.asc', 'select': '*'})}",
+                entries_url,
+                params={'extraction_id': f'eq.{canonical["extraction_id"]}', 'order': 'entry_index.asc', 'select': '*'},
                 headers=headers,
                 timeout=10
             )
@@ -1183,7 +1185,8 @@ def qc_canonical_page(page_id):
 
             # Fetch prev/next page ids
             response = requests.get(
-                f"{canonical_url}?{urlencode({'page_id': f'lt.{page_id}', 'order': 'page_id.desc', 'limit': '1', 'select': 'page_id'})}",
+                canonical_url,
+                params={'page_id': f'lt.{page_id}', 'order': 'page_id.desc', 'limit': '1', 'select': 'page_id'},
                 headers=headers,
                 timeout=10
             )
@@ -1191,7 +1194,8 @@ def qc_canonical_page(page_id):
                 data["prev_id"] = response.json()[0]["page_id"]
 
             response = requests.get(
-                f"{canonical_url}?{urlencode({'page_id': f'gt.{page_id}', 'order': 'page_id.asc', 'limit': '1', 'select': 'page_id'})}",
+                canonical_url,
+                params={'page_id': f'gt.{page_id}', 'order': 'page_id.asc', 'limit': '1', 'select': 'page_id'},
                 headers=headers,
                 timeout=10
             )
@@ -1200,7 +1204,8 @@ def qc_canonical_page(page_id):
 
             # Get total count
             response = requests.get(
-                f"{canonical_url}?{urlencode({'select': 'count()', 'count': 'exact'})}",
+                canonical_url,
+                params={'select': 'count()', 'count': 'exact'},
                 headers=headers,
                 timeout=10
             )
@@ -1208,7 +1213,8 @@ def qc_canonical_page(page_id):
 
             # Get position
             response = requests.get(
-                f"{canonical_url}?{urlencode({'page_id': f'lte.{page_id}', 'select': 'count()', 'count': 'exact'})}",
+                canonical_url,
+                params={'page_id': f'lte.{page_id}', 'select': 'count()', 'count': 'exact'},
                 headers=headers,
                 timeout=10
             )

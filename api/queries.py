@@ -1610,3 +1610,55 @@ def set_canonical_value(conn, field, canonical, new_value, raw_value=None):
         changed = cur.rowcount
     conn.commit()
     return changed
+
+
+# ---------------------------------------------------------------------------
+# Human notes on canonical entries
+# ---------------------------------------------------------------------------
+
+MAX_ENTRY_NOTE_LENGTH = 5000
+
+
+def save_canonical_entry_notes(conn, notes):
+    """Upsert (or, for an empty note, delete) notes for canonical entries.
+    `notes` is [{page_id, entry_index, note}]. Each saved note snapshots the
+    entry's current canonical record (extraction, model, priority, serial,
+    reg, title) so it can be traced back even after the canonical row is
+    rebuilt. Entries that no longer exist are skipped. Returns the number of
+    notes written or cleared."""
+    saved = 0
+    with conn.cursor() as cur:
+        for n in notes:
+            page_id, entry_index = n["page_id"], n["entry_index"]
+            text = (n.get("note") or "").strip()[:MAX_ENTRY_NOTE_LENGTH]
+            if not text:
+                cur.execute(
+                    "DELETE FROM canonical_entry_notes WHERE page_id = %s AND entry_index = %s",
+                    (page_id, entry_index),
+                )
+                saved += cur.rowcount
+                continue
+            cur.execute(
+                """
+                INSERT INTO canonical_entry_notes
+                    (page_id, entry_index, note, source_extraction_id, model_tag,
+                     priority, serial, reg, title)
+                SELECT cec.page_id, cec.entry_index, %s, cec.source_extraction_id,
+                       cec.model_tag, cec.priority, cec.serial, cec.reg, cec.title
+                FROM catalogue_entries_canonical cec
+                WHERE cec.page_id = %s AND cec.entry_index = %s
+                ON CONFLICT (page_id, entry_index) DO UPDATE SET
+                    note = EXCLUDED.note,
+                    source_extraction_id = EXCLUDED.source_extraction_id,
+                    model_tag = EXCLUDED.model_tag,
+                    priority = EXCLUDED.priority,
+                    serial = EXCLUDED.serial,
+                    reg = EXCLUDED.reg,
+                    title = EXCLUDED.title,
+                    updated_at = now()
+                """,
+                (text, page_id, entry_index),
+            )
+            saved += cur.rowcount
+    conn.commit()
+    return saved

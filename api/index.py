@@ -82,6 +82,7 @@ from queries import (
     fetch_title_junk_summary,
     fetch_title_junk_titles,
     fetch_value_groups,
+    save_canonical_entry_notes,
     set_canonical_value,
     fetch_catalogue_entries_summaries,
     fetch_corpus_stats,
@@ -1197,6 +1198,34 @@ def qc_canonical_index():
         filters=filters, sort_col=sort_col, sort_dir=sort_dir, page=page, per_page=per_page,
         total=total, total_pages=total_pages, page_sizes=TABLE_PAGE_SIZES,
         link_params={f"filter_{c}": v for c, v in filters.items()}, missing_view=False)
+
+
+@app.route("/qc-canonical/notes", methods=["POST"])
+@login_required
+def qc_canonical_notes():
+    """Save reviewer notes. JSON body: {"notes": [{"page_id", "entry_index", "note"}]}
+    -- one item for an autosave on field exit, many for "Save all"."""
+    payload = request.get_json(silent=True) or {}
+    items = payload.get("notes")
+    if not isinstance(items, list) or not items or len(items) > 500:
+        abort(400)
+    notes = []
+    for it in items:
+        try:
+            page_id = int(it["page_id"])
+            entry_index = int(it["entry_index"])
+        except (KeyError, TypeError, ValueError):
+            abort(400)
+        note = it.get("note")
+        if note is not None and not isinstance(note, str):
+            abort(400)
+        notes.append({"page_id": page_id, "entry_index": entry_index, "note": note or ""})
+    conn = db_connect()
+    try:
+        saved = save_canonical_entry_notes(conn, notes)
+    finally:
+        conn.close()
+    return {"saved": saved}
 
 
 @app.route("/qc-canonical/<int:page_id>")

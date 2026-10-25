@@ -726,7 +726,7 @@ CATALOGUE_ENTRY_JSON_FIELDS = {"flags"}
 # needs_review=True shows only pages with a non-human extraction that's either successful with no
 # qc_reviews verdict yet, or a capped content failure (content_failed_capped).
 # not_extracted=True shows only pages with no non-human extractions at all.
-# large_pages=True shows only pages with OCR text > 50K characters.
+# large_pages=True shows only pages with OCR text > 10K characters.
 # All are spliced in as short-circuit-on-bind-parameter idioms (NOT %(needs_review)s OR EXISTS...
 # and NOT %(not_extracted)s OR NOT EXISTS...) so when False they always match.
 # Each query below is its own fully static string literal rather than fragments joined with `+`
@@ -763,7 +763,7 @@ QC_FIRST_ID_SQL = """
         SELECT 1 FROM page_ocr_text pot
         WHERE pot.page_id = p.id
           AND pot.status = 'success'
-          AND LENGTH(pot.raw_text) > 50000
+          AND LENGTH(pot.raw_text) > 10000
       ))
 """
 
@@ -799,7 +799,7 @@ QC_NEXT_ID_SQL = """
         SELECT 1 FROM page_ocr_text pot
         WHERE pot.page_id = p.id
           AND pot.status = 'success'
-          AND LENGTH(pot.raw_text) > 50000
+          AND LENGTH(pot.raw_text) > 10000
       ))
 """
 
@@ -835,7 +835,7 @@ QC_PREV_ID_SQL = """
         SELECT 1 FROM page_ocr_text pot
         WHERE pot.page_id = p.id
           AND pot.status = 'success'
-          AND LENGTH(pot.raw_text) > 50000
+          AND LENGTH(pot.raw_text) > 10000
       ))
 """
 
@@ -879,7 +879,7 @@ QC_POSITION_SQL = """
         SELECT 1 FROM page_ocr_text pot
         WHERE pot.page_id = p.id
           AND pot.status = 'success'
-          AND LENGTH(pot.raw_text) > 50000
+          AND LENGTH(pot.raw_text) > 10000
       ))
 """
 
@@ -919,7 +919,7 @@ QC_ID_AT_RANK_SQL = """
         SELECT 1 FROM page_ocr_text pot
         WHERE pot.page_id = p.id
           AND pot.status = 'success'
-          AND LENGTH(pot.raw_text) > 50000
+          AND LENGTH(pot.raw_text) > 10000
       ))
     ORDER BY id
     OFFSET %(offset)s LIMIT 1
@@ -1027,7 +1027,7 @@ def fetch_qc_page(conn, page_id, model_tag=None, needs_review=False, not_extract
         # see QC_NEXT_ID_SQL/QC_PREV_ID_SQL's own "needs review" clause.
         # not_extracted, when set, additionally skips to pages with no
         # non-human extractions yet.
-        # large_pages, when set, additionally skips to pages with OCR text > 50K chars.
+        # large_pages, when set, additionally skips to pages with OCR text > 10K chars.
         nav_params = {
             "page_id": page_id,
             "needs_review": needs_review,

@@ -523,10 +523,8 @@ def fetch_dashboard_data(conn):
 # HUMAN_MODEL_TAG sorted first picks exactly one extraction_id per page
 # under that rule.
 _CANONICAL_EXTRACTION_PER_PAGE_SQL = """
-    SELECT DISTINCT ON (page_id) page_id, id AS extraction_id
-    FROM llm_extractions
-    WHERE status = 'success' AND model_tag IN (%(human_tag)s, %(primary_tag)s)
-    ORDER BY page_id, (model_tag = %(human_tag)s) DESC
+    SELECT page_id, extraction_id
+    FROM page_extractions_canonical
 """
 
 # copies is stored as free text, not a number (see supabase/migrations'
@@ -571,7 +569,7 @@ def fetch_corpus_stats(conn):
     so callers get a well-formed all-zero dict rather than needing to
     special-case a NULL row."""
     with conn.cursor() as cur:
-        cur.execute(CORPUS_LIVE_STATS_SQL, {"human_tag": HUMAN_MODEL_TAG, "primary_tag": PRIMARY_MODEL_TAG})
+        cur.execute(CORPUS_LIVE_STATS_SQL)
         cols = [d.name for d in cur.description]
         row = dict(zip(cols, cur.fetchone()))
     return {
@@ -1370,3 +1368,78 @@ def fetch_catalogue_entries_summaries(conn):
             results[field] = [{"value": row[0], "count": row[1]} for row in cur.fetchall()]
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Canonical QC page (reviewing the winning extraction for each page)
+# ---------------------------------------------------------------------------
+
+def fetch_canonical_qc_page(conn, page_id):
+    """Fetch the canonical extraction + catalogue entries for a page for review.
+    Returns {page_id, extraction_id, model_tag, priority, entry_count, entries, prev_id, next_id}
+    or None if not found."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT
+                pec.page_id,
+                pec.extraction_id,
+                pec.model_tag,
+                pec.priority,
+                pec.entry_count,
+                json_agg(json_build_object(
+                    'id', ce.id,
+                    'entry_index', ce.entry_index,
+                    'title', ce.title,
+                    'author', ce.author,
+                    'publisher', ce.publisher,
+                    'pubcity', ce.pubcity,
+                    'date', ce.date,
+                    'copies', ce.copies,
+                    'price', ce.price,
+                    'lang', ce.lang,
+                    'notes', ce.notes
+                ) ORDER BY ce.entry_index) as entries
+            FROM page_extractions_canonical pec
+            LEFT JOIN catalogue_entries ce ON ce.extraction_id = pec.extraction_id
+            WHERE pec.page_id = %s
+            GROUP BY pec.page_id, pec.extraction_id, pec.model_tag, pec.priority, pec.entry_count
+        """, (page_id,))
+
+        row = cur.fetchone()
+        if not row:
+            return None
+
+        page_id, extraction_id, model_tag, priority, entry_count, entries = row
+
+        # Get prev/next page ids
+        cur.execute("""
+            SELECT page_id FROM page_extractions_canonical
+            WHERE page_id < %s
+            ORDER BY page_id DESC LIMIT 1
+        """, (page_id,))
+        prev_id = cur.fetchone()[0] if cur.fetchone() else None
+
+        cur.execute("""
+            SELECT page_id FROM page_extractions_canonical
+            WHERE page_id > %s
+            ORDER BY page_id ASC LIMIT 1
+        """, (page_id,))
+        next_id = cur.fetchone()[0] if cur.fetchone() else None
+
+        return {
+            "page_id": page_id,
+            "extraction_id": extraction_id,
+            "model_tag": model_tag,
+            "priority": priority,
+            "entry_count": entry_count,
+            "entries": [e for e in (entries or []) if e.get('id')],
+            "prev_id": prev_id,
+            "next_id": next_id,
+        }
+
+
+def count_canonical_qc_pages(conn):
+    """Total number of pages with canonical extractions."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM page_extractions_canonical")
+        return cur.fetchone()[0]

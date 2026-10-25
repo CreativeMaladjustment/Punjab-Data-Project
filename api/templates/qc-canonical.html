@@ -1,0 +1,158 @@
+{% extends "_layout.html" %}
+{% block title %}Canonical extraction review — Punjab Data Project{% endblock %}
+{% block extra_style %}
+  main { max-width: 1000px; margin: 0 auto; padding: 32px 24px 96px; }
+  .page-header { display: flex; justify-content: space-between; align-items: baseline; gap: 24px; margin-bottom: 32px; flex-wrap: wrap; }
+  .page-header h1 { margin: 0; font-size: 28px; font-weight: 400; }
+  .nav-info { font-size: 12px; color: var(--muted); }
+
+  .extraction-block { background: var(--panel); border: 1px solid var(--border); padding: 24px; margin-bottom: 24px; }
+  .extraction-meta { display: flex; gap: 20px; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .meta-item { display: flex; flex-direction: column; gap: 4px; }
+  .meta-label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .meta-value { font-family: "IBM Plex Mono", monospace; font-weight: 500; }
+
+  .qc-link { display: inline-block; margin-top: 12px; padding: 8px 16px; background: var(--border); color: var(--ink); text-decoration: none; border-radius: 4px; font-size: 12px; }
+  .qc-link:hover { background: var(--border-soft); }
+
+  .entries-list { margin-top: 24px; }
+  .entries-header { font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); margin-bottom: 16px; }
+  .entry { background: rgba(0,0,0,0.02); border: 1px solid var(--border-soft); padding: 16px; margin-bottom: 12px; border-radius: 4px; }
+  .entry-index { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+  .entry-title { font-size: 15px; font-weight: 500; margin-bottom: 12px; }
+  .entry-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; font-size: 13px; }
+  .entry-field { display: flex; flex-direction: column; gap: 4px; }
+  .field-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .field-value { font-family: "IBM Plex Mono", monospace; word-break: break-all; }
+
+  .nav-buttons { display: flex; gap: 12px; margin-top: 32px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .nav-btn { padding: 10px 16px; background: var(--border); color: var(--ink); text-decoration: none; border-radius: 4px; font-size: 13px; border: none; cursor: pointer; }
+  .nav-btn:hover { background: var(--border-soft); }
+  .nav-btn.disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .empty-message { padding: 40px 20px; text-align: center; color: var(--muted); }
+{% endblock %}
+{% block content %}
+<main>
+  <div class="page-header">
+    <h1>Canonical extraction review</h1>
+    <div class="nav-info">
+      Page {{ position }}/{{ total }}
+    </div>
+  </div>
+
+  <div class="extraction-block">
+    <div class="extraction-meta">
+      <div class="meta-item">
+        <div class="meta-label">Page ID</div>
+        <div class="meta-value">{{ page_id }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="meta-label">Source Model</div>
+        <div class="meta-value">{{ data.model_tag }}</div>
+      </div>
+      <div class="meta-item">
+        <div class="meta-label">Priority</div>
+        <div class="meta-value">
+          {% if data.priority == 1 %}textparse:*
+          {% elif data.priority == 2 %}vision model
+          {% elif data.priority == 3 %}human:review
+          {% else %}unknown{% endif %}
+        </div>
+      </div>
+      <div class="meta-item">
+        <div class="meta-label">Entries</div>
+        <div class="meta-value">{{ data.entry_count or 0 }}</div>
+      </div>
+    </div>
+
+    <a href="{{ url_for('qc_page', page_id=page_id) }}" class="qc-link">
+      → View in QC review (image + extraction)
+    </a>
+  </div>
+
+  {% if data.entries %}
+    <div class="entries-list">
+      <div class="entries-header">{{ data.entries|length }} Catalogue {{ 'Entry' if data.entries|length == 1 else 'Entries' }}</div>
+
+      {% for entry in data.entries %}
+        <div class="entry">
+          <div class="entry-index">Entry {{ entry.entry_index + 1 }}</div>
+          {% if entry.title %}
+            <div class="entry-title">{{ entry.title }}</div>
+          {% endif %}
+
+          <div class="entry-fields">
+            {% if entry.author %}
+              <div class="entry-field">
+                <div class="field-label">Author</div>
+                <div class="field-value">{{ entry.author }}</div>
+              </div>
+            {% endif %}
+            {% if entry.publisher %}
+              <div class="entry-field">
+                <div class="field-label">Publisher</div>
+                <div class="field-value">{{ entry.publisher }}</div>
+              </div>
+            {% endif %}
+            {% if entry.pubcity %}
+              <div class="entry-field">
+                <div class="field-label">Pub. City</div>
+                <div class="field-value">{{ entry.pubcity }}</div>
+              </div>
+            {% endif %}
+            {% if entry.date %}
+              <div class="entry-field">
+                <div class="field-label">Date</div>
+                <div class="field-value">{{ entry.date }}</div>
+              </div>
+            {% endif %}
+            {% if entry.copies %}
+              <div class="entry-field">
+                <div class="field-label">Copies</div>
+                <div class="field-value">{{ entry.copies }}</div>
+              </div>
+            {% endif %}
+            {% if entry.price %}
+              <div class="entry-field">
+                <div class="field-label">Price</div>
+                <div class="field-value">{{ entry.price }}</div>
+              </div>
+            {% endif %}
+            {% if entry.lang %}
+              <div class="entry-field">
+                <div class="field-label">Language</div>
+                <div class="field-value">{{ entry.lang }}</div>
+              </div>
+            {% endif %}
+            {% if entry.notes %}
+              <div class="entry-field">
+                <div class="field-label">Notes</div>
+                <div class="field-value">{{ entry.notes }}</div>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty-message">
+      No catalogue entries extracted for this page
+    </div>
+  {% endif %}
+
+  <div class="nav-buttons">
+    {% if data.prev_id %}
+      <a href="{{ url_for('qc_canonical_page', page_id=data.prev_id) }}" class="nav-btn">← Previous</a>
+    {% else %}
+      <button class="nav-btn disabled">← Previous</button>
+    {% endif %}
+
+    {% if data.next_id %}
+      <a href="{{ url_for('qc_canonical_page', page_id=data.next_id) }}" class="nav-btn">Next →</a>
+    {% else %}
+      <button class="nav-btn disabled">Next →</button>
+    {% endif %}
+  </div>
+</main>
+{% endblock %}

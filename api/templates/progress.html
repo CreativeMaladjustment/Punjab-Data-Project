@@ -109,7 +109,6 @@
         <span>{{ "{:,}".format(total_pages - any_extracted_pages) }} awaiting structured extraction</span>
       </div>
     </div>
-    <p class="remaining-note"><strong>What counts:</strong> Any successful <em>structured</em> extraction — from vision models (glm-ocr, Gemini, minicpm), text parsing (textparse:mistral, textparse:llama), or human correction. What's excluded: Full-page OCR transcriptions (Gemma-4 and other OCR-only runs) because transcribing text isn't the same as extracting structured catalogue entries from it. <strong>The remaining pages:</strong> ~741 have successful OCR transcriptions (ready for text-based parsing) and ~3 are completely stuck (attempted by all models, all failed). The <code>parse_ocr_text_*.yml</code> workflows automatically extract structured entries from OCR transcriptions, prioritizing the OCR-only pages first.</p>
 
     {% if progress_summary %}
     <div class="progress-detail">

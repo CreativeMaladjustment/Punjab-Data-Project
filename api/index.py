@@ -44,10 +44,13 @@ Vercel-account login. Two env vars are required for this:
                          import time.
 """
 import functools
+import logging
 import os
 import re
 import sys
 from datetime import timedelta
+
+import requests
 
 # Vercel's Python runtime imports this file directly by path (see
 # vc_init.py in its traceback), which does not add this file's own
@@ -392,6 +395,8 @@ app = Flask(
     __name__,
     template_folder=os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates"),
 )
+
+logger = logging.getLogger(__name__)
 
 # app.secret_key is what Flask/itsdangerous signs the session cookie with.
 # Read (not generated) so it's stable across cold starts -- a randomly
@@ -1079,6 +1084,165 @@ def qc_save_edit():
     return redirect(
         url_for("qc_page", page_id=page_id, model_tag=model_tag, needs_review=("1" if needs_review else None), not_extracted=("1" if not_extracted else None))
     )
+
+
+@app.route("/qc-canonical")
+@login_required
+def qc_canonical_index():
+    """Show first page with a canonical extraction."""
+    conn = db_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MIN(page_id) FROM page_extractions_canonical")
+            first_id = cur.fetchone()[0]
+    finally:
+        conn.close()
+
+    if first_id is None:
+        return redirect(url_for("qc_index"))
+    return redirect(url_for("qc_canonical_page", page_id=first_id))
+
+
+@app.route("/qc-canonical/<int:page_id>")
+@login_required
+def qc_canonical_page(page_id):
+    """Display canonical extraction + catalogue entries for manual review.
+    Uses REST API + gzip compression for database queries."""
+    import requests
+    from urllib.parse import urljoin, urlencode, urlparse
+
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_ANON_KEY")
+
+    if not supabase_url or not supabase_key:
+        # Fallback to direct connection if REST API not configured
+        conn = db_connect()
+        try:
+            from api.queries import fetch_canonical_qc_page, count_canonical_qc_pages
+            data = fetch_canonical_qc_page(conn, page_id)
+            if not data:
+                abort(404)
+            total_canonical = count_canonical_qc_pages(conn)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COUNT(*) FROM page_extractions_canonical WHERE page_id <= %s
+                """, (page_id,))
+                position = cur.fetchone()[0]
+        finally:
+            conn.close()
+    else:
+        # Validate supabase_url is a Supabase domain to prevent SSRF
+        parsed = urlparse(supabase_url)
+        if not parsed.netloc.endswith('.supabase.co'):
+            logger.error(f"Invalid SUPABASE_URL domain: {parsed.netloc}")
+            abort(500)
+
+        # Use REST API + compression
+        headers = {
+            "Authorization": f"Bearer {supabase_key}",
+            "Accept-Encoding": "gzip",
+            "Content-Type": "application/json",
+        }
+
+        # Fetch canonical extraction + entries
+        try:
+            canonical_url = urljoin(supabase_url, "/rest/v1/page_extractions_canonical")
+            response = requests.get(
+                canonical_url,
+                params={'page_id': f'eq.{page_id}', 'select': '*'},
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            canonical_rows = response.json()
+
+            if not canonical_rows:
+                abort(404)
+
+            canonical = canonical_rows[0]
+
+            # Fetch catalogue entries
+            entries_url = urljoin(supabase_url, "/rest/v1/catalogue_entries")
+            response = requests.get(
+                entries_url,
+                params={'extraction_id': f'eq.{canonical["extraction_id"]}', 'order': 'entry_index.asc', 'select': '*'},
+                headers=headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            entries = response.json()
+
+            data = {
+                "page_id": canonical["page_id"],
+                "extraction_id": canonical["extraction_id"],
+                "model_tag": canonical["model_tag"],
+                "priority": canonical["priority"],
+                "entry_count": canonical["entry_count"],
+                "entries": entries,
+                "prev_id": None,
+                "next_id": None,
+            }
+
+            # Fetch prev/next page ids
+            response = requests.get(
+                canonical_url,
+                params={'page_id': f'lt.{page_id}', 'order': 'page_id.desc', 'limit': '1', 'select': 'page_id'},
+                headers=headers,
+                timeout=10
+            )
+            if response.ok and response.json():
+                data["prev_id"] = response.json()[0]["page_id"]
+
+            response = requests.get(
+                canonical_url,
+                params={'page_id': f'gt.{page_id}', 'order': 'page_id.asc', 'limit': '1', 'select': 'page_id'},
+                headers=headers,
+                timeout=10
+            )
+            if response.ok and response.json():
+                data["next_id"] = response.json()[0]["page_id"]
+
+            # Get total count
+            response = requests.get(
+                canonical_url,
+                params={'select': 'count()', 'count': 'exact'},
+                headers=headers,
+                timeout=10
+            )
+            total_canonical = int(response.headers.get("content-range", "0-0/0").split("/")[-1]) if response.ok else 0
+
+            # Get position
+            response = requests.get(
+                canonical_url,
+                params={'page_id': f'lte.{page_id}', 'select': 'count()', 'count': 'exact'},
+                headers=headers,
+                timeout=10
+            )
+            position = int(response.headers.get("content-range", "0-0/0").split("/")[-1]) if response.ok else 1
+
+        except requests.RequestException as e:
+            logger.warning(f"REST API failed, falling back to direct connection: {e}")
+            # Fall back to direct connection
+            conn = db_connect()
+            try:
+                from api.queries import fetch_canonical_qc_page, count_canonical_qc_pages
+                data = fetch_canonical_qc_page(conn, page_id)
+                if not data:
+                    abort(404)
+                total_canonical = count_canonical_qc_pages(conn)
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT COUNT(*) FROM page_extractions_canonical WHERE page_id <= %s
+                    """, (page_id,))
+                    position = cur.fetchone()[0]
+            finally:
+                conn.close()
+
+    return render_template("qc-canonical.html",
+                         page_id=page_id,
+                         data=data,
+                         position=position,
+                         total=total_canonical)
 
 
 @app.route("/healthz")

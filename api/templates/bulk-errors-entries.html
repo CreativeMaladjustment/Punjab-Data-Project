@@ -19,17 +19,17 @@
   <h1>{{ label }}</h1>
   <p class="lede">
     {{ '{:,}'.format(total) }} entr{{ 'y' if total == 1 else 'ies' }}
-    {% if title is none %}· field <strong>{{ field }}</strong>{% else %}· exact title{% endif %}
-    · <a href="{{ url_for('bulk_errors', field=(field if title is none else 'title_junk')) }}">← back to bulk errors</a>
+    · field <strong>{{ field }}</strong>
+    · <a href="{{ url_for('bulk_errors', field=back_field) }}">← back to bulk errors</a>
   </p>
   <table class="ent">
-    <tr><th>Page</th><th>#</th><th>Title</th>{% if title is none %}<th>{{ field }}</th>{% endif %}<th>Source</th><th>Open</th></tr>
+    <tr><th>Page</th><th>#</th><th>Title</th>{% if field != 'title' %}<th>{{ field }}</th>{% endif %}<th>Source</th><th>Open</th></tr>
     {% for r in rows %}
       <tr>
         <td class="mono">{{ r.page_id }}</td>
         <td class="mono">{{ r.entry_index + 1 }}</td>
         <td>{{ r.title or '—' }}</td>
-        {% if title is none %}<td>{{ r.value }}</td>{% endif %}
+        {% if field != 'title' %}<td>{{ r.value }}</td>{% endif %}
         <td class="mono">{{ r.model_tag }}</td>
         <td class="mono">
           <a href="{{ url_for('qc_canonical_page', page_id=r.page_id) }}">parsed</a> ·
@@ -39,7 +39,7 @@
     {% endfor %}
   </table>
   <div class="pager">
-    {% set args = {'field': field if title is none else None, 'canonical': canonical, 'raw': raw, 'title': title} %}
+    {% set args = {'field': field if not exact_column else None, 'canonical': canonical, 'raw': raw, 'col': exact_column, 'exact': exact} %}
     {% if page > 1 %}<a href="{{ url_for('bulk_errors_entries', page=page-1, **args) }}">← Previous</a>{% endif %}
     <span>Page {{ page }} of {{ ((total + page_size - 1) // page_size) or 1 }}</span>
     {% if page * page_size < total %}<a href="{{ url_for('bulk_errors_entries', page=page+1, **args) }}">Next →</a>{% endif %}

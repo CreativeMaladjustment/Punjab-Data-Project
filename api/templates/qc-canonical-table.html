@@ -78,7 +78,7 @@
 {% block content %}
 <main>
   <h1>Canonical review</h1>
-  <p class="lede">One row per entry from the winning extraction of each page. Filter or sort on any column. A page id opens the QC review (image and extraction); “parsed” opens that page’s canonical detail. Values shown are the normalized spellings; <code style="font-family:'IBM Plex Mono', monospace; font-size:13px; background:var(--border-soft); padding:1px 5px;">title_en</code> is the English translation of non-English titles.</p>
+  <p class="lede">One row per entry from the winning extraction of each page. Filter or sort on any column. A page id opens the QC review (image and extraction); “image” opens the page scan directly in a new tab. Values shown are the normalized spellings; <code style="font-family:'IBM Plex Mono', monospace; font-size:13px; background:var(--border-soft); padding:1px 5px;">title_en</code> is the English translation of non-English titles.</p>
 
   {% if missing_view %}
     <div class="notice">The <code>canonical_entries_view</code> view doesn’t exist yet — run the “Apply Supabase migrations” workflow.</div>
@@ -121,7 +121,7 @@
         <tbody>
           {% for row in rows %}
           <tr>
-            <td><a href="{{ url_for('qc_canonical_page', page_id=row.page_id) }}">parsed</a></td>
+            <td><a href="{{ url_for('qc_image', page_id=row.page_id) }}" target="_blank" rel="noopener">image</a></td>
             {% for col in columns %}
             <td class="col-{{ col }}"{% if col != 'reviewer_note' %} title="{{ (row[col] | string) | truncate(500) if row[col] is not none else '' }}"{% endif %}>
               {%- if row[col] is none and col != 'reviewer_note' -%}

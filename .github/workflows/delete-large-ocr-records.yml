@@ -20,8 +20,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Validate confirmation
+        env:
+          CONFIRM_INPUT: ${{ inputs.confirm }}
         run: |
-          if [ "${{ inputs.confirm }}" != "DELETE_LARGE_OCR" ]; then
+          if [ "$CONFIRM_INPUT" != "DELETE_LARGE_OCR" ]; then
             echo "❌ Confirmation failed. Must enter exactly: DELETE_LARGE_OCR"
             exit 1
           fi

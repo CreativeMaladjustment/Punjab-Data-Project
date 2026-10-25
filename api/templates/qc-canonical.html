@@ -30,6 +30,10 @@
   .nav-btn:hover { background: var(--border-soft); }
   .nav-btn.disabled { opacity: 0.5; cursor: not-allowed; }
 
+  .top-nav { margin: 0 0 24px; padding: 0 0 20px; border-top: none; border-bottom: 1px solid var(--border); align-items: center; }
+  .goto-form { display: flex; gap: 8px; margin: 0 auto; }
+  .goto-form input { padding: 8px 10px; width: 120px; border: 1px solid var(--input-border); background: var(--input-bg); font-size: 13px; }
+
   .empty-message { padding: 40px 20px; text-align: center; color: var(--muted); }
 {% endblock %}
 {% block content %}
@@ -39,6 +43,23 @@
     <div class="nav-info">
       Page {{ position }}/{{ total }}
     </div>
+  </div>
+
+  <div class="nav-buttons top-nav">
+    {% if data.prev_id %}
+      <a href="{{ url_for('qc_canonical_page', page_id=data.prev_id) }}" class="nav-btn">← Previous</a>
+    {% else %}
+      <span class="nav-btn disabled">← Previous</span>
+    {% endif %}
+    <form class="goto-form" onsubmit="var v=this.page_id.value.trim(); if(!/^\d+$/.test(v)) return false; location.href='{{ url_for('qc_canonical_index') }}/'+v; return false;">
+      <input type="number" name="page_id" min="1" placeholder="Page ID" value="{{ page_id }}" aria-label="Page ID">
+      <button type="submit" class="nav-btn">Go</button>
+    </form>
+    {% if data.next_id %}
+      <a href="{{ url_for('qc_canonical_page', page_id=data.next_id) }}" class="nav-btn">Next →</a>
+    {% else %}
+      <span class="nav-btn disabled">Next →</span>
+    {% endif %}
   </div>
 
   <div class="extraction-block">
@@ -83,20 +104,10 @@
           {% endif %}
 
           <div class="entry-fields">
-            {% for key, label in [
-              ('author','Author'),('title_native','Title native'),('gloss','Gloss'),
-              ('publisher','Publisher'),('pubcity','Pub. City'),('pp_verbatim','Pub. verbatim'),
-              ('printer','Printer'),('pcity','Printer City'),('printer_verbatim','Printer verbatim'),
-              ('date','Date'),('copies','Copies'),('price','Price'),('edition','Edition'),
-              ('format','Format'),('method','Method'),('educ','Education'),('copyright','Copyright'),
-              ('lang','Language'),('char_qualifier','Script'),('topic','Topic'),('section','Section'),
-              ('serial','Serial'),('reg','Reg.'),('quarter','Quarter'),('pdf_page','PDF page'),
-              ('printed_page','Printed page'),('marks','Marks'),('flags','Flags'),('notes','Notes')
-            ] %}
-              {% set v = entry.get(key) %}
+            {% for label, v in entry.display_fields %}
               <div class="entry-field">
                 <div class="field-label">{{ label }}</div>
-                <div class="field-value">{% if v is none or v == '' or v == {} or v == [] %}<span style="opacity:.4">—</span>{% else %}{{ v }}{% endif %}</div>
+                <div class="field-value">{% if v %}{{ v }}{% else %}<span style="opacity:.4">—</span>{% endif %}</div>
               </div>
             {% endfor %}
           </div>

@@ -1084,6 +1084,19 @@ def qc_save_edit():
     )
 
 
+CANONICAL_ENTRY_DISPLAY_FIELDS = [
+    ("author", "Author"), ("gloss", "Gloss"),
+    ("publisher", "Publisher"), ("pubcity", "Pub. City"), ("pp_verbatim", "Pub. verbatim"),
+    ("printer", "Printer"), ("pcity", "Printer City"), ("printer_verbatim", "Printer verbatim"),
+    ("date", "Date"), ("copies", "Copies"), ("price", "Price"), ("edition", "Edition"),
+    ("format", "Format"), ("method", "Method"), ("educ", "Education"), ("copyright", "Copyright"),
+    ("lang", "Language"), ("char_qualifier", "Script"), ("title_native", "Title native"),
+    ("topic", "Topic"), ("section", "Section"), ("serial", "Serial"), ("reg", "Reg."),
+    ("quarter", "Quarter"), ("pdf_page", "PDF page"), ("printed_page", "Printed page"),
+    ("marks", "Marks"), ("flags", "Flags"), ("notes", "Notes"),
+]
+
+
 @app.route("/qc-canonical")
 @login_required
 def qc_canonical_index():
@@ -1235,6 +1248,14 @@ def qc_canonical_page(page_id):
                     position = cur.fetchone()[0]
             finally:
                 conn.close()
+
+    entries = [e for e in (data.get("entries") or []) if isinstance(e, dict)]
+    for e in entries:
+        e["display_fields"] = [
+            (label, "" if e.get(key) in (None, "", {}, []) else str(e.get(key)))
+            for key, label in CANONICAL_ENTRY_DISPLAY_FIELDS
+        ]
+    data["entries"] = entries
 
     return render_template("qc-canonical.html",
                          page_id=page_id,

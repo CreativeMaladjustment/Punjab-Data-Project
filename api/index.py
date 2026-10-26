@@ -75,12 +75,12 @@ from queries import (
     CATALOGUE_ENTRY_INT_FIELDS,
     BULK_VALUE_FIELDS,
     CATALOGUE_ENTRY_JSON_FIELDS,
-    TITLE_JUNK_PATTERNS,
+    JUNK_COLUMNS,
     apply_page_exclusion,
     apply_qc_verdict,
     fetch_bulk_entries,
-    fetch_title_junk_summary,
-    fetch_title_junk_titles,
+    fetch_junk_summary,
+    fetch_junk_values,
     fetch_value_groups,
     save_canonical_entry_notes,
     set_canonical_value,
@@ -1413,6 +1413,8 @@ def qc_canonical_page(page_id):
 
 
 BULK_ENTRIES_PAGE_SIZE = 100
+# tab name -> catalogue_entries_canonical column checked for misplaced values
+BULK_JUNK_TABS = {"title_junk": "title", "price_junk": "price"}
 
 
 @app.route("/bulk-errors")
@@ -1424,17 +1426,20 @@ def bulk_errors():
     variants_only = request.args.get("all") != "1"
     conn = db_connect()
     try:
-        if field == "title_junk":
+        if field in BULK_JUNK_TABS:
+            column = BULK_JUNK_TABS[field]
+            patterns = JUNK_COLUMNS[column]
             pattern = request.args.get("pattern")
-            if pattern is not None and pattern not in TITLE_JUNK_PATTERNS:
+            if pattern is not None and pattern not in patterns:
                 abort(400)
-            summary = fetch_title_junk_summary(conn)
-            titles = fetch_title_junk_titles(conn, pattern) if pattern else []
+            summary = fetch_junk_summary(conn, column)
+            values = fetch_junk_values(conn, column, pattern) if pattern else []
             return render_template(
                 "bulk-errors.html", active="bulk_errors", field=field,
                 fields=BULK_VALUE_FIELDS, summary=summary, pattern=pattern,
-                pattern_label=TITLE_JUNK_PATTERNS[pattern][0] if pattern else None,
-                titles=titles, groups=[], variants_only=variants_only)
+                pattern_label=patterns[pattern][0] if pattern else None,
+                junk_column=column, junk_tabs=BULK_JUNK_TABS,
+                values=values, groups=[], variants_only=variants_only)
         if field not in BULK_VALUE_FIELDS:
             abort(400)
         groups = fetch_value_groups(conn, field, variants_only=variants_only)
@@ -1443,7 +1448,8 @@ def bulk_errors():
     return render_template(
         "bulk-errors.html", active="bulk_errors", field=field,
         fields=BULK_VALUE_FIELDS, groups=groups, variants_only=variants_only,
-        summary=[], pattern=None, pattern_label=None, titles=[])
+        summary=[], pattern=None, pattern_label=None, values=[],
+        junk_column=None, junk_tabs=BULK_JUNK_TABS)
 
 
 @app.route("/bulk-errors/entries")
@@ -1452,24 +1458,33 @@ def bulk_errors_entries():
     field = request.args.get("field", "")
     canonical = request.args.get("canonical")
     raw = request.args.get("raw")
-    title = request.args.get("title")
+    exact_column = request.args.get("col")
+    exact = request.args.get("exact")
     page = max(request.args.get("page", 1, type=int), 1)
-    if title is None and field not in BULK_VALUE_FIELDS:
-        abort(400)
-    if title is None and canonical is None and raw is None:
+    if exact_column is not None:
+        if exact_column not in JUNK_COLUMNS or exact is None:
+            abort(400)
+    elif field not in BULK_VALUE_FIELDS or (canonical is None and raw is None):
         abort(400)
     conn = db_connect()
     try:
         rows, total = fetch_bulk_entries(
-            conn, field, canonical=canonical, raw=raw, title=title,
+            conn, field, canonical=canonical, raw=raw,
+            exact_column=exact_column, exact_value=exact,
             limit=BULK_ENTRIES_PAGE_SIZE, offset=(page - 1) * BULK_ENTRIES_PAGE_SIZE)
     finally:
         conn.close()
-    label = title if title is not None else (canonical if canonical is not None else raw)
+    if exact_column is not None:
+        label, shown_field = exact, exact_column
+        back_field = next(t for t, c in BULK_JUNK_TABS.items() if c == exact_column)
+    else:
+        label = canonical if canonical is not None else raw
+        shown_field = back_field = field
     return render_template(
-        "bulk-errors-entries.html", active="bulk_errors", field=field or "title",
-        label=label, rows=rows, total=total, page=page,
-        page_size=BULK_ENTRIES_PAGE_SIZE, canonical=canonical, raw=raw, title=title)
+        "bulk-errors-entries.html", active="bulk_errors", field=shown_field,
+        back_field=back_field, label=label, rows=rows, total=total, page=page,
+        page_size=BULK_ENTRIES_PAGE_SIZE, canonical=canonical, raw=raw,
+        exact_column=exact_column, exact=exact)
 
 
 @app.route("/bulk-errors/map", methods=["POST"])

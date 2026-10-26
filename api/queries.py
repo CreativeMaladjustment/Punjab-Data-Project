@@ -1472,6 +1472,11 @@ TITLE_JUNK_PATTERNS = {
 }
 
 
+PRICE_JUNK_PATTERNS = {
+    "price_prefix": ("Starts with 'Price'", r"^\s*price\y"),
+}
+
+
 def fetch_value_groups(conn, field, variants_only=True, limit=500):
     """Canonical-value groups for a mapped field.
     Returns [{canonical, total, variants, members: [{raw, n, status}]}], biggest first."""
@@ -1503,57 +1508,69 @@ def fetch_value_groups(conn, field, variants_only=True, limit=500):
         ]
 
 
-def fetch_title_junk_summary(conn):
-    """[{key, label, entries, distinct_titles}] for every title junk pattern."""
+JUNK_COLUMNS = {
+    "title": TITLE_JUNK_PATTERNS,
+    "price": PRICE_JUNK_PATTERNS,
+}
+
+
+def fetch_junk_summary(conn, column):
+    """[{key, label, entries, distinct_values}] for every junk pattern on `column`."""
+    patterns = JUNK_COLUMNS[column]
+    col = sql.Identifier(column)
     out = []
     with conn.cursor() as cur:
-        for key, (label, regex) in TITLE_JUNK_PATTERNS.items():
-            cur.execute("""
-                SELECT COUNT(*), COUNT(DISTINCT title)
-                FROM catalogue_entries_canonical
-                WHERE title IS NULL OR title ~* %s
-            """ if key == "no_letters" else """
-                SELECT COUNT(*), COUNT(DISTINCT title)
-                FROM catalogue_entries_canonical
-                WHERE title ~* %s
-            """, (regex,))
+        for key, (label, regex) in patterns.items():
+            cond = sql.SQL("{c} IS NULL OR {c} ~* %s").format(c=col) if key == "no_letters" \
+                else sql.SQL("{c} ~* %s").format(c=col)
+            cur.execute(
+                sql.SQL("SELECT COUNT(*), COUNT(DISTINCT {c}) FROM catalogue_entries_canonical WHERE ").format(c=col) + cond,
+                (regex,))
             entries, distinct = cur.fetchone()
-            out.append({"key": key, "label": label, "entries": entries, "distinct_titles": distinct})
+            out.append({"key": key, "label": label, "entries": entries, "distinct_values": distinct})
     return out
 
 
-def fetch_title_junk_titles(conn, pattern_key, limit=500):
-    """[{title, n}] distinct junk titles for a pattern, most frequent first."""
-    if pattern_key not in TITLE_JUNK_PATTERNS:
+def fetch_junk_values(conn, column, pattern_key, limit=500):
+    """[{value, n}] distinct junk values of `column` for a pattern, most frequent first."""
+    patterns = JUNK_COLUMNS[column]
+    if pattern_key not in patterns:
         raise ValueError(f"unsupported pattern {pattern_key!r}")
-    regex = TITLE_JUNK_PATTERNS[pattern_key][1]
+    regex = patterns[pattern_key][1]
+    col = sql.Identifier(column)
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT title, COUNT(*) AS n
-            FROM catalogue_entries_canonical
-            WHERE title ~* %s
-            GROUP BY title
-            ORDER BY n DESC, title
-            LIMIT %s
-        """, (regex, limit))
-        return [{"title": t, "n": n} for t, n in cur.fetchall()]
+        cur.execute(
+            sql.SQL("""
+                SELECT {c}, COUNT(*) AS n
+                FROM catalogue_entries_canonical
+                WHERE {c} ~* %s
+                GROUP BY {c}
+                ORDER BY n DESC, {c}
+                LIMIT %s
+            """).format(c=col),
+            (regex, limit))
+        return [{"value": v, "n": n} for v, n in cur.fetchall()]
 
 
-def fetch_bulk_entries(conn, field, canonical=None, raw=None, title=None, limit=100, offset=0):
+def fetch_bulk_entries(conn, field, canonical=None, raw=None, exact_column=None, exact_value=None, limit=100, offset=0):
     """Entries behind a group/variant/title, each with ids for linking to the
     parsed (/qc-canonical/<page_id>) and raw (/qc/<page_id>) views.
     Exactly one of canonical (all variants of a canonical value), raw (one
-    spelling) or title (one exact title) selects the rows.
+    spelling) or exact_column/exact_value (one exact title or price string,
+    column in JUNK_COLUMNS) selects the rows.
     Returns (rows, total)."""
     base = sql.SQL("""
         FROM catalogue_entries_canonical cec
         {join}
         WHERE {cond}
     """)
-    if title is not None:
-        q = base.format(join=sql.SQL(""), cond=sql.SQL("cec.title = %s"))
-        params = (title,)
-        shown = sql.SQL("cec.title")
+    if exact_column is not None and exact_value is not None:
+        if exact_column not in JUNK_COLUMNS:
+            raise ValueError(f"unsupported column {exact_column!r}")
+        col = sql.SQL("cec.{}").format(sql.Identifier(exact_column))
+        q = base.format(join=sql.SQL(""), cond=col + sql.SQL(" = %s"))
+        params = (exact_value,)
+        shown = col
     elif field in BULK_VALUE_FIELDS and canonical is not None:
         col = sql.SQL("cec.{}").format(sql.Identifier(field))
         q = base.format(

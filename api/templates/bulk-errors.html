@@ -35,32 +35,33 @@
       <a class="tab {{ 'on' if f == field else '' }}" href="{{ url_for('bulk_errors', field=f) }}">{{ f }}</a>
     {% endfor %}
     <a class="tab {{ 'on' if field == 'title_junk' else '' }}" href="{{ url_for('bulk_errors', field='title_junk') }}">title errors</a>
+    <a class="tab {{ 'on' if field == 'price_junk' else '' }}" href="{{ url_for('bulk_errors', field='price_junk') }}">price errors</a>
   </div>
 
-  {% if field == 'title_junk' %}
+  {% if field in junk_tabs %}
     <table class="grp">
-      <tr><th>Pattern</th><th class="num">Entries</th><th class="num">Distinct titles</th></tr>
+      <tr><th>Pattern</th><th class="num">Entries</th><th class="num">Distinct values</th></tr>
       {% for s in summary %}
         <tr>
-          <td><a href="{{ url_for('bulk_errors', field='title_junk', pattern=s.key) }}">{{ s.label }}</a>{% if s.key == pattern %} ◂{% endif %}</td>
+          <td><a href="{{ url_for('bulk_errors', field=field, pattern=s.key) }}">{{ s.label }}</a>{% if s.key == pattern %} ◂{% endif %}</td>
           <td class="num">{{ '{:,}'.format(s.entries) }}</td>
-          <td class="num">{{ '{:,}'.format(s.distinct_titles) }}</td>
+          <td class="num">{{ '{:,}'.format(s.distinct_values) }}</td>
         </tr>
       {% endfor %}
     </table>
     {% if pattern %}
       <h2 style="font-weight:400;font-size:20px;margin:28px 0 12px">{{ pattern_label }}</h2>
-      {% if titles %}
+      {% if values %}
       <table class="grp">
-        <tr><th>Title as extracted</th><th class="num">Count</th></tr>
-        {% for t in titles %}
+        <tr><th>{{ junk_column|capitalize }} as extracted</th><th class="num">Count</th></tr>
+        {% for t in values %}
           <tr>
-            <td>{{ t.title }}</td>
-            <td class="num"><a href="{{ url_for('bulk_errors_entries', title=t.title) }}">{{ '{:,}'.format(t.n) }}</a></td>
+            <td>{{ t.value }}</td>
+            <td class="num"><a href="{{ url_for('bulk_errors_entries', col=junk_column, exact=t.value) }}">{{ '{:,}'.format(t.n) }}</a></td>
           </tr>
         {% endfor %}
       </table>
-      {% else %}<div class="empty">No titles match this pattern.</div>{% endif %}
+      {% else %}<div class="empty">No values match this pattern.</div>{% endif %}
     {% endif %}
   {% else %}
     <div class="opts">

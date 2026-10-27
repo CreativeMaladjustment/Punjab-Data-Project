@@ -1,0 +1,29 @@
+name: Backfill canonical dates
+
+# Recomputes the derived date columns (date_iso, date_status, estimated windows ...)
+# on catalogue_entries_canonical from the as-extracted dates. Run once after the
+# date-parsing migrations apply; safe to re-run (e.g. after tweaking the parser).
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: b2-upload  # where SUPABASE_DB_URL lives
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Run backfill
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f scripts/backfill_canonical_dates.sql

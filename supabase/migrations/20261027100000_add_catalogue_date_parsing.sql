@@ -19,6 +19,7 @@
 --   date_basis           printed | neighbors | ditto | year_window   (where the date came from)
 --   date_est_from/to     estimated window when there is no usable printed date
 
+drop type if exists parsed_catalogue_date cascade;
 create type parsed_catalogue_date as (
     date_start date,
     date_end date,

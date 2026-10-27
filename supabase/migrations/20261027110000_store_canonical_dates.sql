@@ -2,24 +2,24 @@
 -- in canonical_entries_view. See 20261027100000 for the column meanings.
 
 alter table catalogue_entries_canonical
-    add column date_start date,
-    add column date_end date,
-    add column date_iso text,
-    add column date_precision text,
-    add column date_era text,
-    add column date_status text,
-    add column date_basis text,
-    add column date_note text,
-    add column date_part_month int,
-    add column date_part_day int,
-    add column date_est_from date,
-    add column date_est_to date;
+    add column if not exists date_start date,
+    add column if not exists date_end date,
+    add column if not exists date_iso text,
+    add column if not exists date_precision text,
+    add column if not exists date_era text,
+    add column if not exists date_status text,
+    add column if not exists date_basis text,
+    add column if not exists date_note text,
+    add column if not exists date_part_month int,
+    add column if not exists date_part_day int,
+    add column if not exists date_est_from date,
+    add column if not exists date_est_to date;
 
-create index catalogue_entries_canonical_date_status_idx on catalogue_entries_canonical (date_status);
+create index if not exists catalogue_entries_canonical_date_status_idx on catalogue_entries_canonical (date_status);
 -- neighbour lookups walk a PDF in page order
-create index catalogue_entries_canonical_pdf_order_idx
-    on catalogue_entries_canonical (source_folder, source_pdf, pdf_page, entry_index)
-    where date_status = 'ok';
+create index if not exists catalogue_entries_canonical_pdf_order_idx
+    on catalogue_entries_canonical (source_pdf, (COALESCE(source_folder, '')), pdf_page, entry_index)
+    where date_status = 'ok' and date_precision in ('day', 'month');
 
 
 -- Parse every entry's printed date, using its PDF's year span to settle
@@ -87,14 +87,14 @@ BEGIN
         CROSS JOIN LATERAL catalogue_pdf_year_window(c2.source_pdf) w
         LEFT JOIN LATERAL (
             SELECT pr.date_start FROM catalogue_entries_canonical pr
-            WHERE pr.source_pdf = c2.source_pdf AND pr.source_folder IS NOT DISTINCT FROM c2.source_folder
+            WHERE pr.source_pdf = c2.source_pdf AND COALESCE(pr.source_folder, '') = COALESCE(c2.source_folder, '')
               AND pr.date_status = 'ok' AND pr.date_precision IN ('day', 'month')
               AND (pr.pdf_page, pr.entry_index) < (c2.pdf_page, c2.entry_index)
             ORDER BY pr.pdf_page DESC, pr.entry_index DESC LIMIT 1
         ) pv ON true
         LEFT JOIN LATERAL (
             SELECT nx2.date_start FROM catalogue_entries_canonical nx2
-            WHERE nx2.source_pdf = c2.source_pdf AND nx2.source_folder IS NOT DISTINCT FROM c2.source_folder
+            WHERE nx2.source_pdf = c2.source_pdf AND COALESCE(nx2.source_folder, '') = COALESCE(c2.source_folder, '')
               AND nx2.date_status = 'ok' AND nx2.date_precision IN ('day', 'month')
               AND (nx2.pdf_page, nx2.entry_index) > (c2.pdf_page, c2.entry_index)
             ORDER BY nx2.pdf_page ASC, nx2.entry_index ASC LIMIT 1
@@ -123,7 +123,7 @@ BEGIN
     CROSS JOIN LATERAL (
         SELECT pr.date_start, pr.date_end, pr.date_precision, pr.date_iso
         FROM catalogue_entries_canonical pr
-        WHERE pr.source_pdf = c2.source_pdf AND pr.source_folder IS NOT DISTINCT FROM c2.source_folder
+        WHERE pr.source_pdf = c2.source_pdf AND COALESCE(pr.source_folder, '') = COALESCE(c2.source_folder, '')
           AND pr.date_status = 'ok' AND pr.date_precision IN ('day', 'month')
           AND (pr.pdf_page, pr.entry_index) < (c2.pdf_page, c2.entry_index)
         ORDER BY pr.pdf_page DESC, pr.entry_index DESC LIMIT 1
@@ -171,14 +171,14 @@ BEGIN
         ) q ON true
         LEFT JOIN LATERAL (
             SELECT pr.date_start, pr.date_end FROM catalogue_entries_canonical pr
-            WHERE pr.source_pdf = c2.source_pdf AND pr.source_folder IS NOT DISTINCT FROM c2.source_folder
+            WHERE pr.source_pdf = c2.source_pdf AND COALESCE(pr.source_folder, '') = COALESCE(c2.source_folder, '')
               AND pr.date_status = 'ok' AND pr.date_precision IN ('day', 'month')
               AND (pr.pdf_page, pr.entry_index) < (c2.pdf_page, c2.entry_index)
             ORDER BY pr.pdf_page DESC, pr.entry_index DESC LIMIT 1
         ) pv ON true
         LEFT JOIN LATERAL (
             SELECT nx2.date_start, nx2.date_end FROM catalogue_entries_canonical nx2
-            WHERE nx2.source_pdf = c2.source_pdf AND nx2.source_folder IS NOT DISTINCT FROM c2.source_folder
+            WHERE nx2.source_pdf = c2.source_pdf AND COALESCE(nx2.source_folder, '') = COALESCE(c2.source_folder, '')
               AND nx2.date_status = 'ok' AND nx2.date_precision IN ('day', 'month')
               AND (nx2.pdf_page, nx2.entry_index) > (c2.pdf_page, c2.entry_index)
             ORDER BY nx2.pdf_page ASC, nx2.entry_index ASC LIMIT 1
@@ -290,6 +290,7 @@ left join field_value_map mr  on mr.field  = 'printer'   and mr.raw_value  = cec
 left join canonical_entry_notes en on en.page_id = cec.page_id and en.entry_index = cec.entry_index;
 
 
--- Backfill
-SELECT apply_catalogue_dates();
-SELECT infer_catalogue_dates();
+-- No backfill here: it runs for minutes on the full table and exceeds Supabase's
+-- statement timeout inside a migration. Run it once by hand afterwards (see
+-- scripts/backfill_canonical_dates.sql); pages synced from now on are dated
+-- automatically by sync_canonical_entries().

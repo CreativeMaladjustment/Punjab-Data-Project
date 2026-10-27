@@ -394,3 +394,30 @@ still unresolved, not themselves failures, and 5 had reached `success`) across ~
 three separate runs — the claiming/retry logic itself worked correctly
 throughout; the external quota was the entire bottleneck. See `ARCHITECTURE.md` for the full
 incident and the "when to revisit" triggers.
+
+## D-022 (2026-10-25) — The canonical layer is a self-contained copy, chosen by source type
+**Context:** Several extractions (per model, plus `textparse:*`) exist for the same page; analysis
+and review need one record per page, and it must not vanish if a source row is re-run or deleted.
+**Decision:** `page_extractions_canonical` + `catalogue_entries_canonical` hold a *copy* of the
+winning extraction (provenance id only, `ON DELETE SET NULL`). Winner by source type —
+`human:review` > `textparse:*` > first successful other model; earliest attempt breaks ties.
+Corrections are made through a `human:review` extraction or the lookup tables, never by editing
+canonical rows (they are rebuilt on every change).
+**Consequences:** Source type, not quality, decides the winner, so a thin `textparse:*` result can
+displace a fuller one (page 2224) — an open item in `CANONICAL.md`. See that file for tables,
+triggers and the review pages.
+
+## D-023 (2026-10-27) — Dates are normalized by a pure SQL parser, with PDF-derived context, beside the verbatim text
+**Context:** The `date` field mixes ISO and many text forms, era dates, ranges, partial dates,
+"ditto", and misplaced non-dates; ~59% of canonical entries have none. Per D-001 the verbatim
+text must stay.
+**Decision:** `parse_catalogue_date()` derives `date_start/date_end/date_iso/date_precision/
+date_era/date_status` without altering `date`. A PDF's year span (from its file name) settles
+two-digit years and rejects implausible years; partial dates take their year from the nearest
+dated neighbour in the same PDF, "ditto" copies the previous dated entry, and undated entries get
+an *estimated window* (quarter, else neighbours, else the PDF's years) kept in separate columns —
+estimates are never written into the date. A range's date is its first day (last day in `date_end`).
+**Consequences:** Dates are queryable and sortable at a stated precision, every inferred value is
+labelled (`date_status`/`date_basis`), and everything unparsed surfaces on the Bulk errors "date
+errors" tab. Neighbour inference assumes roughly chronological order within a PDF; era years are
+kept as text, not converted. Details in `CANONICAL.md`.

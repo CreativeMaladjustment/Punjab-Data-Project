@@ -1414,7 +1414,7 @@ def qc_canonical_page(page_id):
 
 BULK_ENTRIES_PAGE_SIZE = 100
 # tab name -> catalogue_entries_canonical column checked for misplaced values
-BULK_JUNK_TABS = {"title_junk": "title", "price_junk": "price"}
+BULK_JUNK_TABS = {"title_junk": "title", "price_junk": "price", "date_junk": "date"}
 
 
 @app.route("/bulk-errors")

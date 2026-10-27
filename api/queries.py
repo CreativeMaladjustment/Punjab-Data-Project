@@ -1508,10 +1508,31 @@ def fetch_value_groups(conn, field, variants_only=True, limit=500):
         ]
 
 
+# Date problems are read off the parsed status, not the raw text:
+# (label, regex, column tested) -- the raw date strings are what get listed.
+DATE_JUNK_PATTERNS = {
+    "needs_review": ("Needs review (unparsed, OCR damage, out of range, era only)", r"^needs_review$", "date_status"),
+    "not_a_date": ("Not a date (edition, size, header text)", r"^not_a_date$", "date_status"),
+    "needs_year": ("Day/month printed, year not resolved", r"^needs_year$", "date_status"),
+    "ditto": ("Ditto, not resolved", r"^ditto$", "date_status"),
+    "inferred": ("Filled in from context (year or ditto)", r"^inferred$", "date_status"),
+    "empty": ("No date printed (estimated window only)", r"^empty$", "date_status"),
+}
+
 JUNK_COLUMNS = {
     "title": TITLE_JUNK_PATTERNS,
     "price": PRICE_JUNK_PATTERNS,
+    "date": DATE_JUNK_PATTERNS,
 }
+
+
+def _junk_test(column, key, pattern):
+    """(sql condition, regex) for a junk pattern: tests pattern[2] when given
+    (e.g. date_status), else the column itself."""
+    test_col = sql.Identifier(pattern[2] if len(pattern) > 2 else column)
+    if key == "no_letters":
+        return sql.SQL("{c} IS NULL OR {c} ~* %s").format(c=test_col), pattern[1]
+    return sql.SQL("{c} ~* %s").format(c=test_col), pattern[1]
 
 
 def fetch_junk_summary(conn, column):
@@ -1520,32 +1541,32 @@ def fetch_junk_summary(conn, column):
     col = sql.Identifier(column)
     out = []
     with conn.cursor() as cur:
-        for key, (label, regex) in patterns.items():
-            cond = sql.SQL("{c} IS NULL OR {c} ~* %s").format(c=col) if key == "no_letters" \
-                else sql.SQL("{c} ~* %s").format(c=col)
+        for key, pattern in patterns.items():
+            cond, regex = _junk_test(column, key, pattern)
             cur.execute(
                 sql.SQL("SELECT COUNT(*), COUNT(DISTINCT {c}) FROM catalogue_entries_canonical WHERE ").format(c=col) + cond,
                 (regex,))
             entries, distinct = cur.fetchone()
-            out.append({"key": key, "label": label, "entries": entries, "distinct_values": distinct})
+            out.append({"key": key, "label": pattern[0], "entries": entries, "distinct_values": distinct})
     return out
 
 
 def fetch_junk_values(conn, column, pattern_key, limit=500):
-    """[{value, n}] distinct junk values of `column` for a pattern, most frequent first."""
+    """[{value, n}] distinct values of `column` matching a pattern, most frequent
+    first. Missing values are listed as '' (matched back by fetch_bulk_entries)."""
     patterns = JUNK_COLUMNS[column]
     if pattern_key not in patterns:
         raise ValueError(f"unsupported pattern {pattern_key!r}")
-    regex = patterns[pattern_key][1]
+    cond, regex = _junk_test(column, pattern_key, patterns[pattern_key])
     col = sql.Identifier(column)
     with conn.cursor() as cur:
         cur.execute(
             sql.SQL("""
-                SELECT {c}, COUNT(*) AS n
+                SELECT COALESCE({c}, '') AS v, COUNT(*) AS n
                 FROM catalogue_entries_canonical
-                WHERE {c} ~* %s
-                GROUP BY {c}
-                ORDER BY n DESC, {c}
+                WHERE """).format(c=col) + cond + sql.SQL("""
+                GROUP BY COALESCE({c}, '')
+                ORDER BY n DESC, v
                 LIMIT %s
             """).format(c=col),
             (regex, limit))
@@ -1568,8 +1589,12 @@ def fetch_bulk_entries(conn, field, canonical=None, raw=None, exact_column=None,
         if exact_column not in JUNK_COLUMNS:
             raise ValueError(f"unsupported column {exact_column!r}")
         col = sql.SQL("cec.{}").format(sql.Identifier(exact_column))
-        q = base.format(join=sql.SQL(""), cond=col + sql.SQL(" = %s"))
-        params = (exact_value,)
+        if exact_value == "":
+            q = base.format(join=sql.SQL(""), cond=sql.SQL("({c} IS NULL OR btrim({c}) = '')").format(c=col))
+            params = ()
+        else:
+            q = base.format(join=sql.SQL(""), cond=col + sql.SQL(" = %s"))
+            params = (exact_value,)
         shown = col
     elif field in BULK_VALUE_FIELDS and canonical is not None:
         col = sql.SQL("cec.{}").format(sql.Identifier(field))
@@ -1589,15 +1614,19 @@ def fetch_bulk_entries(conn, field, canonical=None, raw=None, exact_column=None,
     with conn.cursor() as cur:
         cur.execute(sql.SQL("SELECT COUNT(*) ") + q, params)
         total = cur.fetchone()[0]
+        with_dates = exact_column == "date"
+        extra = sql.SQL(", cec.date_iso, cec.date_status, cec.date_est_from, cec.date_est_to") if with_dates else sql.SQL("")
         cur.execute(
             sql.SQL("SELECT cec.page_id, cec.entry_index, cec.title, ") + shown +
-            sql.SQL(" AS value, cec.model_tag ") + q +
+            sql.SQL(" AS value, cec.model_tag") + extra + sql.SQL(" ") + q +
             sql.SQL(" ORDER BY cec.page_id, cec.entry_index LIMIT %s OFFSET %s"),
             params + (limit, offset))
-        rows = [
-            {"page_id": r[0], "entry_index": r[1], "title": r[2], "value": r[3], "model_tag": r[4]}
-            for r in cur.fetchall()
-        ]
+        rows = []
+        for r in cur.fetchall():
+            row = {"page_id": r[0], "entry_index": r[1], "title": r[2], "value": r[3], "model_tag": r[4]}
+            if with_dates:
+                row.update(date_iso=r[5], date_status=r[6], date_est_from=r[7], date_est_to=r[8])
+            rows.append(row)
     return rows, total
 
 

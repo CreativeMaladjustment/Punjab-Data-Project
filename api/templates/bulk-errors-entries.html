@@ -23,13 +23,13 @@
     · <a href="{{ url_for('bulk_errors', field=back_field) }}">← back to bulk errors</a>
   </p>
   <table class="ent">
-    <tr><th>Page</th><th>#</th><th>Title</th>{% if field != 'title' %}<th>{{ field }}</th>{% endif %}<th>Source</th><th>Open</th></tr>
+    <tr><th>Page</th><th>#</th><th>Title</th>{% if field != 'title' %}<th>{{ field }}</th>{% endif %}{% if field == 'date' %}<th>date_iso</th><th>status</th><th>estimated window</th>{% endif %}<th>Source</th><th>Open</th></tr>
     {% for r in rows %}
       <tr>
         <td class="mono">{{ r.page_id }}</td>
         <td class="mono">{{ r.entry_index + 1 }}</td>
         <td>{{ r.title or '—' }}</td>
-        {% if field != 'title' %}<td>{{ r.value }}</td>{% endif %}
+        {% if field != 'title' %}<td>{{ r.value or '—' }}</td>{% endif %}{% if field == 'date' %}<td class="mono">{{ r.date_iso or '—' }}</td><td class="mono">{{ r.date_status }}</td><td class="mono">{% if r.date_est_from %}{{ r.date_est_from }} → {{ r.date_est_to }}{% else %}—{% endif %}</td>{% endif %}
         <td class="mono">{{ r.model_tag }}</td>
         <td class="mono">
           <a href="{{ url_for('qc_canonical_page', page_id=r.page_id) }}">parsed</a> ·

@@ -36,6 +36,7 @@
     {% endfor %}
     <a class="tab {{ 'on' if field == 'title_junk' else '' }}" href="{{ url_for('bulk_errors', field='title_junk') }}">title errors</a>
     <a class="tab {{ 'on' if field == 'price_junk' else '' }}" href="{{ url_for('bulk_errors', field='price_junk') }}">price errors</a>
+    <a class="tab {{ 'on' if field == 'date_junk' else '' }}" href="{{ url_for('bulk_errors', field='date_junk') }}">date errors</a>
   </div>
 
   {% if field in junk_tabs %}
@@ -56,7 +57,7 @@
         <tr><th>{{ junk_column|capitalize }} as extracted</th><th class="num">Count</th></tr>
         {% for t in values %}
           <tr>
-            <td>{{ t.value }}</td>
+            <td>{{ t.value or '(empty)' }}</td>
             <td class="num"><a href="{{ url_for('bulk_errors_entries', col=junk_column, exact=t.value) }}">{{ '{:,}'.format(t.n) }}</a></td>
           </tr>
         {% endfor %}

@@ -1,0 +1,72 @@
+name: Vacuum full (reclaim dead space)
+
+# Rewrites every public table into a compact file (VACUUM FULL) to give dead space back
+# to the OS. Deletes no data. Runs scripts/cleanup_db/phase3_reclaim_space.sql.
+#
+# Each table is locked exclusively while it is rewritten, and needs free room about the
+# size of its LIVE data for the rewrite (tables go smallest-first so each frees room for
+# the next). Run it while nothing else is writing. Dry run (default) only prints stats.
+# Uses the session-mode pooler (port 5432); the scripts rely on session settings.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (print table sizes and dead rows only)"
+        type: boolean
+        default: true
+      confirm:
+        description: 'Type VACUUM to run for real'
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vacuum-full-database
+  cancel-in-progress: false
+
+jobs:
+  vacuum:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    environment: b2-upload
+    steps:
+      - name: Guard
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [[ "$DRY_RUN" != "true" && "$CONFIRM" != "VACUUM" ]]; then
+            echo "::error::Type VACUUM in confirm to run for real."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Vacuum full
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_BACKUP_URL || secrets.SUPABASE_DB_URL }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -o pipefail
+          if [[ "$DB_URL" == *":6543"* ]]; then
+            echo "Transaction-pooler URL detected; using the session pooler (port 5432)."
+            DB_URL="${DB_URL/:6543/:5432}"
+          fi
+          size_sql="select pg_size_pretty(sum(pg_total_relation_size(c.oid))) as public_schema_size from pg_class c where c.relkind = 'r' and c.relnamespace = 'public'::regnamespace"
+          {
+            echo "== Public schema size BEFORE =="
+            psql "$DB_URL" -X -v ON_ERROR_STOP=1 -c "$size_sql"
+            psql "$DB_URL" -X -v ON_ERROR_STOP=1 -v dry_run="$DRY_RUN" -f scripts/cleanup_db/phase3_reclaim_space.sql
+            if [[ "$DRY_RUN" != "true" ]]; then
+              echo "== Public schema size AFTER =="
+              psql "$DB_URL" -X -v ON_ERROR_STOP=1 -c "$size_sql"
+            fi
+          } | tee out.txt
+          { echo "## Vacuum full (dry_run=$DRY_RUN)"; echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

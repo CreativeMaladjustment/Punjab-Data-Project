@@ -1,0 +1,85 @@
+name: Trim llm_extractions.raw_text (free space)
+
+# llm_extractions.raw_text (the model's raw response string, kept per attempt) holds
+# most of that table's space but is not part of the canonical layer. This sets it to
+# NULL - rows, statuses, parsed entries and the canonical tables are untouched - then
+# VACUUM FULLs the table so the space is returned. Dry run (default) prints how much
+# raw_text there is, by group. Restorable from the pg_dump backup.
+# Uses the session-mode pooler (port 5432); the script relies on session settings.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "non_winners = keep raw_text for canonical winners / human:review / QC-verdict extractions; all = clear everything"
+        type: choice
+        options:
+          - non_winners
+          - all
+        default: non_winners
+      dry_run:
+        description: "Dry run (print sizes only, change nothing)"
+        type: boolean
+        default: true
+      backup_confirmed:
+        description: "I ran 'Back up database' and downloaded/verified the artifact"
+        type: boolean
+        default: false
+      confirm:
+        description: 'Type TRIM to run for real'
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vacuum-full-database
+  cancel-in-progress: false
+
+jobs:
+  trim:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    environment: b2-upload
+    steps:
+      - name: Guard
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          BACKUP_OK: ${{ inputs.backup_confirmed }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          if [[ "$DRY_RUN" != "true" ]]; then
+            [[ "$BACKUP_OK" == "true" ]] || { echo "::error::Tick backup_confirmed (run 'Back up database' first)."; exit 1; }
+            [[ "$CONFIRM" == "TRIM" ]] || { echo "::error::Type TRIM in confirm to run for real."; exit 1; }
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Trim raw_text
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_BACKUP_URL || secrets.SUPABASE_DB_URL }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          set -o pipefail
+          if [[ "$DB_URL" == *":6543"* ]]; then
+            echo "Transaction-pooler URL detected; using the session pooler (port 5432)."
+            DB_URL="${DB_URL/:6543/:5432}"
+          fi
+          TRIM_ALL=false; [[ "$MODE" == "all" ]] && TRIM_ALL=true
+          size_sql="select pg_size_pretty(sum(pg_total_relation_size(c.oid))) as public_schema_size from pg_class c where c.relkind = 'r' and c.relnamespace = 'public'::regnamespace"
+          {
+            echo "== Public schema size BEFORE =="
+            psql "$DB_URL" -X -v ON_ERROR_STOP=1 -c "$size_sql"
+            psql "$DB_URL" -X -v ON_ERROR_STOP=1 -v dry_run="$DRY_RUN" -v mode="$MODE" -v trim_all="$TRIM_ALL" -f scripts/cleanup_db/trim_raw_text.sql
+            if [[ "$DRY_RUN" != "true" ]]; then
+              echo "== Public schema size AFTER =="
+              psql "$DB_URL" -X -v ON_ERROR_STOP=1 -c "$size_sql"
+            fi
+          } | tee out.txt
+          { echo "## Trim raw_text (mode=$MODE, dry_run=$DRY_RUN)"; echo '```'; cat out.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

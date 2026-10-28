@@ -24,8 +24,9 @@ on:
   # step env further down too -- a schedule event's `inputs` context is
   # empty) carries the same `|| 'llama3.1:8b'` fallback repeated verbatim,
   # reapplying the input's own declared default for a scheduled run.
-  schedule:
-    - cron: "0 2,8,14,20 * * *"
+  # DISABLED (database size limit reached; re-enable by uncommenting the schedule below):
+  # schedule:
+  #   - cron: "0 2,8,14,20 * * *"
   workflow_dispatch:
     inputs:
       text_model:

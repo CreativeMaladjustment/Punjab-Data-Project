@@ -22,7 +22,7 @@ doesn't depend on rows that may be re-run or deleted.
 
 | Object | What it holds |
 |---|---|
-| `page_extractions_canonical` | One row per page: the winning `model_tag`, `priority`, `entry_count`, a copy of the winning `raw_response`, and `extraction_id` (a *provenance hint only* — `ON DELETE SET NULL`, so deleting the source never deletes the canonical copy). |
+| `page_extractions_canonical` | One row per page: the winning `model_tag`, `priority`, `entry_count`, and `extraction_id` (a *provenance hint only* — `ON DELETE SET NULL`, so deleting the source never deletes the canonical copy). |
 | `catalogue_entries_canonical` | A full copy of every entry of the winning extraction (same content columns as `catalogue_entries`) plus `page_id`, `source_extraction_id`, `model_tag`, `priority`, and the derived `date_*` columns (§5). Unique on `(page_id, entry_index)`. |
 | `field_value_map` | Generic value-normalization lookup (§4.1): `field`, `raw_value` → `canonical_value`, one table for every field. |
 | `title_translations` | Original title → English translation, or `is_english = true` (§4.2). |

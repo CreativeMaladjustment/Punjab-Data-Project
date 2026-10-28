@@ -294,7 +294,7 @@ CLAIM_NEXT_PAGE_SQL = """
         FROM candidate
         ON CONFLICT (page_id, model_tag) DO UPDATE SET
             status = 'claimed', claimed_at = now(), error_message = NULL,
-            raw_response = NULL, raw_text = NULL,
+            raw_text = NULL,
             attempt_count = CASE
                 WHEN llm_extractions.status = 'failed' AND llm_extractions.content_failure
                     THEN llm_extractions.attempt_count + 1
@@ -593,13 +593,13 @@ INSERT_ENTRY_SQL = """
 def db_save_extraction_success(page_id, entries, raw_text):
     with db_connection() as conn, conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO llm_extractions (page_id, model, model_tag, status, raw_response, raw_text) "
-            "VALUES (%s, %s, %s, 'success', %s, %s) "
+            "INSERT INTO llm_extractions (page_id, model, model_tag, status, raw_text) "
+            "VALUES (%s, %s, %s, 'success', %s) "
             "ON CONFLICT (page_id, model_tag) DO UPDATE SET "
-            "status = 'success', raw_response = EXCLUDED.raw_response, "
+            "status = 'success', "
             "raw_text = EXCLUDED.raw_text, error_message = NULL, created_at = now() "
             "RETURNING id",
-            (page_id, MODEL, MODEL_TAG, Json(entries), raw_text),
+            (page_id, MODEL, MODEL_TAG, raw_text),
         )
         extraction_id = cur.fetchone()[0]
         cur.execute("DELETE FROM catalogue_entries WHERE extraction_id = %s", (extraction_id,))

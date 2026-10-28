@@ -1,9 +1,10 @@
 name: Translate canonical titles to English
 
 on:
-  schedule:
-    # Run every hour to continuously process pages
-    - cron: "30 * * * *"  # Every hour at :30
+  # DISABLED (database size limit reached; re-enable by uncommenting the schedule below):
+  # schedule:
+  #   # Run every hour to continuously process pages
+  #   - cron: "30 * * * *"  # Every hour at :30
   workflow_dispatch:
     inputs:
       max_batches:

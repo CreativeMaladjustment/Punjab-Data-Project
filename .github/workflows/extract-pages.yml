@@ -41,8 +41,9 @@ on:
   # allow_already_extracted's own declared defaults via `||` so a scheduled
   # run behaves exactly like a default-inputs manual dispatch, not a blank
   # `ollama pull ""`.
-  schedule:
-    - cron: "0 4,10,16,22 * * *"
+  # DISABLED (database size limit reached; re-enable by uncommenting the schedule below):
+  # schedule:
+  #   - cron: "0 4,10,16,22 * * *"
   workflow_dispatch:
     inputs:
       model:

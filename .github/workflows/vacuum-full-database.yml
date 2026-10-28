@@ -1,8 +1,7 @@
 name: Vacuum full (reclaim dead space)
 
 # Rewrites every public table into a compact file (VACUUM FULL) to give dead space back
-# to the OS. Deletes no data. Same script as phase 3 of "Clean up database": see
-# scripts/cleanup_db/phase3_reclaim_space.sql.
+# to the OS. Deletes no data. Runs scripts/cleanup_db/phase3_reclaim_space.sql.
 #
 # Each table is locked exclusively while it is rewritten, and needs free room about the
 # size of its LIVE data for the rewrite (tables go smallest-first so each frees room for
@@ -25,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cleanup-database
+  group: vacuum-full-database
   cancel-in-progress: false
 
 jobs:

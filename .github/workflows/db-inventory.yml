@@ -1,0 +1,30 @@
+name: Database inventory (read-only)
+
+# Prints where database space is going and what is reclaimable without touching the
+# canonical layer. Read-only; safe to run while the database is over its size limit.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: b2-upload
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Run inventory
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          set -o pipefail
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -X -f scripts/db_inventory.sql | tee inventory.txt
+          { echo '## Database inventory'; echo '```'; cat inventory.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

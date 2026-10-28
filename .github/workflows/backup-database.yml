@@ -1,0 +1,78 @@
+name: Back up database (pg_dump)
+
+# Full logical backup of the public schema (all tables, views, functions, triggers
+# and data) as a compressed custom-format dump, kept as a workflow artifact.
+# Restore with:  pg_restore --no-owner --no-privileges -d <target> punjab-db-*.dump
+# Read-only against the database; works even when it is over its size limit.
+
+on:
+  workflow_dispatch:
+    inputs:
+      pg_version:
+        description: "PostgreSQL client version (must be >= the server's major version)"
+        type: string
+        default: "17"
+      retention_days:
+        description: "Days to keep the artifact (max 90 on most plans)"
+        type: number
+        default: 90
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    environment: b2-upload  # where the Supabase secrets live
+    steps:
+      - name: Install matching PostgreSQL client
+        env:
+          PG_VERSION: ${{ inputs.pg_version }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y "postgresql-client-${PG_VERSION}"
+          "/usr/lib/postgresql/${PG_VERSION}/bin/pg_dump" --version
+
+      - name: Dump
+        env:
+          PG_VERSION: ${{ inputs.pg_version }}
+          # Prefer a dedicated session-mode URL; fall back to SUPABASE_DB_URL.
+          DB_URL: ${{ secrets.SUPABASE_DB_BACKUP_URL || secrets.SUPABASE_DB_URL }}
+        run: |
+          set -euo pipefail
+          # pg_dump needs a session-level connection. The transaction pooler (port 6543)
+          # can't hold its snapshot, so use the *session* pooler on the same host (5432).
+          if [[ "$DB_URL" == *":6543"* ]]; then
+            echo "Transaction-pooler URL detected; switching to the session pooler (port 5432)."
+            DB_URL="${DB_URL/:6543/:5432}"
+          fi
+          out="punjab-db-$(date -u +%Y%m%dT%H%M%SZ).dump"
+          "/usr/lib/postgresql/${PG_VERSION}/bin/pg_dump" "$DB_URL" \
+            --schema=public --format=custom --compress=9 \
+            --no-owner --no-privileges --verbose --file="$out"
+          ls -lh "$out"
+          echo "DUMP_FILE=$out" >> "$GITHUB_ENV"
+
+      - name: Verify the dump is readable
+        env:
+          PG_VERSION: ${{ inputs.pg_version }}
+        run: |
+          "/usr/lib/postgresql/${PG_VERSION}/bin/pg_restore" --list "$DUMP_FILE" | tee toc.txt | tail -5
+          echo "TOC entries: $(grep -vc '^;' toc.txt)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Dump size: $(du -h "$DUMP_FILE" | cut -f1)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload backup artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.DUMP_FILE }}
+          path: ${{ env.DUMP_FILE }}
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: error
+          compression-level: 0

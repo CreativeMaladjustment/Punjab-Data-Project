@@ -43,10 +43,10 @@ join llm_extractions l on l.id = ce.extraction_id
 where l.id not in (select extraction_id from page_extractions_canonical where extraction_id is not null)
   and l.model_tag <> 'human:review'
 union all
+select 'llm_extractions.raw_text (all rows)', pg_size_pretty(coalesce(sum(pg_column_size(raw_text)), 0)) from llm_extractions
+union all
 select 'page_ocr_text.raw_text', pg_size_pretty(coalesce(sum(pg_column_size(raw_text)), 0)) from page_ocr_text
 union all
 select 'page_translations', pg_size_pretty(coalesce(sum(pg_column_size(t.*)), 0)) from page_translations t
-union all
-select 'page_extractions_canonical.raw_response (the canonical copy)', pg_size_pretty(coalesce(sum(pg_column_size(raw_response)), 0)) from page_extractions_canonical
 union all
 select 'catalogue_entries_canonical (the canonical copy)', pg_size_pretty(coalesce(sum(pg_column_size(c.*)), 0)) from catalogue_entries_canonical c;

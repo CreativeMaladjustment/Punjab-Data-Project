@@ -34,6 +34,7 @@ viewer that opens every record's source page image.
 | `analysis/integrity/` | Sweeps testing whether the stored record matches its own specification (`INTEGRITY_SWEEP.md`) |
 | `dialectic/` | The method dialogue behind the August decisions. `dead_ends.md` first |
 | `OCR_RESEARCH_AGENDA.md` | Governing document for transcription and extraction |
+| `SUPABASE_STORAGE.md` | How we got under Supabase's free-tier size limit: where the space went, the backup / vacuum / trim workflows, what was dropped or kept, and what to check before turning processing back on |
 | `CANONICAL.md` | The canonical layer: how each page's winning extraction is chosen, the normalization layers (value mapping, title translation, **date parsing**), the review/bulk-errors pages, and open questions |
 | `PLAN.md` / `DECISIONS.md` | Plan of record and the numbered decision log (D-001…) governing every normalization fold and method choice |
 

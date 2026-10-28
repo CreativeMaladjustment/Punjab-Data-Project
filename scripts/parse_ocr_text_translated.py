@@ -174,7 +174,6 @@ def claim_next_awaiting_page(conn):
                 status = 'claimed',
                 claimed_at = now(),
                 error_message = NULL,
-                raw_response = NULL,
                 raw_text = NULL
             RETURNING page_id
         """, (
@@ -191,14 +190,14 @@ def claim_next_awaiting_page(conn):
         return result[0] if result else None
 
 
-def save_extraction(conn, page_id, entries, raw_response):
+def save_extraction(conn, page_id, entries):
     """Save extracted entries to database."""
     with conn.cursor() as cur:
         cur.execute("""
             UPDATE llm_extractions
-            SET status = 'success', raw_response = %s, error_message = NULL
+            SET status = 'success', error_message = NULL
             WHERE page_id = %s AND model_tag = %s
-        """, (Json(raw_response), page_id, MODEL_TAG))
+        """, (page_id, MODEL_TAG))
 
         # Insert catalogue entries
         for idx, entry in enumerate(entries or []):
@@ -283,7 +282,7 @@ def main():
                     continue
 
                 # Save results
-                save_extraction(conn, page_id, entries, {"model": OLLAMA_MODEL, "entries": entries})
+                save_extraction(conn, page_id, entries)
                 pages_processed += 1
                 logger.info(f"Page {page_id}: extracted {len(entries or [])} entries")
 

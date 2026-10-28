@@ -1201,7 +1201,7 @@ def apply_qc_verdict(conn, extraction_id, verdict, note, needs_review=False, not
             # -- see scripts/extract_with_llm.py -- so the existing worker
             # loop picks the page back up and retries on its own next
             # scheduled run; no new pipeline logic needed.
-            # raw_response/raw_text/attempt_count are left untouched so the
+            # raw_text/attempt_count are left untouched so the
             # previous (wrong) output stays visible for comparison once
             # the retry completes.
             cur.execute(

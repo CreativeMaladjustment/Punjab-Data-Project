@@ -53,10 +53,10 @@ STATUS_BY_MODEL_SQL = """
         le.model_tag,
         count(*) as total_attempted,
         count(*) filter (
-            where le.status = 'success' and coalesce(jsonb_array_length(le.raw_response), 0) > 0
+            where le.status = 'success' and exists (select 1 from catalogue_entries ce where ce.extraction_id = le.id)
         ) as success_with_entries,
         count(*) filter (
-            where le.status = 'success' and coalesce(jsonb_array_length(le.raw_response), 0) = 0
+            where le.status = 'success' and not exists (select 1 from catalogue_entries ce where ce.extraction_id = le.id)
         ) as success_empty,
         count(*) filter (
             where le.status = 'claimed' and le.claimed_at >= now() - %(claim_timeout)s * interval '1 second'

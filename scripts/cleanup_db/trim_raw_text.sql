@@ -1,9 +1,9 @@
 -- Free the space held by llm_extractions.raw_text: the model's raw response string,
 -- stored per attempt (added in 20260911120000). It is not copied into the canonical
--- tables (they keep the parsed raw_response / entries) and is only used for display on
+-- tables (they keep the parsed entries) and is only used for display on
 -- the QC review page and by scripts/audit_ditto_marks.py.
 --
--- Sets raw_text to NULL (rows, statuses, parsed raw_response and entries are untouched),
+-- Sets raw_text to NULL (rows, statuses and entries are untouched),
 -- then VACUUM FULL rewrites llm_extractions so the space is returned to the OS.
 -- psql variables:
 --   dry_run  true|false

@@ -13,6 +13,10 @@ without hitting the wall again. Figures are from the public schema
   its `schedule:` block commented out (`extract-pages`, `extract-pages-gemini`,
   `parse-ocr-text`, `detect-languages`, `translate-canonical-titles`). Re-enable by
   uncommenting them — but see §6 first.
+- The two **translation** workflows (`detect-languages`, `translate-canonical-titles`) were
+  re-enabled afterwards (28 Oct): they only add small rows (`page_translations`,
+  `page_detected_languages`, `title_translations`), so growth is slow. Check the size with the
+  inventory workflow now and then. The extraction and OCR-parse schedules are still off.
 
 ## 2. Where the space was
 
